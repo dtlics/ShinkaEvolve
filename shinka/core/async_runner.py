@@ -650,39 +650,36 @@ class ShinkaEvolveRunner:
         except Exception:
             memory_gb = 8  # Default assumption
 
-        # Conservative approach: don't exceed CPU count for total active threads
-        # Formula: evaluation_jobs + proposal_jobs + db_workers + overhead <= cpu_count * 1.5
-        max_total_threads = int(cpu_count * 1.5)  # Allow some oversubscription
-
         # Memory-based constraints (each concurrent job can use ~200-500MB)
         memory_based_limit = max(1, int(memory_gb * 2))  # Conservative: 2 jobs per GB
 
-        # Apply individual limits based on CPU and memory
+        # Evaluation jobs are CPU-bound (running candidate code) — clamp to cpu_count.
+        # Proposal jobs are network-bound (waiting on LLM HTTP responses, often
+        # multiple minutes per call) — they don't need a CPU core each, only a
+        # bit of memory and an HTTP socket. So we don't clamp them to cpu_count.
+        # DB workers are mostly I/O-bound.
         max_evaluation_jobs = min(max_evaluation_jobs, cpu_count, memory_based_limit)
-        max_proposal_jobs = min(
-            max_proposal_jobs, max(1, cpu_count // 2), memory_based_limit // 2
-        )
+        max_proposal_jobs = min(max_proposal_jobs, memory_based_limit)
         max_db_workers = min(
             max_db_workers, max(1, cpu_count // 2), 8
         )  # DB workers are less memory intensive
 
-        # Check total thread usage
-        total_threads = max_evaluation_jobs + max_proposal_jobs + max_db_workers
+        # CPU-bound thread budget (eval + db; proposal jobs excluded since they
+        # mostly sleep on HTTP). Allow modest oversubscription.
+        max_cpu_threads = int(cpu_count * 1.5)
+        cpu_threads = max_evaluation_jobs + max_db_workers
 
-        if total_threads > max_total_threads:
-            # Scale down proportionally while maintaining minimums
-            scale_factor = max_total_threads / total_threads
-
+        if cpu_threads > max_cpu_threads:
+            scale_factor = max_cpu_threads / cpu_threads
             max_evaluation_jobs = max(1, int(max_evaluation_jobs * scale_factor))
-            max_proposal_jobs = max(1, int(max_proposal_jobs * scale_factor))
             max_db_workers = max(1, int(max_db_workers * scale_factor))
 
             if self.verbose:
                 logger.warning(
-                    f"⚠️  Scaled down concurrency settings to fit {cpu_count} CPU cores:"
+                    f"⚠️  Scaled down CPU-bound concurrency to fit {cpu_count} CPU cores:"
                 )
                 logger.warning(
-                    f"   Total threads: {total_threads} → {max_evaluation_jobs + max_proposal_jobs + max_db_workers}"
+                    f"   eval+db threads: {cpu_threads} → {max_evaluation_jobs + max_db_workers}"
                 )
 
         if self.verbose:

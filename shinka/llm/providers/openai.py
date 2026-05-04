@@ -20,6 +20,50 @@ def backoff_handler(details):
         )
 
 
+def _extract_message_text(response) -> str:
+    """Iterate response.output and return text from the first 'message' item.
+
+    The /v1/responses endpoint returns a list of output items mixing
+    'reasoning' (no `.content`, has `.summary`) and 'message' (has `.content`)
+    types. Reasoning models typically emit one of each, in either order, but
+    can also emit:
+      - reasoning-only (model exhausted output budget on reasoning),
+      - multiple reasoning items,
+      - a single message (non-reasoning models).
+    The previous implementation hard-coded `output[0]` then `output[1]` as
+    fallbacks, which IndexError'd on reasoning-only or single-item responses.
+    Iterating safely is the correct shape.
+    """
+    for item in response.output:
+        if getattr(item, "type", None) == "message":
+            content = getattr(item, "content", None)
+            if content:
+                first = content[0]
+                text = getattr(first, "text", None)
+                if text is not None:
+                    return text
+    types = [getattr(item, "type", "?") for item in response.output]
+    raise ValueError(
+        f"Response has no 'message' item with text content; output items={types}. "
+        f"Most common cause: reasoning model exhausted its output token budget "
+        f"on reasoning before producing a message. Increase max_output_tokens "
+        f"or lower reasoning_effort."
+    )
+
+
+def _extract_thought_text(response) -> str:
+    """Return the first 'reasoning' item's summary text, or '' if absent."""
+    for item in response.output:
+        if getattr(item, "type", None) == "reasoning":
+            summary = getattr(item, "summary", None)
+            if summary:
+                first = summary[0]
+                text = getattr(first, "text", None)
+                if text:
+                    return text
+    return ""
+
+
 def get_openai_costs(response, model):
     # Get token counts and costs
     in_tokens = response.usage.input_tokens
@@ -97,16 +141,8 @@ def query_openai(
             ],
             **kwargs,
         )
-        try:
-            content = response.output[0].content[0].text
-        except Exception:
-            # Reasoning models - ResponseOutputMessage
-            content = response.output[1].content[0].text
-
-        try:
-            thought = response.output[0].summary[0].text
-        except Exception:
-            pass
+        content = _extract_message_text(response)
+        thought = _extract_thought_text(response)
         new_msg_history.append({"role": "assistant", "content": content})
     else:
         response = client.responses.parse(
@@ -177,15 +213,8 @@ async def query_openai_async(
             ],
             **kwargs,
         )
-        try:
-            content = response.output[0].content[0].text
-        except Exception:
-            # Reasoning models - ResponseOutputMessage
-            content = response.output[1].content[0].text
-        try:
-            thought = response.output[0].summary[0].text
-        except Exception:
-            pass
+        content = _extract_message_text(response)
+        thought = _extract_thought_text(response)
         new_msg_history.append({"role": "assistant", "content": content})
     else:
         response = await client.responses.parse(

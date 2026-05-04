@@ -1,4 +1,4 @@
-TIMEOUT = 1200
+TIMEOUT = 3600  # 60 min — gpt-5.4-pro at reasoning_effort=high can think >20 min on hard problems
 BACKOFF_MAX_TRIES = 20
 BACKOFF_MAX_VALUE = 20
 BACKOFF_MAX_TIME_MULTIPLIER = 5

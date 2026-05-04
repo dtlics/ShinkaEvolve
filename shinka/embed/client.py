@@ -84,9 +84,14 @@ def get_client_embed(model_name: str) -> Tuple[Any, str]:
     if provider == "openai":
         client = openai.OpenAI(timeout=TIMEOUT)
     elif provider == "azure":
+        # NB: AZURE_API_VERSION (e.g. 'preview') is set by users for the chat
+        # /responses endpoint. Azure's embeddings endpoint does not exist on
+        # 'preview' — only on stable api-versions. Use AZURE_EMBEDDING_API_VERSION
+        # if set, otherwise default to a known-good stable version.
+        embed_api_version = os.getenv("AZURE_EMBEDDING_API_VERSION", "2024-10-21")
         client = openai.AzureOpenAI(
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version=os.getenv("AZURE_API_VERSION"),
+            api_version=embed_api_version,
             azure_endpoint=os.getenv("AZURE_API_ENDPOINT"),
             timeout=TIMEOUT,
         )
@@ -118,9 +123,12 @@ def get_async_client_embed(model_name: str) -> Tuple[Any, str]:
     if provider == "openai":
         client = openai.AsyncOpenAI()
     elif provider == "azure":
+        # See note in get_client_embed: embeddings need a stable api-version,
+        # distinct from AZURE_API_VERSION which serves the chat /responses path.
+        embed_api_version = os.getenv("AZURE_EMBEDDING_API_VERSION", "2024-10-21")
         client = openai.AsyncAzureOpenAI(
             api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version=os.getenv("AZURE_API_VERSION"),
+            api_version=embed_api_version,
             azure_endpoint=os.getenv("AZURE_API_ENDPOINT"),
         )
     elif provider == "google":

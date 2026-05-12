@@ -3599,10 +3599,22 @@ class ShinkaEvolveRunner:
                 db_path=db_path,
             )
 
-            # Phase D wires only apply_patch as a tool. read_host_file
-            # and query_evolution_db can be enabled by future config
-            # surfaces (see AGENTIC_REWRITE.md "Phase F").
-            tools = select_shinka_tools(["apply_patch"], tool_ctx)
+            # Pick the agentic tool subset from the config. Default
+            # is just apply_patch; tasks can widen via the YAML's
+            # agentic_tools list. We tolerate unknown names by
+            # logging-and-skipping rather than crashing the run.
+            requested_tools = list(
+                getattr(self.evo_config, "agentic_tools", ["apply_patch"])
+            ) or ["apply_patch"]
+            try:
+                tools = select_shinka_tools(requested_tools, tool_ctx)
+            except KeyError as tool_err:
+                logger.warning(
+                    "[agent] requested tool not registered (%s); "
+                    "falling back to apply_patch only.",
+                    tool_err,
+                )
+                tools = select_shinka_tools(["apply_patch"], tool_ctx)
 
             response = await self.llm.run_agent(
                 msg=patch_msg,

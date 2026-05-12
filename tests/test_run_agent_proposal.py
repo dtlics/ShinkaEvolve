@@ -283,6 +283,121 @@ def test_tools_list_contains_apply_patch(tmp_path: Path) -> None:
     assert _apply_patch_tool in tools
 
 
+def test_agentic_tools_config_widens_tool_set(tmp_path: Path) -> None:
+    """When evo_config.agentic_tools includes additional names, the
+    agent gets those tools too. Verifies the per-task widening
+    surface."""
+    runner = _build_stub_runner(tmp_path)
+    runner.evo_config.agentic_tools = [
+        "apply_patch",
+        "read_host_file",
+        "query_evolution_db",
+    ]
+
+    captured: dict = {}
+
+    async def capture(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return None
+
+    runner.llm.run_agent = AsyncMock(side_effect=capture)
+
+    asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=20,
+        )
+    )
+    tools = captured.get("tools") or []
+    from shinka.llm.agent.tools.apply_patch import _apply_patch_tool
+    from shinka.llm.agent.tools.read_file import _read_host_file_tool
+    from shinka.llm.agent.tools.query_db import _query_evolution_db_tool
+
+    assert _apply_patch_tool in tools
+    assert _read_host_file_tool in tools
+    assert _query_evolution_db_tool in tools
+
+
+def test_unknown_agentic_tool_falls_back_to_apply_patch_only(
+    tmp_path: Path,
+) -> None:
+    """Misconfiguration (typo in tool name) shouldn't crash a run —
+    we fall back to apply_patch only and warn."""
+    runner = _build_stub_runner(tmp_path)
+    runner.evo_config.agentic_tools = ["apply_patch", "no_such_tool"]
+
+    captured: dict = {}
+
+    async def capture(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return None
+
+    runner.llm.run_agent = AsyncMock(side_effect=capture)
+
+    result = asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=21,
+        )
+    )
+    # No crash; the run proceeded with the fallback tool set.
+    assert result is not None
+    tools = captured.get("tools") or []
+    from shinka.llm.agent.tools.apply_patch import _apply_patch_tool
+
+    assert _apply_patch_tool in tools
+    # The bogus tool was filtered out.
+    assert len(tools) == 1
+
+
+def test_agentic_tools_empty_list_falls_back_to_apply_patch(
+    tmp_path: Path,
+) -> None:
+    """A user setting agentic_tools=[] in YAML shouldn't disable the
+    agent entirely (it would be a useless run); fall back to
+    apply_patch only."""
+    runner = _build_stub_runner(tmp_path)
+    runner.evo_config.agentic_tools = []
+
+    captured: dict = {}
+
+    async def capture(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return None
+
+    runner.llm.run_agent = AsyncMock(side_effect=capture)
+
+    asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=22,
+        )
+    )
+    tools = captured.get("tools") or []
+    from shinka.llm.agent.tools.apply_patch import _apply_patch_tool
+
+    assert _apply_patch_tool in tools
+    assert len(tools) == 1
+
+
+def test_agentic_tools_default_is_apply_patch_only() -> None:
+    """The config default must be ``["apply_patch"]`` so the agentic
+    path is opt-in *and* the default tool surface is conservative."""
+    from shinka.core.config import EvolutionConfig
+
+    config = EvolutionConfig()
+    assert config.agentic_tools == ["apply_patch"]
+
+
 def test_config_flag_default_routes_to_legacy() -> None:
     """The feature flag must default to False so existing experiments
     continue to use _run_patch_async without opt-in."""

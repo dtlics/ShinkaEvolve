@@ -63,6 +63,18 @@ class EvolutionConfig:
     # experiments don't change behavior without opt-in.
     use_agentic_proposer: bool = False
 
+    # Tools exposed to the agent when use_agentic_proposer=True.
+    # Default is just ``apply_patch`` for parity with the legacy
+    # path (which only mutates code; eval and DB inspection happen
+    # outside the proposal). Add ``read_host_file`` to let the agent
+    # peek at other files in the task directory, ``query_evolution_db``
+    # to read past generation history, ``web_search`` to enable
+    # OpenAI/Azure server-side web search (incurs per-call $0.01-0.03
+    # plus content-token cost). ``evaluate`` is registered but
+    # requires the orchestrator to bind an evaluator callable to
+    # ``ShinkaToolContext.evaluator`` — not yet wired in Phase D.
+    agentic_tools: List[str] = field(default_factory=lambda: ["apply_patch"])
+
     # Meta-prompt evolution settings.
     evolve_prompts: bool = False
     prompt_patch_types: List[str] = field(default_factory=default_prompt_patch_types)

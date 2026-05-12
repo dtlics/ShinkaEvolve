@@ -4454,12 +4454,23 @@ class ShinkaEvolveRunner:
             if current_sys_prompt:
                 self.prompt_sampler.task_sys_msg = current_sys_prompt
 
+            # Phase 6 of research-grounding: route the deep-research brief
+            # for this parent's island into the sampler. The brief gates the
+            # literature_grounded arm (suppressed when no grounded items)
+            # AND, when an item is picked, renders the reference into the
+            # user prompt verbatim. Unrelated patch types ignore the brief.
+            island_brief = None
+            if self.evo_config.enable_literature_grounded:
+                island_idx = getattr(parent_program, "island_idx", None)
+                island_brief = self.dr_briefs_by_island.get(island_idx)
+
             # Generate patch prompt
             patch_sys, patch_msg, patch_type = self.prompt_sampler.sample(
                 parent=parent_program,
                 archive_inspirations=archive_programs,
                 top_k_inspirations=top_k_programs,
                 meta_recommendations=meta_recs,
+                island_brief=island_brief,
             )
 
             # Restore original task_sys_msg
@@ -4472,6 +4483,45 @@ class ShinkaEvolveRunner:
                 logger.info(f"Generated patch type: {patch_type}")
                 if current_prompt_id:
                     logger.info(f"Using evolved prompt: {current_prompt_id[:8]}...")
+
+            # Phase 6b: when the literature_grounded arm fires, attach the
+            # bounded web tools to this proposer call. Tools live ONLY on
+            # this arm -- every other arm keeps the existing tool-less
+            # behavior. Budgets come from EvolutionConfig.
+            lit_tools = None
+            lit_tool_budget = None
+            lit_tool_context: Dict[str, Any] = {}
+            if patch_type == "literature_grounded":
+                from shinka.llm.tools import (
+                    ToolBudget,
+                    URLFetchCache,
+                    WebFetchTool,
+                    WebSearchTool,
+                )
+
+                db_path = (
+                    getattr(self.db.config, "db_path", None)
+                    if getattr(self, "db", None) is not None
+                    else None
+                )
+                lit_tools = [WebSearchTool(), WebFetchTool()]
+                lit_tool_budget = ToolBudget(
+                    max_searches=int(
+                        self.evo_config.literature_grounded_max_searches or 0
+                    ),
+                    max_fetches=int(
+                        self.evo_config.literature_grounded_max_fetches or 0
+                    ),
+                    max_shell=0,
+                    max_turns=int(
+                        self.evo_config.literature_grounded_max_turns or 6
+                    ),
+                )
+                lit_tool_context = {
+                    "url_fetch_cache": URLFetchCache(db_path=db_path)
+                    if db_path
+                    else URLFetchCache(),
+                }
 
             total_costs = 0.0
             msg_history = []
@@ -4492,6 +4542,17 @@ class ShinkaEvolveRunner:
                     msg_history=msg_history,
                     model_sample_probs=model_sample_probs,
                     model_posterior=model_posterior,
+                    tools=lit_tools,
+                    tool_budget=lit_tool_budget,
+                    tool_context=lit_tool_context or None,
+                    call_metadata={
+                        "purpose": (
+                            "lit_grounded"
+                            if patch_type == "literature_grounded"
+                            else "proposer"
+                        ),
+                        "patch_type": patch_type,
+                    },
                 )
 
                 if not response or not response.content:

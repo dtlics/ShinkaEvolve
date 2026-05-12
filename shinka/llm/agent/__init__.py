@@ -10,8 +10,10 @@ from .background_model import (
     BackgroundOpenAIResponsesModel,
     BackgroundPollTimeout,
 )
+from .robust_runner import RobustRunner
 
 __all__ = [
     "BackgroundOpenAIResponsesModel",
     "BackgroundPollTimeout",
+    "RobustRunner",
 ]

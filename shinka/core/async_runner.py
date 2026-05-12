@@ -29,13 +29,14 @@ from shinka.database.prompt_dbase import (
     create_system_prompt,
 )
 from shinka.llm import (
-    AsyncLLMClient,
+    AsyncLLMClient,  # legacy: kept available for fallback during migration
     extract_between,
     BanditBase,
     FixedSampler,
     AsymmetricUCB,
     ThompsonSampler,
 )
+from shinka.llm.agent import AgentLLMClient
 from shinka.embed import AsyncEmbeddingClient
 from shinka.launch import JobScheduler, JobConfig, LocalJobConfig
 from shinka.edit.async_apply import (
@@ -380,8 +381,12 @@ class ShinkaEvolveRunner:
         self.db = None
         self.async_db = None
 
-        # LLM clients
-        self.llm = AsyncLLMClient(
+        # LLM clients. AgentLLMClient is the new agents-SDK-backed
+        # adapter; it preserves AsyncLLMClient's public surface, so the
+        # rest of this orchestrator is unchanged. For Azure/OpenAI it
+        # routes through background-mode polling + fresh-client retry;
+        # for other providers it falls back to the legacy code path.
+        self.llm = AgentLLMClient(
             model_names=evo_config.llm_models,
             **evo_config.llm_kwargs,
         )
@@ -412,7 +417,7 @@ class ShinkaEvolveRunner:
         # Meta summarizer (create both sync and async versions)
         if evo_config.meta_rec_interval and evo_config.meta_llm_models:
             # Create async LLM client for meta analysis
-            async_meta_llm = AsyncLLMClient(
+            async_meta_llm = AgentLLMClient(
                 model_names=evo_config.meta_llm_models or evo_config.llm_models,
                 **evo_config.meta_llm_kwargs,
             )
@@ -434,7 +439,7 @@ class ShinkaEvolveRunner:
 
         # Novelty judge
         if evo_config.novelty_llm_models:
-            novelty_llm = AsyncLLMClient(
+            novelty_llm = AgentLLMClient(
                 model_names=evo_config.novelty_llm_models,
                 **evo_config.novelty_llm_kwargs,
             )
@@ -466,7 +471,7 @@ class ShinkaEvolveRunner:
         # Initialize prompt evolution LLM client if enabled
         if evo_config.evolve_prompts:
             prompt_llm_models = evo_config.prompt_llm_models or evo_config.llm_models
-            self.prompt_llm = AsyncLLMClient(
+            self.prompt_llm = AgentLLMClient(
                 model_names=prompt_llm_models,
                 **evo_config.prompt_llm_kwargs,
             )

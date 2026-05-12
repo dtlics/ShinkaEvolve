@@ -510,6 +510,431 @@ def test_dr_summarizer_novelty_check_skips_without_embed_hook():
     assert cost == 0.0
 
 
+# ---------------------------------------------------------------------------
+# Phase 5c: BriefCache + Stage C + Stage D + run_pipeline
+# ---------------------------------------------------------------------------
+
+
+from shinka.core.deep_research_summarizer import BriefCache, _parse_brief_response  # noqa: E402
+
+
+def _build_dr_db(tmp_path: Path) -> str:
+    """Create a DR-table-ready DB and return its path."""
+    db_path = tmp_path / "dr.db"
+    db = ProgramDatabase(
+        config=DatabaseConfig(db_path=str(db_path), num_islands=1),
+        embedding_model="",
+    )
+    try:
+        return str(db_path)
+    finally:
+        db.close()
+
+
+def test_parse_brief_response_returns_normalized_dict():
+    raw = """```json
+    {
+      "summary": "lr scheduling family",
+      "items": [
+        {
+          "idea": "cosine",
+          "rationale": "smooth decay",
+          "reference_snippet": "for step in range(...)",
+          "source": "https://arxiv.org/abs/x",
+          "gotchas": ""
+        }
+      ]
+    }
+    ```"""
+    parsed = _parse_brief_response(raw)
+    assert parsed["summary"] == "lr scheduling family"
+    assert len(parsed["items"]) == 1
+    assert parsed["items"][0]["idea"] == "cosine"
+    assert parsed["items"][0]["source"].startswith("https://")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [None, "", "no json", "{not valid"],
+)
+def test_parse_brief_response_returns_empty_on_garbage(raw):
+    parsed = _parse_brief_response(raw)
+    assert parsed == {"summary": "", "items": []}
+
+
+def test_brief_cache_store_and_lookup_round_trip(tmp_path: Path):
+    db_path = _build_dr_db(tmp_path)
+    cache = BriefCache(db_path=db_path, similarity_threshold=0.95)
+
+    brief = IslandBrief(
+        island_idx=2,
+        summary="LR scheduling family",
+        items=[BriefItem(idea="cosine", rationale="smooth decay")],
+        direction_summary="learning-rate scheduling",
+        drift_score=0.7,
+        source_query_embedding=[1.0, 0.0, 0.0],
+        generation=10,
+        model_used="o3-deep-research",
+        cost=4.2,
+    )
+    cache.store(brief)
+
+    # Exact-match lookup
+    hit = cache.lookup([1.0, 0.0, 0.0])
+    assert hit is not None
+    assert hit.summary == "LR scheduling family"
+    assert hit.cached is True
+    assert hit.items[0].idea == "cosine"
+
+    # Below-threshold lookup misses
+    miss = cache.lookup([0.0, 1.0, 0.0])
+    assert miss is None
+
+
+def test_brief_cache_lookup_returns_closest_above_threshold(tmp_path: Path):
+    db_path = _build_dr_db(tmp_path)
+    cache = BriefCache(db_path=db_path, similarity_threshold=0.95)
+
+    near = IslandBrief(
+        island_idx=0,
+        summary="near",
+        direction_summary="x",
+        source_query_embedding=[1.0, 0.05, 0.0],
+        items=[BriefItem(idea="near", rationale="x")],
+    )
+    far = IslandBrief(
+        island_idx=1,
+        summary="far",
+        direction_summary="y",
+        source_query_embedding=[0.0, 1.0, 0.0],
+        items=[BriefItem(idea="far", rationale="x")],
+    )
+    cache.store(near)
+    cache.store(far)
+
+    # Query close to ``near`` -> picks near
+    hit = cache.lookup([1.0, 0.04, 0.0])
+    assert hit is not None
+    assert hit.summary == "near"
+
+
+def test_brief_cache_handles_missing_db(tmp_path: Path):
+    cache = BriefCache(db_path=None, similarity_threshold=0.95)
+    brief = IslandBrief(
+        island_idx=0,
+        summary="x",
+        direction_summary="y",
+        source_query_embedding=[1.0],
+        items=[],
+    )
+    # No-op store / lookup; doesn't raise.
+    cache.store(brief)
+    assert cache.lookup([1.0]) is None
+    cache.increment_hits([1.0])
+
+
+def test_brief_cache_increment_hits_bumps_counter(tmp_path: Path):
+    db_path = _build_dr_db(tmp_path)
+    cache = BriefCache(db_path=db_path, similarity_threshold=0.95)
+    cache.store(
+        IslandBrief(
+            island_idx=0,
+            summary="x",
+            direction_summary="y",
+            source_query_embedding=[1.0, 0.0],
+            items=[],
+        )
+    )
+    cache.increment_hits([1.0, 0.0])
+    cache.increment_hits([0.99, 0.05])  # within threshold
+    cache.increment_hits([0.0, 1.0])  # orthogonal -> below threshold
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT hits FROM dr_brief_cache LIMIT 1"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row[0] == 2
+
+
+def test_summarizer_deep_research_parses_and_returns_brief():
+    import asyncio as _asyncio
+
+    async def _drift_llm(*_args, **_kwargs):
+        return ("{}", 0.0)
+
+    captured: Dict[str, Any] = {}
+
+    async def _dr_call(sys_msg, user_msg):
+        captured["user"] = user_msg
+        return (
+            '{"summary":"x","items":[{"idea":"a","rationale":"b"}]}',
+            5.5,
+            "o3-deep-research",
+        )
+
+    summ = DeepResearchSummarizer(
+        drift_llm=_drift_llm,
+        dr_call=_dr_call,
+        allowed_domains=["github.com"],
+    )
+    brief, cost, model_used = _asyncio.run(
+        summ.deep_research(
+            task_description="evolve circle packing",
+            direction_summary="LR scheduling",
+        )
+    )
+    assert brief["summary"] == "x"
+    assert len(brief["items"]) == 1
+    assert brief["items"][0]["idea"] == "a"
+    assert cost == pytest.approx(5.5)
+    assert model_used == "o3-deep-research"
+    assert "evolve circle packing" in captured["user"]
+    assert "LR scheduling" in captured["user"]
+    assert "github.com" in captured["user"]
+
+
+def test_summarizer_deep_research_returns_empty_when_no_hook():
+    import asyncio as _asyncio
+
+    async def _drift_llm(*_args, **_kwargs):
+        return ("{}", 0.0)
+
+    summ = DeepResearchSummarizer(drift_llm=_drift_llm)
+    brief, cost, model_used = _asyncio.run(
+        summ.deep_research(task_description="t", direction_summary="d")
+    )
+    assert brief == {"summary": "", "items": []}
+    assert cost == 0.0
+    assert model_used is None
+
+
+def test_summarizer_code_ground_fills_sources(monkeypatch):
+    import asyncio as _asyncio
+
+    async def _drift_llm(*_args, **_kwargs):
+        return ("{}", 0.0)
+
+    async def _ground_call(sys_msg, user_msg, items):
+        # Grounder fills in source + snippet.
+        return (
+            '{"summary":"sum","items":[{"idea":"cosine","rationale":"r",'
+            '"reference_snippet":"snip","source":"https://arxiv.org/abs/x"}]}',
+            0.3,
+            "gpt-5",
+        )
+
+    summ = DeepResearchSummarizer(
+        drift_llm=_drift_llm, ground_call=_ground_call
+    )
+    grounded, cost, model_used = _asyncio.run(
+        summ.code_ground(
+            brief={
+                "summary": "sum",
+                "items": [
+                    {
+                        "idea": "cosine",
+                        "rationale": "r",
+                        "reference_snippet": "",
+                        "source": "",
+                        "gotchas": "",
+                    }
+                ],
+            }
+        )
+    )
+    assert grounded["items"][0]["source"].startswith("https://")
+    assert grounded["items"][0]["reference_snippet"] == "snip"
+    assert cost == pytest.approx(0.3)
+
+
+def test_summarizer_code_ground_falls_back_to_input_on_empty_response():
+    import asyncio as _asyncio
+
+    async def _drift_llm(*_args, **_kwargs):
+        return ("{}", 0.0)
+
+    async def _ground_call(sys_msg, user_msg, items):
+        # Empty payload from the grounder -> caller keeps original brief
+        return ("{}", 0.1, "gpt-5")
+
+    summ = DeepResearchSummarizer(
+        drift_llm=_drift_llm, ground_call=_ground_call
+    )
+    original = {
+        "summary": "sum",
+        "items": [{"idea": "cosine", "rationale": "r"}],
+    }
+    grounded, cost, _ = _asyncio.run(summ.code_ground(brief=original))
+    assert grounded == original
+    assert cost == pytest.approx(0.1)
+
+
+# --- run_pipeline orchestration --------------------------------------------
+
+
+def _pipeline_stubs(*, drift_score: float):
+    """Build a set of stubs that return canned content at each stage."""
+    calls = {"stage_a": 0, "stage_b_lookup": 0, "stage_c": 0, "stage_d": 0}
+
+    async def drift_llm(sys_msg, user_msg):
+        calls["stage_a"] += 1
+        return (
+            f'{{"drift_score": {drift_score}, "justification": "test"}}',
+            0.001,
+        )
+
+    async def embed(text):
+        return [1.0, 0.0, 0.0], 0.002
+
+    def cache_lookup(emb):
+        calls["stage_b_lookup"] += 1
+        return None
+
+    async def dr_call(sys_msg, user_msg):
+        calls["stage_c"] += 1
+        return (
+            '{"summary":"sum","items":[{"idea":"a","rationale":"b"}]}',
+            5.0,
+            "o3-deep-research",
+        )
+
+    async def ground_call(sys_msg, user_msg, items):
+        calls["stage_d"] += 1
+        return (
+            '{"summary":"sum","items":[{"idea":"a","rationale":"b",'
+            '"reference_snippet":"snip","source":"https://arxiv.org/abs/x"}]}',
+            0.5,
+            "gpt-5",
+        )
+
+    return calls, drift_llm, embed, cache_lookup, dr_call, ground_call
+
+
+def test_run_pipeline_short_circuits_when_drift_below_threshold():
+    import asyncio as _asyncio
+
+    calls, drift_llm, embed, cache_lookup, dr_call, ground_call = _pipeline_stubs(
+        drift_score=0.1
+    )
+
+    summ = DeepResearchSummarizer(
+        drift_llm=drift_llm,
+        embed=embed,
+        cache_lookup=cache_lookup,
+        dr_call=dr_call,
+        ground_call=ground_call,
+        drift_threshold=0.5,
+    )
+    previous = IslandBrief(
+        island_idx=0,
+        summary="previous",
+        items=[BriefItem(idea="old", rationale="x")],
+    )
+    brief, costs = _asyncio.run(
+        summ.run_pipeline(
+            island_idx=0,
+            recent_programs=[],
+            previous_brief=previous,
+            task_description="t",
+        )
+    )
+    assert brief is previous
+    # Only stage A ran -- no embeddings, no DR, no grounding.
+    assert calls == {"stage_a": 1, "stage_b_lookup": 0, "stage_c": 0, "stage_d": 0}
+    assert costs == {"stage_a": 0.001, "stage_b": 0.0, "stage_c": 0.0, "stage_d": 0.0}
+
+
+def test_run_pipeline_uses_cache_hit_to_skip_stage_c():
+    import asyncio as _asyncio
+
+    cached_brief = IslandBrief(
+        island_idx=0,
+        summary="cached",
+        items=[BriefItem(idea="cached", rationale="x")],
+    )
+
+    calls, drift_llm, embed, _miss_lookup, dr_call, ground_call = _pipeline_stubs(
+        drift_score=0.9
+    )
+
+    def hit_lookup(emb):
+        calls["stage_b_lookup"] += 1
+        return cached_brief
+
+    summ = DeepResearchSummarizer(
+        drift_llm=drift_llm,
+        embed=embed,
+        cache_lookup=hit_lookup,
+        dr_call=dr_call,
+        ground_call=ground_call,
+        drift_threshold=0.5,
+    )
+    brief, costs = _asyncio.run(
+        summ.run_pipeline(
+            island_idx=0,
+            recent_programs=[],
+            previous_brief=None,
+            task_description="t",
+        )
+    )
+    assert brief.cached is True
+    assert brief.summary == "cached"
+    assert brief.items[0].idea == "cached"
+    assert brief.island_idx == 0  # retagged to the requesting island
+    # Stage C/D should NOT have run.
+    assert calls["stage_c"] == 0
+    assert calls["stage_d"] == 0
+    assert costs["stage_c"] == 0.0
+    assert costs["stage_d"] == 0.0
+
+
+def test_run_pipeline_runs_full_stages_when_novel_drift(tmp_path: Path):
+    import asyncio as _asyncio
+
+    db_path = _build_dr_db(tmp_path)
+    cache = BriefCache(db_path=db_path, similarity_threshold=0.95)
+    calls, drift_llm, embed, _, dr_call, ground_call = _pipeline_stubs(
+        drift_score=0.9
+    )
+
+    summ = DeepResearchSummarizer(
+        drift_llm=drift_llm,
+        embed=embed,
+        cache=cache,
+        dr_call=dr_call,
+        ground_call=ground_call,
+        drift_threshold=0.5,
+    )
+    brief, costs = _asyncio.run(
+        summ.run_pipeline(
+            island_idx=3,
+            recent_programs=[],
+            previous_brief=None,
+            task_description="evolve circle packing",
+            generation=42,
+        )
+    )
+    assert brief.cached is False
+    assert brief.island_idx == 3
+    assert brief.summary == "sum"
+    assert len(brief.items) == 1
+    assert brief.items[0].source.startswith("https://")
+    assert brief.drift_score == pytest.approx(0.9)
+    assert brief.model_used == "o3-deep-research"
+    assert brief.cost == pytest.approx(5.5)  # 5.0 + 0.5
+    # All four stages fired.
+    assert calls["stage_a"] == 1
+    assert calls["stage_c"] == 1
+    assert calls["stage_d"] == 1
+    # And the brief was persisted to the cache for future islands.
+    cached = cache.lookup(brief.source_query_embedding)
+    assert cached is not None
+    assert cached.summary == "sum"
+
+
 def test_db_migration_creates_dr_tables_on_legacy_open(monkeypatch):
     """An on-disk DB created without the DR tables should grow them on
     next open without crashing or duplicating."""

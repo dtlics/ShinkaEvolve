@@ -24,12 +24,23 @@ Design notes
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 
 DEFAULT_EVAL_TIMEOUT_SEC = 600
 DEFAULT_PROBE_TIMEOUT_SEC = 30
 DEFAULT_READ_FILE_MAX_BYTES = 64 * 1024  # 64 KB
+
+
+# Type alias for the evaluator the orchestrator pre-binds into the
+# context. Takes no args (the orchestrator has already baked in
+# program path, results dir, num_runs, and the task-specific callables
+# like aggregate_metrics_fn / validate_fn) and returns the same triple
+# ``run_shinka_eval`` does: ``(metrics, correct_flag, first_error)``.
+EvaluatorCallable = Callable[
+    [],
+    Awaitable[Tuple[Dict[str, Any], bool, Optional[str]]],
+]
 
 
 @dataclass
@@ -103,6 +114,11 @@ class ShinkaToolContext:
     experiment_fn_name: str = "main"
     eval_results_dir: Optional[str] = None
     eval_timeout_sec: int = DEFAULT_EVAL_TIMEOUT_SEC
+    # Pre-bound evaluator. The orchestrator constructs this with all
+    # task-specific knobs (num_runs, aggregate_metrics_fn, validate_fn,
+    # etc.) already baked in, so the agent's evaluate_tool can call it
+    # without knowing those details. ``None`` disables evaluate_tool.
+    evaluator: Optional[EvaluatorCallable] = None
 
     # Database read-access
     db_path: Optional[str] = None

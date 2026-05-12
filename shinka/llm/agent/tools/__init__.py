@@ -42,6 +42,7 @@ from .registry import (
 # doesn't matter — each module is independent. Add new tools here as
 # they land.
 from . import apply_patch as _apply_patch  # noqa: F401
+from . import evaluate as _evaluate  # noqa: F401
 
 __all__ = [
     "DEFAULT_EVAL_TIMEOUT_SEC",

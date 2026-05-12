@@ -264,3 +264,198 @@ def test_save_json_results_omits_traceback_when_none(tmp_path: Path):
     )
     payload = json.loads((tmp_path / "correct.json").read_text())
     assert "error_traceback" not in payload
+
+
+# ---------------------------------------------------------------------------
+# Phase 4b: _update_llm_bandits_for_completed_job branch logic
+# ---------------------------------------------------------------------------
+
+
+class _StubBandit:
+    """Records ``update(arm, reward, baseline)`` calls."""
+
+    def __init__(self) -> None:
+        self.updates: list = []
+
+    def update(self, arm, reward=None, baseline=None):
+        self.updates.append({"arm": arm, "reward": reward, "baseline": baseline})
+
+
+class _StubJob:
+    def __init__(
+        self,
+        *,
+        job_id: str = "job-0",
+        attempt_round: int = 0,
+        original_parent_id=None,
+        error_fix_history=None,
+    ) -> None:
+        self.job_id = job_id
+        self.attempt_round = attempt_round
+        self.original_parent_id = original_parent_id
+        self.error_fix_history = error_fix_history or []
+
+
+def _stub_runner(
+    *,
+    decay: float = 0.7,
+    with_fix_bandit: bool = True,
+) -> tuple:
+    """Return (runner_stub, proposer_bandit, fix_bandit_or_None)."""
+    proposer = _StubBandit()
+    fixer = _StubBandit() if with_fix_bandit else None
+
+    class _Cfg:
+        error_fix_score_decay = decay
+
+    class _Runner:
+        llm_selection = proposer
+        llm_fix_selection = fixer
+        evo_config = _Cfg()
+
+    return _Runner(), proposer, fixer
+
+
+def _make_program_for_update(
+    *, correct: bool, score: float, parent_id="parent-0"
+) -> Program:
+    return Program(
+        id="prog-x",
+        code="x = 1\n",
+        generation=1,
+        correct=correct,
+        combined_score=score,
+        parent_id=parent_id,
+    )
+
+
+def _invoke_update(runner, program, model_name, attempt_round, baseline, job):
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    # Bind the runner's method to our stub so attribute lookups work.
+    return ShinkaEvolveRunner._update_llm_bandits_for_completed_job(
+        runner,
+        program=program,
+        model_name=model_name,
+        attempt_round=attempt_round,
+        baseline=baseline,
+        job=job,
+    )
+
+
+def test_bandit_update_original_success_full_credit_no_fixer():
+    runner, proposer, fixer = _stub_runner()
+    program = _make_program_for_update(correct=True, score=0.8)
+    _invoke_update(
+        runner, program, "gpt-5", attempt_round=0, baseline=0.5, job=_StubJob()
+    )
+    assert proposer.updates == [
+        {"arm": "gpt-5", "reward": 0.8, "baseline": 0.5}
+    ]
+    assert fixer.updates == []
+
+
+def test_bandit_update_fix_success_decays_proposer_credits_fixer():
+    runner, proposer, fixer = _stub_runner(decay=0.5)
+    program = _make_program_for_update(correct=True, score=1.0)
+    history = [
+        {"round_number": 1, "model_used": "gpt-5", "summary": "x", "error_message": "e"},
+        {"round_number": 2, "model_used": "gpt-5-mini", "summary": "y", "error_message": "e"},
+    ]
+    _invoke_update(
+        runner,
+        program,
+        model_name="gpt-5-codex",
+        attempt_round=3,
+        baseline=0.5,
+        job=_StubJob(attempt_round=3, error_fix_history=history),
+    )
+    # Proposer reward = score * decay^3 = 1.0 * 0.125
+    assert proposer.updates == [
+        {"arm": "gpt-5-codex", "reward": pytest.approx(0.125), "baseline": 0.5}
+    ]
+    # Fixer bandit:
+    # - successful round (gpt-5-codex) gets the full score
+    # - prior failed rounds (gpt-5, gpt-5-mini) each get 0.0
+    arms = [(u["arm"], u["reward"]) for u in fixer.updates]
+    assert arms[0] == ("gpt-5-codex", 1.0)
+    losers = sorted(arms[1:])
+    assert losers == sorted([("gpt-5", 0.0), ("gpt-5-mini", 0.0)])
+
+
+def test_bandit_update_failed_retry_round_zeros_both_bandits():
+    runner, proposer, fixer = _stub_runner()
+    program = _make_program_for_update(correct=False, score=0.0)
+    _invoke_update(
+        runner,
+        program,
+        model_name="gpt-5-codex",
+        attempt_round=2,
+        baseline=0.4,
+        job=_StubJob(attempt_round=2),
+    )
+    # Explicit zero (NOT None) -- the candidate WAS produced and evaluated.
+    assert proposer.updates == [
+        {"arm": "gpt-5-codex", "reward": 0.0, "baseline": 0.4}
+    ]
+    assert fixer.updates == [
+        {"arm": "gpt-5-codex", "reward": 0.0, "baseline": 0.4}
+    ]
+
+
+def test_bandit_update_failed_original_uses_impute_worst_sentinel():
+    runner, proposer, fixer = _stub_runner()
+    program = _make_program_for_update(correct=False, score=0.0)
+    _invoke_update(
+        runner,
+        program,
+        model_name="gpt-5",
+        attempt_round=0,
+        baseline=0.5,
+        job=_StubJob(),
+    )
+    # reward=None triggers the bandit's impute_worst logic; preserves the
+    # pre-Phase-4 semantics so enable_error_fix_loop=False is a true no-op.
+    assert proposer.updates == [
+        {"arm": "gpt-5", "reward": None, "baseline": 0.5}
+    ]
+    assert fixer.updates == []
+
+
+def test_bandit_update_fix_success_without_fixer_bandit_only_decays_proposer():
+    runner, proposer, fixer = _stub_runner(with_fix_bandit=False)
+    program = _make_program_for_update(correct=True, score=0.9)
+    _invoke_update(
+        runner,
+        program,
+        model_name="gpt-5",
+        attempt_round=1,
+        baseline=0.5,
+        job=_StubJob(attempt_round=1),
+    )
+    # decay^1 * 0.9 = 0.63
+    assert proposer.updates == [
+        {"arm": "gpt-5", "reward": pytest.approx(0.63), "baseline": 0.5}
+    ]
+    assert fixer is None  # bandit absent
+
+
+def test_bandit_update_fix_success_skips_self_in_loser_loop():
+    runner, proposer, fixer = _stub_runner()
+    program = _make_program_for_update(correct=True, score=1.0)
+    # Same model appears in the history AND is the successful round.
+    history = [
+        {"round_number": 1, "model_used": "gpt-5", "summary": "x", "error_message": "e"},
+    ]
+    _invoke_update(
+        runner,
+        program,
+        model_name="gpt-5",  # same model
+        attempt_round=2,
+        baseline=0.5,
+        job=_StubJob(attempt_round=2, error_fix_history=history),
+    )
+    # Fixer should record the success only ONCE, not a 0.0 loser for the
+    # same model on top of the success.
+    rewards_by_arm = [(u["arm"], u["reward"]) for u in fixer.updates]
+    assert rewards_by_arm == [("gpt-5", 1.0)]

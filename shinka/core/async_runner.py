@@ -154,6 +154,19 @@ class AsyncRunningJob:
     completion_detected_at: Optional[float] = None
     discard_if_completed: bool = False
     evaluation_slot_released: bool = False
+    # --- Phase 4 of research-grounding: error-fix retry loop bookkeeping ---
+    # ``attempt_round`` is 0 for original proposals and N for the N-th retry.
+    # ``original_parent_id`` is the parent at the ROOT of a retry chain (used
+    # to look up the bandit baseline so we don't drift). ``error_fix_history``
+    # carries AttemptRecord-like dicts across rounds so the next prompt can
+    # show the model what's already been tried. ``original_mutation_intent``
+    # and ``original_mutation_type`` keep the proposer-side intent stable
+    # across rounds.
+    attempt_round: int = 0
+    original_parent_id: Optional[str] = None
+    error_fix_history: List[Dict[str, Any]] = field(default_factory=list)
+    original_mutation_intent: Optional[str] = None
+    original_mutation_type: Optional[str] = None
 
 
 @dataclass
@@ -375,6 +388,49 @@ class ShinkaEvolveRunner:
         else:
             raise ValueError("Invalid llm_dynamic_selection")
 
+        # Phase 4 of research-grounding: a SEPARATE bandit dedicated to
+        # selecting the model that RUNS each error-fix round. Same algorithm
+        # family as the proposer bandit so we can compare per-model fix
+        # ability against per-model proposer ability head-to-head. Disabled
+        # via ``enable_fixer_bandit=False`` (falls back to reusing the
+        # proposer-model bandit's current pick in the fix loop).
+        self.llm_fix_selection: Optional[BanditBase] = None
+        if (
+            evo_config.enable_fixer_bandit
+            and evo_config.enable_error_fix_loop
+            and self.llm_selection is not None
+        ):
+            algo = (evo_config.fixer_bandit_algorithm or "ucb").lower()
+            try:
+                if algo in ("ucb", "ucb1"):
+                    self.llm_fix_selection = AsymmetricUCB(
+                        arm_names=evo_config.llm_models,
+                        **evo_config.llm_dynamic_selection_kwargs,
+                    )
+                elif algo == "thompson":
+                    self.llm_fix_selection = ThompsonSampler(
+                        arm_names=evo_config.llm_models,
+                        **evo_config.llm_dynamic_selection_kwargs,
+                    )
+                elif algo == "fixed":
+                    self.llm_fix_selection = FixedSampler(
+                        arm_names=evo_config.llm_models,
+                        **evo_config.llm_dynamic_selection_kwargs,
+                    )
+                else:
+                    raise ValueError(
+                        f"Unknown fixer_bandit_algorithm={algo!r}; "
+                        "expected one of ucb / thompson / fixed."
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Failed to instantiate fixer bandit (%s); fix loop will "
+                    "reuse the proposer-model bandit pick. Error: %s",
+                    algo,
+                    exc,
+                )
+                self.llm_fix_selection = None
+
         # Store db_config for later initialization (after results_dir is set)
         # Database will be initialized in _setup_async()
         self.db = None
@@ -578,6 +634,120 @@ class ShinkaEvolveRunner:
         self._last_meta_log_state: dict | None = None
         self._last_meta_log_info_time: float | None = None
 
+    def _update_llm_bandits_for_completed_job(
+        self,
+        *,
+        program: Program,
+        model_name: str,
+        attempt_round: int,
+        baseline: Optional[float],
+        job: "AsyncRunningJob",
+    ) -> None:
+        """Phase 4 of research-grounding: branch the bandit-update logic.
+
+        Branches (driven by ``program.correct`` and ``attempt_round``):
+
+        - **correct, attempt_round == 0** -- original proposer success.
+          Proposer bandit gets the full ``combined_score`` reward; the
+          fixer bandit is untouched. This is the unchanged Phase 0
+          behavior when ``enable_error_fix_loop=False`` (in that case
+          ``attempt_round`` stays 0 forever).
+        - **correct, attempt_round > 0** -- a fix succeeded. Proposer
+          bandit gets ``combined_score * decay**attempt_round`` so
+          first-pass-quality stays in the signal. Fixer bandit observes
+          ``combined_score`` for the model that ran THIS (successful)
+          round; prior failed rounds in ``job.error_fix_history``
+          contribute ``reward=0.0`` so the fixer bandit also sees its
+          losses. (Plan gotcha #4: decay AND baseline shift both apply.)
+        - **not correct, attempt_round > 0** -- a retry round failed.
+          The retry submission path is responsible for deciding whether
+          another round fits the budget. If we land here without that
+          path enqueueing a follow-up (e.g. ``enable_error_fix_loop=False``
+          or the retry helper is wired in Phase 4c+ only), treat the
+          chain as exhausted: proposer bandit gets ``reward=0.0`` (an
+          explicit imputed-worst because a candidate WAS produced and
+          evaluated, distinct from a pure abort). Fixer bandit observes
+          this round's failure too.
+        - **not correct, attempt_round == 0** -- original failure, no
+          retry possible at this layer. Pass ``reward=None`` so the
+          existing ``_impute_worst_reward`` path inside the bandit
+          fires, matching pre-Phase-4 semantics.
+        - **pure abort** -- the runner upstream of this method short-
+          circuits and never persists a Program, so this branch isn't
+          reached. Preserves the "aborts != low-score" invariant.
+        """
+        decay = float(self.evo_config.error_fix_score_decay or 0.7)
+        score = float(getattr(program, "combined_score", 0.0) or 0.0)
+        history = list(job.error_fix_history or [])
+
+        # Successful original proposal: unchanged behavior.
+        if program.correct and attempt_round == 0:
+            self.llm_selection.update(
+                arm=model_name, reward=score, baseline=baseline
+            )
+            return
+
+        # Successful fix at round N > 0.
+        if program.correct and attempt_round > 0:
+            decayed_reward = score * (decay ** max(0, attempt_round))
+            self.llm_selection.update(
+                arm=model_name, reward=decayed_reward, baseline=baseline
+            )
+            if self.llm_fix_selection is not None:
+                # Successful round: credit this round's model with the
+                # raw final score.
+                self.llm_fix_selection.update(
+                    arm=model_name, reward=score, baseline=baseline
+                )
+                # Every prior failed round gets a 0.0 on the fixer bandit
+                # so it learns its losses too. ``error_fix_history`` is a
+                # list of dicts (round_number, model_used, summary,
+                # error_message); we tolerate missing model_used.
+                for record in history:
+                    failed_model = (record or {}).get("model_used")
+                    if not failed_model or failed_model == model_name:
+                        continue
+                    try:
+                        self.llm_fix_selection.update(
+                            arm=failed_model,
+                            reward=0.0,
+                            baseline=baseline,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "Skip fix-bandit loss credit for %s: %s",
+                            failed_model,
+                            exc,
+                        )
+            return
+
+        # Failed candidate. attempt_round > 0 means this was a retry that
+        # didn't recover; if the retry submission path didn't enqueue
+        # another round, treat the chain as exhausted (explicit zero,
+        # NOT None).
+        if attempt_round > 0:
+            self.llm_selection.update(
+                arm=model_name, reward=0.0, baseline=baseline
+            )
+            if self.llm_fix_selection is not None:
+                try:
+                    self.llm_fix_selection.update(
+                        arm=model_name, reward=0.0, baseline=baseline
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(
+                        "Skip fix-bandit loss credit for %s: %s",
+                        model_name,
+                        exc,
+                    )
+            return
+
+        # attempt_round == 0 and not correct: original failure path.
+        # Preserves the pre-Phase-4 semantics so disabling the loop is a
+        # true no-op.
+        reward = None
+        self.llm_selection.update(arm=model_name, reward=reward, baseline=baseline)
+
     def _save_bandit_state(self) -> None:
         """Save the LLM selection bandit state to disk."""
         if self.llm_selection is None:
@@ -588,6 +758,17 @@ class ShinkaEvolveRunner:
             logger.debug(f"Saved bandit state to {bandit_path}")
         except Exception as e:
             logger.warning(f"Failed to save bandit state: {e}")
+        # Phase 4 of research-grounding: the fix-loop bandit has its own
+        # state file so its observations don't pollute the proposer bandit
+        # on resume.
+        if self.llm_fix_selection is None:
+            return
+        try:
+            fix_bandit_path = Path(self.results_dir) / "fix_bandit_state.pkl"
+            self.llm_fix_selection.save_state(fix_bandit_path)
+            logger.debug(f"Saved fix bandit state to {fix_bandit_path}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to save fix bandit state: {e}")
 
     def _load_bandit_state(self) -> None:
         """Load the LLM selection bandit state from disk."""
@@ -607,6 +788,23 @@ class ShinkaEvolveRunner:
                 )
         except Exception as e:
             logger.warning(f"Failed to load bandit state: {e}")
+        # Phase 4 of research-grounding: load the fix-loop bandit when
+        # ``enable_fixer_bandit`` is on. Absent or missing file -> start
+        # fresh; same semantics as the proposer bandit.
+        if self.llm_fix_selection is None:
+            return
+        try:
+            fix_bandit_path = Path(self.results_dir) / "fix_bandit_state.pkl"
+            if fix_bandit_path.exists():
+                self.llm_fix_selection.load_state(fix_bandit_path)
+                logger.info(f"Loaded fix bandit state from {fix_bandit_path}")
+            else:
+                logger.debug(
+                    f"No fix bandit state file at {fix_bandit_path}, "
+                    "starting with fresh fix bandit state"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Failed to load fix bandit state: {e}")
 
     async def _record_generation_event(
         self,
@@ -4044,7 +4242,13 @@ class ShinkaEvolveRunner:
             # Always create a program entry, even if results are missing
             if results:
                 # Extract metrics properly like the sync version
-                correct_val = results.get("correct", {}).get("correct", False)
+                correct_payload = results.get("correct", {}) or {}
+                correct_val = correct_payload.get("correct", False)
+                # Phase 4 of research-grounding: pull error + traceback out of
+                # correct.json so the error-fix retry loop has the verbatim
+                # error context to show the model.
+                error_message_val = correct_payload.get("error")
+                error_traceback_val = correct_payload.get("error_traceback")
                 metrics_val = results.get("metrics", {})
                 combined_score = metrics_val.get("combined_score", 0.0)
                 public_metrics = metrics_val.get("public", {})
@@ -4063,6 +4267,8 @@ class ShinkaEvolveRunner:
                     f"Creating program entry with default values to avoid job loss."
                 )
                 correct_val = False
+                error_message_val = "Results retrieval failed"
+                error_traceback_val = None
                 combined_score = 0.0
                 public_metrics = {}
                 private_metrics = {}
@@ -4079,6 +4285,17 @@ class ShinkaEvolveRunner:
             evaluation_started_at = (
                 job.evaluation_started_at or job.evaluation_submitted_at
             )
+            # Phase 4 of research-grounding: surface the bookkeeping fields
+            # on Program so downstream code (error-fix retry loop, bandit
+            # attribution, future post-mortem queries) can read them
+            # directly instead of fishing through metadata dicts.
+            program_mutation_type = (
+                job.original_mutation_type
+                or (job.meta_patch_data or {}).get("patch_name")
+            )
+            program_mutation_intent = job.original_mutation_intent
+            program_model_used = (job.meta_patch_data or {}).get("model_name")
+
             program = Program(
                 id=str(uuid.uuid4()),
                 code=await self._read_file_async(job.exec_fname) or "",
@@ -4095,6 +4312,11 @@ class ShinkaEvolveRunner:
                 code_diff=job.code_diff,
                 embedding=job.code_embedding or [],
                 system_prompt_id=system_prompt_id,  # Track evolved prompt
+                error_traceback=error_traceback_val,
+                attempt_round=int(job.attempt_round or 0),
+                mutation_type=program_mutation_type,
+                mutation_intent=program_mutation_intent,
+                model_used=program_model_used,
                 metadata=with_pipeline_timing(
                     {
                         **(job.meta_patch_data or {}),
@@ -4102,6 +4324,11 @@ class ShinkaEvolveRunner:
                         "novelty_cost": job.novelty_cost,
                         "stdout_log": stdout_log,
                         "stderr_log": stderr_log,
+                        # Surface short error message into metadata for the
+                        # bootstrap-fix prompt that reads
+                        # metadata["error_message"]; the retry loop reads
+                        # program.error_traceback directly.
+                        "error_message": error_message_val,
                         "results_missing": results is None,
                         "safe_processing": True,
                         "source_job_id": source_job_id,
@@ -4401,22 +4628,43 @@ class ShinkaEvolveRunner:
                     logger.warning(f"Meta summarizer error for {job.job_id}: {e}")
                     # Don't fail the whole job for meta summarizer issues
 
-            # Update LLM selection
+            # Update LLM selection (Phase 4 of research-grounding: branch on
+            # attempt_round so the proposer bandit sees a decayed-credit
+            # reward for fix-loop successes instead of full credit, and the
+            # dedicated fixer bandit observes per-round outcomes).
             if self.llm_selection is not None and "model_name" in (
                 program.metadata or {}
             ):
                 try:
+                    # Baseline is the ORIGINAL parent score (root of any
+                    # retry chain), NOT the parent of the failed round, so
+                    # the bandit's parent-shift accounting stays anchored to
+                    # the proposer's actual starting point. Plan gotcha #5.
+                    baseline_parent_id = (
+                        job.original_parent_id
+                        or program.parent_id
+                    )
                     parent = None
-                    if program.parent_id:
-                        parent = await self.async_db.get_async(program.parent_id)
+                    if baseline_parent_id:
+                        parent = await self.async_db.get_async(baseline_parent_id)
                     baseline = parent.combined_score if parent else None
-                    reward = program.combined_score if program.correct else None
                     model_name = program.metadata["model_name"]
-                    self.llm_selection.update(
-                        arm=model_name, reward=reward, baseline=baseline
+                    attempt_round = int(job.attempt_round or 0)
+                    self._update_llm_bandits_for_completed_job(
+                        program=program,
+                        model_name=model_name,
+                        attempt_round=attempt_round,
+                        baseline=baseline,
+                        job=job,
                     )
                     if self.verbose:
                         self.llm_selection.print_summary(console=self.console)
+                        if (
+                            self.llm_fix_selection is not None
+                            and attempt_round > 0
+                            and hasattr(self.llm_fix_selection, "print_summary")
+                        ):
+                            self.llm_fix_selection.print_summary(console=self.console)
                 except Exception as e:
                     logger.warning(f"LLM selection update error for {job.job_id}: {e}")
                     # Don't fail the whole job for LLM selection issues

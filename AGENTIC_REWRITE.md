@@ -249,4 +249,6 @@ Pass criteria:
 | 2026-05-12 | Phase D.1 — `AgentLLMClient.run_agent` per-call tools + context + 5 tests | done | `d7dddf1` |
 | 2026-05-12 | Phase D.2+D.3 — `_run_agent_proposal` orchestrator method + `use_agentic_proposer` flag + 7 tests | done | `1c48b2b` |
 | 2026-05-12 | Cleanup F.1 — remove `RobustRunner`, rely on OpenAI SDK's built-in retry; rewire tests | done | `1510145` |
-| 2026-05-12 | Verification F.2 — parity fixes: `QueryResult.model_name` stores API name, `kwargs` strips `model_name`, `batch_kwargs_query` threads posterior, `_run_agent_proposal` reads `db.config.db_path`, `apply_patch_tool` treats `num_applied=0` as failure, `diff_summary` populated for webui parity. 8 new tests. | done | (this commit) |
+| 2026-05-12 | Verification F.2 — parity fixes: `QueryResult.model_name` stores API name, `kwargs` strips `model_name`, `batch_kwargs_query` threads posterior, `_run_agent_proposal` reads `db.config.db_path`, `apply_patch_tool` treats `num_applied=0` as failure, `diff_summary` populated for webui parity. 8 new tests. | done | `3011a3f` |
+| 2026-05-12 | Phase D follow-up — `agentic_tools` config + wiring beyond `apply_patch` + 5 tests | done | `c2bbc0a` |
+| 2026-05-12 | Phase E (partial) — end-to-end Azure smoke test caught `apply_patch_tool` docstring bug claiming "unified diff" instead of SEARCH/REPLACE; fixed and re-verified ($0.0017 / 23.8s / num_applied=1) | done | `fd52d9e` |

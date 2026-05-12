@@ -97,6 +97,51 @@ class EvolutionConfig:
     tag_calls_with_metadata: bool = True
     store_llm_responses: bool = False
 
+    # Deep-research meta cycle (phase 2 of research-grounding).
+    #
+    # When enabled, every ``dr_meta_interval`` evaluated programs we
+    # run a per-island Stage A→D pipeline that produces *structured*,
+    # *grounded* briefs (drift → novelty → DR call → code grounding).
+    # The freeform meta cycle continues to run at ``meta_rec_interval``;
+    # when a fresh DR brief lands for an island, the sampler prefers
+    # it over the freeform recommendations for that island.
+    #
+    # DR uses a SEPARATE Azure resource from the main gpt-* endpoint.
+    # Set ``AZURE_DR_ENDPOINT`` + ``AZURE_DR_API_KEY`` (and optionally
+    # ``AZURE_DR_API_VERSION``) in .env or the shell environment. See
+    # ``shinka.llm.agent.dr_client``.
+    #
+    # Default is OFF — existing experiments don't change behavior
+    # without opt-in.
+    enable_deep_research: bool = False
+    dr_meta_interval: int = 20
+    dr_model: str = "o3-deep-research"
+    dr_endpoint_env: str = "AZURE_DR_ENDPOINT"
+    dr_api_key_env: str = "AZURE_DR_API_KEY"
+    dr_api_version_env: str = "AZURE_DR_API_VERSION"
+    dr_reasoning_effort: str = "medium"
+    dr_max_tool_calls: int = 20
+    dr_background: bool = True
+    dr_max_calls_per_run: int = 30
+    dr_brief_cache_threshold: float = 0.95
+    dr_drift_threshold: float = 0.5
+    # Cheap drift judge used in Stage A. Routed through the regular
+    # AgentLLMClient so it shares prompt-cache / metadata wiring.
+    dr_stage_a_llm_model: str = "azure-gpt-5.4-mini"
+    # Stage D code-grounding domain allowlist passed through to the
+    # web_search tool. Defaults to authoritative software/research
+    # sources so the brief's reference_snippet lands in domains the
+    # agent can trust to confirm.
+    dr_code_grounding_domains: List[str] = field(
+        default_factory=lambda: [
+            "github.com",
+            "arxiv.org",
+            "huggingface.co",
+            "paperswithcode.com",
+            "docs.python.org",
+        ]
+    )
+
     # Meta-prompt evolution settings.
     evolve_prompts: bool = False
     prompt_patch_types: List[str] = field(default_factory=default_prompt_patch_types)

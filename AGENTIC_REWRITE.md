@@ -41,9 +41,15 @@ The agentic rewrite adds **external information channels** by letting the LLM ca
 
 Net new code under our maintenance: ~210 LOC of glue, versus ~600+ LOC of hand-rolled equivalent. The glue is upstream-friendly (could be PR'd as a `BackgroundOpenAIResponsesModel` and `RobustRunner` to the agents SDK if they want it).
 
-### Retry strategy: outer-loop client reconstruction (preserved)
+### Retry strategy: rely on the OpenAI SDK's built-in retry
 
-**Rationale**: commit `72f8dc2` disabled the inner `@backoff` retry because it reused the same poisoned `AsyncOpenAI` client. The outer retry layer (`AsyncLLMClient._query_async_with_retry`) is the only mechanism that recovers from pool poisoning by getting a fresh client each attempt. The agents SDK's `OpenAIResponsesModel._get_client()` reuses `self._client`, so we cannot rely on the SDK's retry. Our wrapper destroys the Agent (and therefore its model and client) per outer retry attempt.
+**Rationale**: with background mode (`BackgroundOpenAIResponsesModel`), the inference runs server-side as a job and the client only makes sub-second HTTP requests (one `create`, then `retrieve` poll loop). There is no long-idle TCP connection an Azure LB / NAT can silently kill — the failure mode that motivated the original `_query_async_with_retry` / `RobustRunner` fresh-client logic is structurally absent.
+
+For remaining transport-level errors (network blips on individual poll/create calls, transient 429s and 5xxs), we rely on the OpenAI Python SDK's built-in retry (`max_retries=2` by default, with exponential backoff). The agents SDK uses that underlying client directly, so we inherit it for free.
+
+The `AgentLLMClient` constructor still accepts `max_attempts`, but it controls the **legacy** (Anthropic / Gemini / etc.) path's outer retry only — to match the behavior of `AsyncLLMClient._query_async_with_retry`. The agents-SDK path treats `max_attempts` as a no-op.
+
+`RobustRunner` was removed in a post-Phase-D cleanup once we confirmed background mode addresses the original failure mode.
 
 ### LLM-controllable tools include `apply_patch` and `evaluate`
 
@@ -84,18 +90,18 @@ shinka_run
   └─ ShinkaEvolveRunner.run_async
        ├─ _proposal_coordinator_task
        │    └─ _generate_proposal_async
-       │         └─ _run_agent_proposal           [new — replaces _run_patch_async]
+       │         └─ _run_agent_proposal           [new — alongside _run_patch_async; opt-in via config flag]
        │              ├─ PromptSampler.sample
-       │              └─ AgentLLMClient.run        [agentic loop: many tool calls inside]
-       │                   └─ RobustRunner.run    [reconstructs Agent per outer retry]
+       │              └─ AgentLLMClient.run_agent  [agentic loop: many tool calls inside]
+       │                   └─ agents.Runner.run    [direct; SDK's built-in retry handles transport errors]
        │                        └─ Agent + BackgroundOpenAIResponsesModel + Tools
        │                             ├─ apply_patch_tool         [calls existing apply_patch_async]
        │                             ├─ evaluate_tool            [calls existing run_shinka_eval]
-       │                             ├─ web_search built-in
+       │                             ├─ web_search built-in (opt-in)
        │                             ├─ query_evolution_db_tool  [reads existing sqlite via dbase.py]
        │                             ├─ read_host_file_tool
        │                             └─ run_probe_tool           [later phase]
-       └─ _job_monitor_task                       [now mostly just persists agent-emitted final results]
+       └─ _job_monitor_task                       [unchanged — picks up agent's patched program for eval]
 ```
 
 Key shifts:
@@ -112,9 +118,9 @@ Each phase is a separate commit (or small commit series). Tests/validation gate 
 
 **A.1** `BackgroundOpenAIResponsesModel`: subclass `OpenAIResponsesModel`, override `_fetch_response` to inject `background=True` for non-streaming calls, poll via `client.responses.retrieve(id)` until terminal, return the completed `Response` object. Unit-tested with mocked client.
 
-**A.2** `RobustRunner`: thin wrapper around `agents.Runner.run()` that catches transport-level exceptions and creates a fresh `Agent` (with fresh `BackgroundOpenAIResponsesModel` and fresh `AsyncAzureOpenAI` client) per outer attempt. Unit-tested with a mocked Runner.
+**A.2** *(reverted in cleanup F.1)* — `RobustRunner` was introduced as a fresh-client retry wrapper, then removed once background mode demonstrably addresses the long-idle-TCP failure mode. We now call `agents.Runner.run` directly and rely on the OpenAI SDK's built-in `max_retries=2` for individual API call retries.
 
-Gate: both files import cleanly, unit tests green.
+Gate: A.1 imports cleanly, unit tests green.
 
 ### Phase B — Adapter layer (~3 commits, ~250 LOC)
 
@@ -242,3 +248,4 @@ Pass criteria:
 | 2026-05-12 | Phase C.6 — `web_search` opt-in tool + opt-in registry flag + 7 tests | done | `317335d` |
 | 2026-05-12 | Phase D.1 — `AgentLLMClient.run_agent` per-call tools + context + 5 tests | done | `d7dddf1` |
 | 2026-05-12 | Phase D.2+D.3 — `_run_agent_proposal` orchestrator method + `use_agentic_proposer` flag + 7 tests | done | `1c48b2b` |
+| 2026-05-12 | Cleanup F.1 — remove `RobustRunner`, rely on OpenAI SDK's built-in retry; rewire tests | done | (this commit) |

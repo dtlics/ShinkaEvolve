@@ -1,58 +1,58 @@
 """``AgentLLMClient`` — drop-in replacement for ``AsyncLLMClient`` that
 routes OpenAI / Azure OpenAI calls through the ``openai-agents`` SDK
-with background-mode polling and fresh-client retry.
+with background-mode polling.
 
 Design constraints
 ------------------
 The existing orchestrator (`shinka.core.async_runner._run_patch_async`)
 expects a `.query(msg, system_msg, ...) -> Optional[QueryResult]`
-contract. The same expectation propagates through
-`prompt_evolver`, `meta-LLM`, `novelty`, and `sampler` call sites. To
-let these call sites migrate one at a time without coordinated
-changes, `AgentLLMClient` exposes exactly the same public surface as
-`AsyncLLMClient`:
-
-* ``.query()``
-* ``.batch_query()``
-* ``.batch_kwargs_query()``
-* ``.get_kwargs()``
+contract. To let call sites migrate one at a time without coordinated
+changes, ``AgentLLMClient`` exposes exactly the same public surface
+as ``AsyncLLMClient``: ``.query``, ``.batch_query``,
+``.batch_kwargs_query``, ``.get_kwargs``.
 
 Provider routing
 ----------------
-For Azure / OpenAI text generation (the user's primary stack), calls
-flow through:
+For Azure / OpenAI text generation, calls flow through:
 
     AgentLLMClient.query
         -> _query_via_agents
-            -> RobustRunner.run               (fresh client per attempt)
-                -> agents.Runner.run
-                    -> BackgroundOpenAIResponsesModel._fetch_response
-                        -> client.responses.create(background=True)
-                        -> client.responses.retrieve(id)  (poll loop)
-            -> _runresult_to_queryresult       (RunResult -> QueryResult)
+            -> agents.Runner.run
+                -> BackgroundOpenAIResponsesModel._fetch_response
+                    -> client.responses.create(background=True)
+                    -> client.responses.retrieve(id)  (poll loop)
+        -> _runresult_to_queryresult
 
 For non-OpenAI providers (Anthropic, Gemini, DeepSeek, Bedrock, etc.)
 and for structured-output requests, calls fall back to the existing
-``query_async`` path in ``shinka.llm.query``. This preserves
-provider-specific quirks (e.g. Gemini's automatic function calling
-config, Anthropic's tool_use protocol) without the agents-SDK
-overhead.
+``query_async`` path in ``shinka.llm.query``.
 
-Phase B.1 scope
----------------
-Plain text generation only. Tools (``apply_patch``, ``evaluate``,
-``web_search``, ``query_evolution_db``, ``read_host_file``) land in
-Phase C and slot into the existing agent-factory closure with no
-public API change. Structured output via ``output_type`` is also
-deferred — Phase B.1 falls back to the legacy path when
-``output_model`` is provided.
+Why no extra outer retry layer
+------------------------------
+Background mode (``BackgroundOpenAIResponsesModel``) submits the
+inference as a server-side job and polls for status with sub-second
+HTTP requests. There is no long idle TCP connection that an Azure
+load balancer / NAT can silently kill — the failure mode that
+motivated the original ``_query_async_with_retry`` /
+``RobustRunner`` fresh-client logic is structurally absent now.
+
+For the remaining transport-level errors (network blips on individual
+poll/create calls, transient 429s and 5xxs), we rely on the OpenAI
+Python SDK's built-in retry (``max_retries=2`` by default, with
+exponential backoff). The agents SDK uses that underlying client
+directly, so we inherit it for free.
+
+The constructor still accepts ``max_attempts`` — it controls the
+**legacy** (Anthropic / Gemini / etc.) path's outer retry, which
+matches the behavior of ``AsyncLLMClient._query_async_with_retry``.
+For the agents-SDK path, this parameter is intentionally unused.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel
 
@@ -68,7 +68,6 @@ from .background_model import (
     DEFAULT_POLL_INTERVAL_SEC,
     DEFAULT_POLL_TIMEOUT_SEC,
 )
-from .robust_runner import RobustRunner
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +76,8 @@ logger = logging.getLogger(__name__)
 # back to the legacy ``query_async`` path.
 _AGENT_SDK_PROVIDERS = frozenset({"azure_openai", "openai"})
 
+# Default retry count for the legacy provider path only. The
+# agents-SDK path relies on the OpenAI SDK's built-in retry.
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_MAX_TURNS = 10
 
@@ -330,21 +331,23 @@ class AgentLLMClient:
         """Internal agents-SDK run.
 
         Used by both ``query`` (no tools, no context) and ``run_agent``
-        (per-call tools + context). Factoring kept here so the
-        agent-construction details (model settings, fresh-client
-        factory, retry plumbing) live in one place.
+        (per-call tools + context). Builds a fresh Agent + Model +
+        AsyncOpenAI client per query (one shinka generation), then
+        calls ``agents.Runner.run`` directly. Transport-level retry on
+        individual API calls is handled by the OpenAI SDK's built-in
+        ``max_retries`` (default 2) — we don't add an outer retry
+        layer because background mode removes the long-idle-TCP
+        failure mode that motivated it.
         """
-        from agents import Agent, ModelSettings
+        from agents import Agent, ModelSettings, Runner
 
         model_name = llm_kwargs["model_name"]
-        # Resolve API model name once, before the factory closure — the
-        # answer is deterministic for a given shinka model id.
+        # Resolve API model name once — deterministic for a given
+        # shinka model id, so we don't re-resolve later.
         resolved = resolve_model_backend(model_name)
         api_model_name = resolved.api_model_name
 
-        # Pre-build the ModelSettings from sampled llm_kwargs. Same
-        # settings on every retry attempt; only the client (and
-        # therefore the pool) changes.
+        # ModelSettings derived from sampled llm_kwargs.
         model_settings_kwargs: Dict[str, Any] = {}
         if "temperature" in llm_kwargs and llm_kwargs["temperature"] is not None:
             model_settings_kwargs["temperature"] = llm_kwargs["temperature"]
@@ -366,33 +369,28 @@ class AgentLLMClient:
             list(tools_override) if tools_override is not None else list(self._tools)
         )
 
-        def make_agent() -> Any:
-            """Construct a fresh Agent (and AsyncOpenAI client) per attempt.
-
-            Called by ``RobustRunner`` once at start and again after
-            each transport-shaped failure. The client is built via
-            ``get_async_client_llm`` which already implements the
-            base_url + api_version overrides we need for Azure.
-            """
-            client, _api_model, _provider = get_async_client_llm(
-                model_name, structured_output=False
-            )
-            model = BackgroundOpenAIResponsesModel(
-                model=api_model_name,
-                openai_client=client,
-                poll_interval_sec=self._poll_interval_sec,
-                poll_timeout_sec=self._poll_timeout_sec,
-                max_queued_wait_sec=self._max_queued_wait_sec,
-            )
-            return Agent(
-                name="shinka",
-                instructions=system_msg,
-                model=model,
-                model_settings=ModelSettings(**model_settings_kwargs),
-                tools=effective_tools,
-            )
-
-        runner = RobustRunner(make_agent, max_attempts=self._max_attempts)
+        # Build the Agent (and its AsyncOpenAI client) fresh for this
+        # query. Each shinka generation gets its own client; we don't
+        # share clients across generations to avoid any cross-call
+        # pool state. ``get_async_client_llm`` already implements the
+        # Azure base_url + api_version overrides.
+        client, _api_model, _provider = get_async_client_llm(
+            model_name, structured_output=False
+        )
+        model = BackgroundOpenAIResponsesModel(
+            model=api_model_name,
+            openai_client=client,
+            poll_interval_sec=self._poll_interval_sec,
+            poll_timeout_sec=self._poll_timeout_sec,
+            max_queued_wait_sec=self._max_queued_wait_sec,
+        )
+        agent = Agent(
+            name="shinka",
+            instructions=system_msg,
+            model=model,
+            model_settings=ModelSettings(**model_settings_kwargs),
+            tools=effective_tools,
+        )
 
         # Compose the agent input: prior history items if any, plus
         # the current user message. The agents SDK accepts a plain
@@ -413,9 +411,9 @@ class AgentLLMClient:
             runner_kwargs["context"] = tool_context
 
         try:
-            run_result = await runner.run(agent_input, **runner_kwargs)
+            run_result = await Runner.run(agent, agent_input, **runner_kwargs)
         except Exception as exc:
-            logger.info("Agent run failed after retries: %s", exc)
+            logger.info("Agent run failed: %s", exc)
             return None
 
         return _runresult_to_queryresult(

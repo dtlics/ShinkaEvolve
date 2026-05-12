@@ -5,10 +5,18 @@ We test in two slices:
 1. The ``_runresult_to_queryresult`` adapter — pure function from a
    RunResult-shaped object to a ``QueryResult``. Pure math; no async.
 
-2. The ``AgentLLMClient.query`` routing — provider resolution decides
-   whether the call goes through the agents SDK (``RobustRunner.run``)
-   or falls back to legacy ``query_async``. Both code paths are
-   monkeypatched so tests run offline without API credentials.
+2. The ``AgentLLMClient.query`` / ``.run_agent`` routing — provider
+   resolution decides whether the call goes through the agents SDK
+   (``agents.Runner.run``) or falls back to legacy ``query_async``.
+   Both code paths are monkeypatched so tests run offline without
+   API credentials.
+
+Note on monkeypatching ``Runner.run``: the SDK's ``Runner.run`` is a
+classmethod. ``monkeypatch.setattr(Runner, "run", AsyncMock(...))``
+replaces the descriptor with a plain attribute, so calls to
+``Runner.run(agent, input, **kwargs)`` pass ``agent`` as the first
+positional arg (rather than ``cls``). Tests that capture args/kwargs
+account for this.
 """
 
 from __future__ import annotations
@@ -241,12 +249,31 @@ def _make_resolved_model(provider: str, api_model_name: str = "test-model") -> S
     )
 
 
+def _stub_async_client(monkeypatch: pytest.MonkeyPatch, *, provider: str = "azure_openai") -> None:
+    """Replace ``get_async_client_llm`` so tests don't need real Azure
+    credentials. The agent factory in ``_query_via_agents`` calls
+    this before constructing the BackgroundOpenAIResponsesModel; we
+    want a MagicMock client there so construction succeeds without
+    AZURE_OPENAI_API_KEY / AZURE_API_ENDPOINT."""
+    import shinka.llm.agent.client as agent_client_mod
+
+    monkeypatch.setattr(
+        agent_client_mod,
+        "get_async_client_llm",
+        lambda model_name, structured_output=False: (
+            MagicMock(name="stub_async_client"),
+            "gpt-5.4-mini",
+            provider,
+        ),
+    )
+
+
 def test_query_routes_azure_through_agents_sdk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """For Azure/OpenAI, the query must go through ``RobustRunner.run``
+    """For Azure/OpenAI, the query must go through ``Runner.run``
     rather than ``query_async``."""
-    # Stub provider resolution -> azure_openai.
+    # Stub provider resolution -> azure_openai, AsyncOpenAI client.
     import shinka.llm.agent.client as agent_client_mod
 
     monkeypatch.setattr(
@@ -254,19 +281,20 @@ def test_query_routes_azure_through_agents_sdk(
         "resolve_model_backend",
         lambda name: _make_resolved_model("azure_openai", api_model_name="gpt-5.4-mini"),
     )
+    _stub_async_client(monkeypatch)
 
-    # Stub the RobustRunner.run to return a canned RunResult.
+    # Stub the Runner.run to return a canned RunResult.
     fake_run = _make_run_result(
         raw_responses=[_make_raw_response(input_tokens=10, output_tokens=20)],
         final_output="agent answer",
     )
-    from shinka.llm.agent.robust_runner import RobustRunner
+    from agents import Runner
 
     run_mock = AsyncMock(return_value=fake_run)
-    monkeypatch.setattr(RobustRunner, "run", run_mock)
+    monkeypatch.setattr(Runner, "run", run_mock)
 
     # Prevent the agent factory from actually building a client. The
-    # factory is only invoked by the real Runner; since RobustRunner.run
+    # factory is only invoked by the real Runner; since Runner.run
     # is mocked, the factory is never called — but the agents SDK Agent
     # constructor would attempt imports. We don't enter the factory in
     # this test, so it's safe.
@@ -315,10 +343,10 @@ def test_query_routes_non_openai_through_legacy(
     legacy_mock = AsyncMock(return_value=fake_qr)
     monkeypatch.setattr(agent_client_mod, "query_async", legacy_mock)
 
-    from shinka.llm.agent.robust_runner import RobustRunner
+    from agents import Runner
 
     run_mock = AsyncMock()
-    monkeypatch.setattr(RobustRunner, "run", run_mock)
+    monkeypatch.setattr(Runner, "run", run_mock)
 
     client = AgentLLMClient(
         model_names=["claude-3-5-haiku-20241022"],
@@ -366,10 +394,10 @@ def test_structured_output_falls_back_to_legacy_even_for_azure(
     legacy_mock = AsyncMock(return_value=fake_qr)
     monkeypatch.setattr(agent_client_mod, "query_async", legacy_mock)
 
-    from shinka.llm.agent.robust_runner import RobustRunner
+    from agents import Runner
 
     run_mock = AsyncMock()
-    monkeypatch.setattr(RobustRunner, "run", run_mock)
+    monkeypatch.setattr(Runner, "run", run_mock)
 
     client = AgentLLMClient(
         model_names=["azure-gpt-5.4-mini"],
@@ -411,9 +439,8 @@ def test_query_returns_none_after_repeated_legacy_failure(
 def test_query_returns_none_after_agent_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If RobustRunner.run raises (e.g. exhausted retries), AgentLLMClient
-    surfaces ``None`` rather than propagating — matches AsyncLLMClient
-    contract."""
+    """If Runner.run raises, AgentLLMClient surfaces ``None`` rather
+    than propagating — matches AsyncLLMClient contract."""
     import shinka.llm.agent.client as agent_client_mod
 
     monkeypatch.setattr(
@@ -421,10 +448,11 @@ def test_query_returns_none_after_agent_failure(
         "resolve_model_backend",
         lambda name: _make_resolved_model("azure_openai", api_model_name="gpt-5.4-mini"),
     )
-    from shinka.llm.agent.robust_runner import RobustRunner
+    _stub_async_client(monkeypatch)
+    from agents import Runner
 
     run_mock = AsyncMock(side_effect=RuntimeError("agent boom"))
-    monkeypatch.setattr(RobustRunner, "run", run_mock)
+    monkeypatch.setattr(Runner, "run", run_mock)
     legacy_mock = AsyncMock()
     monkeypatch.setattr(agent_client_mod, "query_async", legacy_mock)
 
@@ -470,23 +498,28 @@ def test_get_kwargs_matches_sample_model_kwargs_shape() -> None:
 def test_run_agent_passes_tools_and_context_to_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """run_agent on Azure should reach RobustRunner.run with the
+    """run_agent on Azure should reach Runner.run with the
     per-call tools and context wired through."""
     import shinka.llm.agent.client as agent_client_mod
+
+    _stub_async_client(monkeypatch)
 
     fake_run = _make_run_result(
         raw_responses=[_make_raw_response(input_tokens=5, output_tokens=10)],
         final_output="done",
     )
-    from shinka.llm.agent.robust_runner import RobustRunner
+    from agents import Runner
 
+    captured_args: tuple = ()
     captured_kwargs: dict = {}
 
-    async def capture_run(self, *args: Any, **kwargs: Any) -> Any:
+    async def capture_run(*args: Any, **kwargs: Any) -> Any:
+        nonlocal captured_args
+        captured_args = args
         captured_kwargs.update(kwargs)
         return fake_run
 
-    monkeypatch.setattr(RobustRunner, "run", capture_run)
+    monkeypatch.setattr(Runner, "run", capture_run)
 
     sentinel_ctx = MagicMock(name="ShinkaToolContext")
     sentinel_tool_a = MagicMock(name="apply_patch_tool")
@@ -521,19 +554,21 @@ def test_run_agent_default_max_turns_falls_back_to_constructor(
 ) -> None:
     import shinka.llm.agent.client as agent_client_mod
 
+    _stub_async_client(monkeypatch)
+
     fake_run = _make_run_result(
         raw_responses=[_make_raw_response(input_tokens=1, output_tokens=1)],
         final_output="done",
     )
-    from shinka.llm.agent.robust_runner import RobustRunner
+    from agents import Runner
 
     captured_kwargs: dict = {}
 
-    async def capture(self, *args: Any, **kwargs: Any) -> Any:
+    async def capture(*args: Any, **kwargs: Any) -> Any:
         captured_kwargs.update(kwargs)
         return fake_run
 
-    monkeypatch.setattr(RobustRunner, "run", capture)
+    monkeypatch.setattr(Runner, "run", capture)
 
     client = AgentLLMClient(
         model_names=["azure-gpt-5.4-mini"],
@@ -559,12 +594,13 @@ def test_run_agent_default_max_turns_falls_back_to_constructor(
 def test_run_agent_returns_none_on_agent_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from shinka.llm.agent.robust_runner import RobustRunner
+    _stub_async_client(monkeypatch)
+    from agents import Runner
 
-    async def boom(self, *a: Any, **kw: Any) -> Any:
+    async def boom(*a: Any, **kw: Any) -> Any:
         raise RuntimeError("agent exhausted retries")
 
-    monkeypatch.setattr(RobustRunner, "run", boom)
+    monkeypatch.setattr(Runner, "run", boom)
 
     client = AgentLLMClient(
         model_names=["azure-gpt-5.4-mini"],
@@ -605,14 +641,14 @@ def test_run_agent_falls_back_to_legacy_on_non_openai_provider(
     legacy_mock = AsyncMock(return_value=fake_qr)
     monkeypatch.setattr(agent_client_mod, "query_async", legacy_mock)
 
-    from shinka.llm.agent.robust_runner import RobustRunner
+    from agents import Runner
 
     async def should_not_run(self, *a: Any, **kw: Any) -> Any:
         raise AssertionError(
-            "RobustRunner.run should NOT be called for non-OpenAI providers"
+            "Runner.run should NOT be called for non-OpenAI providers"
         )
 
-    monkeypatch.setattr(RobustRunner, "run", should_not_run)
+    monkeypatch.setattr(Runner, "run", should_not_run)
 
     client = AgentLLMClient(
         model_names=["claude-3-5-haiku-20241022"],
@@ -640,13 +676,15 @@ def test_run_agent_uses_per_call_tools_not_constructor_tools(
     """When run_agent passes ``tools=`` explicitly, the constructor-
     time self._tools (which may be empty) must be ignored.
 
-    Test setup is more elaborate because we need to actually let the
-    agent_factory run (so Agent.__init__ fires); that means stubbing
-    out the get_async_client_llm call so it doesn't need Azure creds.
+    Because Agent is constructed inline inside ``_query_via_agents``
+    before the ``Runner.run`` call, we just monkeypatch
+    ``Agent.__init__`` to capture the tools it sees and stub
+    ``get_async_client_llm`` so it doesn't need AZURE_OPENAI_API_KEY.
     """
     captured_agent_tools: list = []
 
     from agents import Agent
+
     original_init = Agent.__init__
 
     def capturing_init(self, *args: Any, **kwargs: Any) -> None:
@@ -655,7 +693,7 @@ def test_run_agent_uses_per_call_tools_not_constructor_tools(
 
     monkeypatch.setattr(Agent, "__init__", capturing_init)
 
-    # Stub out the client constructor so the factory doesn't need
+    # Stub the client constructor so the factory doesn't need
     # AZURE_OPENAI_API_KEY.
     import shinka.llm.agent.client as agent_client_mod
 
@@ -669,18 +707,16 @@ def test_run_agent_uses_per_call_tools_not_constructor_tools(
         ),
     )
 
-    from shinka.llm.agent.robust_runner import RobustRunner
+    from agents import Runner
 
     fake_run = _make_run_result(
         raw_responses=[_make_raw_response(input_tokens=1, output_tokens=1)],
     )
 
-    async def fake_runner_run(self, *args: Any, **kwargs: Any) -> Any:
-        # Build the agent so the patched Agent.__init__ records its tools.
-        _agent = await self._make_agent()
-        return fake_run
-
-    monkeypatch.setattr(RobustRunner, "run", fake_runner_run)
+    # By the time Runner.run is called, Agent.__init__ has already
+    # fired (it happens earlier in _query_via_agents). Return canned
+    # RunResult so the QueryResult adapter has something to work with.
+    monkeypatch.setattr(Runner, "run", AsyncMock(return_value=fake_run))
 
     constructor_tool = MagicMock(name="constructor_tool")
     per_call_tool = MagicMock(name="per_call_tool")

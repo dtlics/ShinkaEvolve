@@ -6,6 +6,7 @@ bandit-attribution and retry-submission pipeline lands.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from pathlib import Path
@@ -438,6 +439,217 @@ def test_bandit_update_fix_success_without_fixer_bandit_only_decays_proposer():
         {"arm": "gpt-5", "reward": pytest.approx(0.63), "baseline": 0.5}
     ]
     assert fixer is None  # bandit absent
+
+
+# ---------------------------------------------------------------------------
+# Phase 4c: retry decision + submission helper
+# ---------------------------------------------------------------------------
+
+
+class _StubRunningJob:
+    def __init__(
+        self,
+        *,
+        job_id="job-orig",
+        attempt_round=0,
+        parent_id="parent-0",
+        original_parent_id=None,
+        original_mutation_type="diff",
+        original_mutation_intent="Test | technique: x | expected: y",
+        error_fix_history=None,
+        meta_patch_data=None,
+        generation=1,
+    ) -> None:
+        self.job_id = job_id
+        self.attempt_round = attempt_round
+        self.parent_id = parent_id
+        self.original_parent_id = original_parent_id
+        self.original_mutation_type = original_mutation_type
+        self.original_mutation_intent = original_mutation_intent
+        self.error_fix_history = error_fix_history or []
+        self.meta_patch_data = meta_patch_data or {"model_name": "gpt-5"}
+        self.generation = generation
+
+
+def _retry_runner(
+    *,
+    enable_error_fix_loop: bool = True,
+    rounds_by_type=None,
+):
+    """Minimal runner stub for _retry_budget + _maybe_enqueue_error_fix_retry.
+
+    Inherits the real ``_retry_budget_for_mutation_type`` so the helper's
+    ``self.`` call lands on the actual implementation instead of an
+    AttributeError.
+    """
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    class _Cfg:
+        enable_error_fix_loop = True
+        error_fix_rounds_by_type = {"diff": 2, "full": 3, "cross": 3}
+
+    cfg = _Cfg()
+    cfg.enable_error_fix_loop = enable_error_fix_loop
+    if rounds_by_type is not None:
+        cfg.error_fix_rounds_by_type = rounds_by_type
+
+    class _Runner:
+        evo_config = cfg
+        scheduled_retries: list = []
+
+        _retry_budget_for_mutation_type = (
+            ShinkaEvolveRunner._retry_budget_for_mutation_type
+        )
+
+    return _Runner()
+
+
+def test_retry_budget_zero_when_loop_disabled():
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    runner = _retry_runner(enable_error_fix_loop=False)
+    assert ShinkaEvolveRunner._retry_budget_for_mutation_type(runner, "diff") == 0
+
+
+def test_retry_budget_per_mutation_type():
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    runner = _retry_runner()
+    assert ShinkaEvolveRunner._retry_budget_for_mutation_type(runner, "diff") == 2
+    assert ShinkaEvolveRunner._retry_budget_for_mutation_type(runner, "full") == 3
+    assert ShinkaEvolveRunner._retry_budget_for_mutation_type(runner, "cross") == 3
+
+
+def test_retry_budget_unknown_type_falls_back_to_diff_default():
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    runner = _retry_runner()
+    # ``unknown_mutation_type`` not in the table -> fall back to diff (=2).
+    assert (
+        ShinkaEvolveRunner._retry_budget_for_mutation_type(runner, "unknown")
+        == 2
+    )
+    assert ShinkaEvolveRunner._retry_budget_for_mutation_type(runner, None) == 2
+
+
+def test_retry_budget_falls_back_to_zero_when_diff_missing():
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    runner = _retry_runner(rounds_by_type={"full": 5})
+    assert ShinkaEvolveRunner._retry_budget_for_mutation_type(runner, "diff") == 0
+
+
+def test_maybe_enqueue_skipped_when_correct():
+    """Correct candidates never go through the retry loop."""
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    runner = _retry_runner()
+    program = _make_program_for_update(correct=True, score=0.9)
+    job = _StubRunningJob(attempt_round=0)
+    enqueued = asyncio.run(
+        ShinkaEvolveRunner._maybe_enqueue_error_fix_retry(
+            runner, job=job, program=program
+        )
+    )
+    assert enqueued is False
+
+
+def test_maybe_enqueue_skipped_when_loop_disabled():
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    runner = _retry_runner(enable_error_fix_loop=False)
+    program = _make_program_for_update(correct=False, score=0.0)
+    job = _StubRunningJob(attempt_round=0)
+    enqueued = asyncio.run(
+        ShinkaEvolveRunner._maybe_enqueue_error_fix_retry(
+            runner, job=job, program=program
+        )
+    )
+    assert enqueued is False
+
+
+def test_maybe_enqueue_skipped_when_budget_exhausted():
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    runner = _retry_runner(rounds_by_type={"diff": 1})
+    program = _make_program_for_update(correct=False, score=0.0)
+    # attempt_round=1 == budget=1 -> exhausted
+    job = _StubRunningJob(attempt_round=1, original_mutation_type="diff")
+    enqueued = asyncio.run(
+        ShinkaEvolveRunner._maybe_enqueue_error_fix_retry(
+            runner, job=job, program=program
+        )
+    )
+    assert enqueued is False
+
+
+def test_maybe_enqueue_fires_when_budget_remains():
+    """When loop is on + candidate failed + budget remains, a background task
+    is created with attempt_round = prev+1."""
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    runner = _retry_runner()
+    runner.scheduled_retries = []
+
+    async def _stub_run_retry(self, *, job, failed_program, next_attempt_round, budget):
+        self.scheduled_retries.append(
+            {
+                "job_id": job.job_id,
+                "next_round": next_attempt_round,
+                "budget": budget,
+            }
+        )
+
+    # Bind the stub to the instance so the inner ``self.<helper>`` lookup
+    # in _maybe_enqueue_error_fix_retry resolves.
+    runner._run_error_fix_retry_async = _stub_run_retry.__get__(runner)
+
+    program = _make_program_for_update(correct=False, score=0.0)
+    job = _StubRunningJob(attempt_round=0, original_mutation_type="diff")
+
+    async def _drive():
+        enqueued = await ShinkaEvolveRunner._maybe_enqueue_error_fix_retry(
+            runner, job=job, program=program
+        )
+        # Yield once so the asyncio.create_task() in the helper actually
+        # gets scheduled before we assert.
+        await asyncio.sleep(0)
+        return enqueued
+
+    enqueued = asyncio.run(_drive())
+    assert enqueued is True
+    assert runner.scheduled_retries == [
+        {"job_id": "job-orig", "next_round": 1, "budget": 2}
+    ]
+
+
+def test_maybe_enqueue_fires_through_multiple_rounds():
+    """Round 1 failure -> enqueues round 2. Round 2 failure -> enqueues
+    round 3 if budget supports. Round at budget -> stops enqueueing."""
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    runner = _retry_runner(rounds_by_type={"diff": 3})
+    runner.scheduled_retries = []
+
+    async def _stub_run_retry(self, *, job, failed_program, next_attempt_round, budget):
+        self.scheduled_retries.append(next_attempt_round)
+
+    runner._run_error_fix_retry_async = _stub_run_retry.__get__(runner)
+
+    async def _drive(round_in: int) -> bool:
+        program = _make_program_for_update(correct=False, score=0.0)
+        job = _StubRunningJob(attempt_round=round_in, original_mutation_type="diff")
+        result = await ShinkaEvolveRunner._maybe_enqueue_error_fix_retry(
+            runner, job=job, program=program
+        )
+        await asyncio.sleep(0)
+        return result
+
+    assert asyncio.run(_drive(0)) is True  # -> 1
+    assert asyncio.run(_drive(1)) is True  # -> 2
+    assert asyncio.run(_drive(2)) is True  # -> 3 (== budget; not yet exhausted)
+    assert asyncio.run(_drive(3)) is False  # budget exhausted
+    assert runner.scheduled_retries == [1, 2, 3]
 
 
 def test_bandit_update_fix_success_skips_self_in_loser_loop():

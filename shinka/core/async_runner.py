@@ -634,6 +634,317 @@ class ShinkaEvolveRunner:
         self._last_meta_log_state: dict | None = None
         self._last_meta_log_info_time: float | None = None
 
+    def _retry_budget_for_mutation_type(self, mutation_type: Optional[str]) -> int:
+        """Return the configured retry-round budget for the given mutation type.
+
+        Falls back to 0 (i.e. no retries) when ``enable_error_fix_loop`` is
+        off or the mutation type is missing / unknown. Matches the per-type
+        defaults in ``EvolutionConfig.error_fix_rounds_by_type``.
+        """
+        if not self.evo_config.enable_error_fix_loop:
+            return 0
+        budgets = self.evo_config.error_fix_rounds_by_type or {}
+        if mutation_type and mutation_type in budgets:
+            return int(budgets[mutation_type] or 0)
+        # Unknown mutation types get the most conservative budget so we
+        # don't accidentally over-retry. The plan's table has diff=2 as
+        # the floor; keep that as a safe default.
+        return int(budgets.get("diff", 0) or 0)
+
+    async def _maybe_enqueue_error_fix_retry(
+        self,
+        *,
+        job: "AsyncRunningJob",
+        program: Program,
+    ) -> bool:
+        """Phase 4c of research-grounding: decide if a fix-loop retry fires.
+
+        Returns ``True`` iff a retry was successfully kicked off (in a
+        background task). When ``True``, the caller MUST skip the bandit
+        update for this round -- the retry will eventually complete and
+        trigger a bandit update of its own (with the new ``attempt_round``).
+
+        Returns ``False`` when the retry is rejected for any reason:
+        flag disabled, candidate is correct, budget exhausted, or
+        scheduling failed.
+        """
+        if not self.evo_config.enable_error_fix_loop:
+            return False
+        if program.correct:
+            return False
+
+        attempt_round = int(job.attempt_round or 0)
+        mutation_type = (
+            job.original_mutation_type
+            or getattr(program, "mutation_type", None)
+        )
+        budget = self._retry_budget_for_mutation_type(mutation_type)
+        if budget <= 0 or attempt_round >= budget:
+            return False
+
+        try:
+            asyncio.create_task(
+                self._run_error_fix_retry_async(
+                    job=job,
+                    failed_program=program,
+                    next_attempt_round=attempt_round + 1,
+                    budget=budget,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 -- never raise out of post-eval
+            logger.warning(
+                "Failed to schedule error-fix retry for job %s: %s",
+                getattr(job, "job_id", "?"),
+                exc,
+            )
+            return False
+        return True
+
+    async def _run_error_fix_retry_async(
+        self,
+        *,
+        job: "AsyncRunningJob",
+        failed_program: Program,
+        next_attempt_round: int,
+        budget: int,
+    ) -> None:
+        """Run one error-fix retry round: prompt -> LLM -> patch -> submit.
+
+        Lives as a background task so the post-eval bookkeeping path
+        returns promptly. The submitted retry follows the same
+        scheduler -> _job_monitor -> _handle_completed_job_safely cycle
+        as any other job, just with ``attempt_round > 0`` and an
+        accumulating ``error_fix_history``. Failures inside this method
+        are logged and swallowed -- the original bandit attribution
+        already happened (via the caller's fall-through to
+        ``_update_llm_bandits_for_completed_job`` for the exhausted-budget
+        branch).
+        """
+        try:
+            original_parent_id = job.original_parent_id or job.parent_id
+            if not original_parent_id:
+                logger.warning(
+                    "Error-fix retry skipped: no parent_id on job %s",
+                    job.job_id,
+                )
+                return
+            parent = await self.async_db.get_async(original_parent_id)
+            if parent is None:
+                logger.warning(
+                    "Error-fix retry skipped: parent %s not found",
+                    original_parent_id,
+                )
+                return
+
+            # Sample fix model (separate bandit if enabled).
+            fix_model_sample_probs = None
+            fix_model_posterior = None
+            if self.llm_fix_selection is not None:
+                (
+                    fix_model_sample_probs,
+                    fix_model_posterior,
+                ) = self.llm_fix_selection.select_llm()
+            elif self.llm_selection is not None:
+                (
+                    fix_model_sample_probs,
+                    fix_model_posterior,
+                ) = self.llm_selection.select_llm()
+
+            # Accumulate history with the round we just observed failing.
+            prior_history = list(job.error_fix_history or [])
+            this_round_failure = {
+                "round_number": int(job.attempt_round or 0) + 1,
+                "model_used": (job.meta_patch_data or {}).get("model_name"),
+                "summary": (
+                    (job.meta_patch_data or {}).get("patch_name")
+                    or (job.meta_patch_data or {}).get("patch_description")
+                    or ""
+                )[:200],
+                "error_message": (
+                    (failed_program.metadata or {}).get("error_message")
+                    or ""
+                )[:200],
+            }
+            prior_attempts = [
+                AttemptRecord(
+                    round_number=int(rec.get("round_number") or 0),
+                    model_used=rec.get("model_used"),
+                    summary=rec.get("summary") or "",
+                    error_message=rec.get("error_message") or "",
+                )
+                for rec in prior_history + [this_round_failure]
+            ]
+
+            sys_msg, user_msg, patch_type = self.prompt_sampler.sample_error_fix(
+                parent=parent,
+                failed=failed_program,
+                mutation_intent=(
+                    job.original_mutation_intent
+                    or parent.mutation_intent
+                ),
+                prior_attempts=prior_attempts,
+                round_number=next_attempt_round,
+                rounds_remaining=max(0, budget - next_attempt_round),
+            )
+
+            response = await self.llm.query(
+                msg=user_msg,
+                system_msg=sys_msg,
+                model_sample_probs=fix_model_sample_probs,
+                model_posterior=fix_model_posterior,
+                call_metadata={
+                    "purpose": "error_fix",
+                    "attempt_round": str(next_attempt_round),
+                },
+            )
+            if not response or not response.content:
+                logger.info(
+                    "Error-fix retry produced no usable response for job %s "
+                    "(round=%d); skipping submission",
+                    job.job_id,
+                    next_attempt_round,
+                )
+                return
+
+            retry_dir = (
+                f"{self.results_dir}/{FOLDER_PREFIX}_{job.generation}_fix{next_attempt_round}"
+            )
+            language_str = str(self.evo_config.language)
+            (
+                modified_code,
+                num_applied,
+                exec_fname,
+                error_msg,
+                patch_txt,
+                patch_path,
+            ) = await apply_patch_async(
+                original_str=failed_program.code,
+                patch_str=response.content,
+                patch_dir=retry_dir,
+                language=language_str,
+                # error_fix prompts request full-program output (matches
+                # ERROR_FIX_SYS_FORMAT) so apply with the full-rewrite path.
+                patch_type="full",
+                verbose=False,
+            )
+
+            if error_msg is not None or num_applied <= 0 or exec_fname is None:
+                logger.info(
+                    "Error-fix retry patch failed to apply (job=%s round=%d): %s",
+                    job.job_id,
+                    next_attempt_round,
+                    error_msg,
+                )
+                return
+
+            patch_name = extract_between(
+                response.content, "<NAME>", "</NAME>", False
+            ) or "error_fix"
+            patch_description = extract_between(
+                response.content, "<DESCRIPTION>", "</DESCRIPTION>", False
+            ) or ""
+
+            api_costs = float(getattr(response, "cost", 0.0) or 0.0)
+            model_used = getattr(response, "model_name", None) or (
+                response.kwargs.get("model_name")
+                if isinstance(getattr(response, "kwargs", None), dict)
+                else None
+            )
+
+            if self.llm_fix_selection is not None and model_used:
+                try:
+                    self.llm_fix_selection.update_submitted(model_used)
+                    self.llm_fix_selection.update_cost(arm=model_used, cost=api_costs)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Fix bandit submitted/cost update failed: %s", exc)
+
+            self.total_api_cost += api_costs
+
+            meta_patch_data = {
+                "api_costs": api_costs,
+                "patch_type": patch_type,
+                "patch_name": patch_name,
+                "patch_description": patch_description,
+                "num_applied": num_applied,
+                "attempt_round": next_attempt_round,
+                "model_name": model_used,
+                "llm_result": response.to_dict() if response else None,
+                "source_job_id": str(job.job_id) + f"_fix{next_attempt_round}",
+            }
+
+            proposal_started_at = time.time()
+            try:
+                (
+                    new_job_id,
+                    evaluation_worker_id,
+                    evaluation_submitted_at,
+                    evaluation_started_at,
+                    running_eval_jobs_at_submit,
+                ) = await self._submit_evaluation_job_with_slot(
+                    exec_fname=exec_fname,
+                    results_dir=retry_dir,
+                    sampling_worker_id=None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Error-fix retry scheduler submit failed (job=%s round=%d): %s",
+                    job.job_id,
+                    next_attempt_round,
+                    exc,
+                )
+                return
+
+            retry_job = AsyncRunningJob(
+                job_id=new_job_id,
+                exec_fname=exec_fname,
+                results_dir=retry_dir,
+                start_time=proposal_started_at,
+                proposal_started_at=proposal_started_at,
+                evaluation_submitted_at=evaluation_submitted_at,
+                generation=job.generation,
+                evaluation_started_at=evaluation_started_at,
+                active_proposals_at_start=0,
+                running_eval_jobs_at_submit=running_eval_jobs_at_submit,
+                # parent_id is the ORIGINAL parent (root of chain) so DB
+                # lineage stays clean -- the failed candidate is not a
+                # parent, just an intermediate state.
+                parent_id=original_parent_id,
+                code_diff=None,
+                meta_patch_data=meta_patch_data,
+                code_embedding=None,
+                embed_cost=0.0,
+                novelty_cost=0.0,
+                attempt_round=next_attempt_round,
+                original_parent_id=original_parent_id,
+                error_fix_history=prior_history + [this_round_failure],
+                original_mutation_intent=(
+                    job.original_mutation_intent
+                    or parent.mutation_intent
+                ),
+                original_mutation_type=(
+                    job.original_mutation_type
+                    or getattr(failed_program, "mutation_type", None)
+                ),
+            )
+            self.running_jobs.append(retry_job)
+            self.submitted_jobs[str(new_job_id)] = retry_job
+            self.slot_available.set()
+
+            logger.info(
+                "Enqueued error-fix retry: gen=%d round=%d/%d job=%s -> %s",
+                job.generation,
+                next_attempt_round,
+                budget,
+                job.job_id,
+                new_job_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Error-fix retry crashed for job %s: %s",
+                getattr(job, "job_id", "?"),
+                exc,
+            )
+
     def _update_llm_bandits_for_completed_job(
         self,
         *,
@@ -4628,12 +4939,31 @@ class ShinkaEvolveRunner:
                     logger.warning(f"Meta summarizer error for {job.job_id}: {e}")
                     # Don't fail the whole job for meta summarizer issues
 
+            # Phase 4c of research-grounding: before the bandit update, ask
+            # the error-fix loop whether this failed candidate should be
+            # retried. If a retry is enqueued, the bandit update is DEFERRED
+            # to the next round's completion (so the bandit ultimately sees
+            # the final outcome, not the intermediate failure).
+            retry_enqueued = False
+            try:
+                retry_enqueued = await self._maybe_enqueue_error_fix_retry(
+                    job=job, program=program
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Error-fix retry decision failed for %s: %s",
+                    job.job_id,
+                    exc,
+                )
+
             # Update LLM selection (Phase 4 of research-grounding: branch on
             # attempt_round so the proposer bandit sees a decayed-credit
             # reward for fix-loop successes instead of full credit, and the
             # dedicated fixer bandit observes per-round outcomes).
-            if self.llm_selection is not None and "model_name" in (
-                program.metadata or {}
+            if (
+                not retry_enqueued
+                and self.llm_selection is not None
+                and "model_name" in (program.metadata or {})
             ):
                 try:
                     # Baseline is the ORIGINAL parent score (root of any

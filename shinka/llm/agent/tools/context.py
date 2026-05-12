@@ -130,6 +130,11 @@ class ShinkaToolContext:
     # Probe
     probe_timeout_sec: int = DEFAULT_PROBE_TIMEOUT_SEC
 
+    # Web search (OpenAI/Azure built-in tool). One of "low" / "medium"
+    # / "high" — drives how much search content the model sees, and
+    # therefore the per-call cost. "medium" is the SDK default.
+    web_search_context_size: str = "medium"
+
     # Telemetry, mutated by tool wrappers
     tool_call_trace: List[Dict[str, Any]] = field(default_factory=list)
 

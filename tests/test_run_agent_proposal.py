@@ -948,6 +948,163 @@ def test_proposer_threads_azure_kwargs_into_run_agent(tmp_path: Path) -> None:
     assert run_kwargs["cache_static_prompt"] is True
 
 
+# ----------------------------------------------------------------------
+# Phase 1b of research-grounding: fix_telemetry derived from the agent's
+# tool trace. Surfaces in-loop fix dynamics that the single bandit
+# reward (combined_score) cannot distinguish — "model fixed an eval
+# failure" vs "model succeeded first try" look identical to the bandit.
+# ----------------------------------------------------------------------
+
+
+def test_summarize_fix_telemetry_first_try_success() -> None:
+    """One apply + one passing eval ⇒ no failure to fix."""
+    from shinka.core.async_runner import _summarize_fix_telemetry
+
+    trace = [
+        {"name": "apply_patch", "success": True, "num_applied": 1},
+        {"name": "evaluate", "success": True, "combined_score": 0.9},
+    ]
+    out = _summarize_fix_telemetry(trace)
+    assert out == {
+        "apply_attempts": 1,
+        "eval_attempts": 1,
+        "had_failure_then_success": False,
+        "final_correct": True,
+    }
+
+
+def test_summarize_fix_telemetry_fixed_after_failure() -> None:
+    """Two applies + a fail-then-pass eval sequence ⇒ fixed inside loop."""
+    from shinka.core.async_runner import _summarize_fix_telemetry
+
+    trace = [
+        {"name": "apply_patch", "success": True, "num_applied": 1},
+        {"name": "evaluate", "success": False, "combined_score": 0.0},
+        {"name": "apply_patch", "success": True, "num_applied": 1},
+        {"name": "evaluate", "success": True, "combined_score": 0.95},
+    ]
+    out = _summarize_fix_telemetry(trace)
+    assert out == {
+        "apply_attempts": 2,
+        "eval_attempts": 2,
+        "had_failure_then_success": True,
+        "final_correct": True,
+    }
+
+
+def test_summarize_fix_telemetry_never_fixed() -> None:
+    """Agent gave up after a failed eval ⇒ final_correct stays False."""
+    from shinka.core.async_runner import _summarize_fix_telemetry
+
+    trace = [
+        {"name": "apply_patch", "success": True, "num_applied": 1},
+        {"name": "evaluate", "success": False, "combined_score": 0.0},
+        {"name": "apply_patch", "success": False, "error": "diff parse error"},
+    ]
+    out = _summarize_fix_telemetry(trace)
+    assert out == {
+        "apply_attempts": 2,
+        "eval_attempts": 1,
+        "had_failure_then_success": False,
+        "final_correct": False,
+    }
+
+
+def test_summarize_fix_telemetry_no_evaluate_calls() -> None:
+    """When the agent never evaluates, ``final_correct`` is None.
+    This happens when the agent runs out of turns before reaching an
+    evaluate, or when ``evaluate`` isn't in agentic_tools."""
+    from shinka.core.async_runner import _summarize_fix_telemetry
+
+    trace = [
+        {"name": "apply_patch", "success": True, "num_applied": 1},
+    ]
+    out = _summarize_fix_telemetry(trace)
+    assert out == {
+        "apply_attempts": 1,
+        "eval_attempts": 0,
+        "had_failure_then_success": False,
+        "final_correct": None,
+    }
+
+
+def test_summarize_fix_telemetry_ignores_other_tools() -> None:
+    """``web_search`` / ``read_host_file`` / ``query_evolution_db``
+    don't speak to fix-skill and must not pollute the counts."""
+    from shinka.core.async_runner import _summarize_fix_telemetry
+
+    trace = [
+        {"name": "web_search", "success": True},
+        {"name": "apply_patch", "success": True, "num_applied": 2},
+        {"name": "read_host_file", "success": True},
+        {"name": "evaluate", "success": True, "combined_score": 0.7},
+    ]
+    out = _summarize_fix_telemetry(trace)
+    assert out["apply_attempts"] == 1
+    assert out["eval_attempts"] == 1
+    assert out["had_failure_then_success"] is False
+
+
+def test_proposer_writes_fix_telemetry_into_meta_patch_data(
+    tmp_path: Path,
+) -> None:
+    """End-to-end: ``_run_agent_proposal`` must compute fix_telemetry
+    from the captured tool trace and surface it on meta_patch_data so
+    the orchestrator persists it onto ``Program.metadata.fix_telemetry``."""
+    runner = _build_stub_runner(tmp_path)
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        ctx: ShinkaToolContext = kwargs["tool_context"]
+        # Simulate: apply → eval fails → apply → eval passes. The
+        # agent's continuous-context loop fixed its own failure.
+        ctx.record_tool_call(
+            "apply_patch", latency_sec=0.01, success=True,
+            extra={"num_applied": 1, "patch_type": "diff"},
+        )
+        ctx.record_tool_call(
+            "evaluate", latency_sec=0.5, success=False,
+            error="combined_score=0",
+            extra={"combined_score": 0.0},
+        )
+        ctx.record_tool_call(
+            "apply_patch", latency_sec=0.01, success=True,
+            extra={"num_applied": 1, "patch_type": "diff"},
+        )
+        ctx.record_tool_call(
+            "evaluate", latency_sec=0.5, success=True,
+            extra={"combined_score": 0.85},
+        )
+        ctx.last_successful_patch_text = "diff-final"
+        ctx.last_successful_patch_type = "diff"
+        ctx.last_successful_num_applied = 1
+        return SimpleNamespace(
+            content="<NAME>fix</NAME><DESCRIPTION>x</DESCRIPTION>",
+            cost=0.0,
+            to_dict=lambda: {},
+        )
+
+    runner.llm.run_agent = AsyncMock(side_effect=fake_run_agent)
+    result = asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=5,
+        )
+    )
+    assert result is not None
+    _, meta, success = result
+    assert success is True
+    assert "fix_telemetry" in meta
+    assert meta["fix_telemetry"] == {
+        "apply_attempts": 2,
+        "eval_attempts": 2,
+        "had_failure_then_success": True,
+        "final_correct": True,
+    }
+
+
 def test_proposer_respects_disabled_metadata_tagging(tmp_path: Path) -> None:
     """When ``evo_config.tag_calls_with_metadata`` is False, the
     runner's ``_build_call_metadata`` returns None (cheap branch),

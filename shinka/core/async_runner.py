@@ -228,6 +228,59 @@ def _validate_evo_config_model_env_access(evo_config: EvolutionConfig) -> None:
     )
 
 
+def _summarize_fix_telemetry(
+    tool_call_trace: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Derive a small dict describing whether the agent fixed an error
+    within its single-run continuous-context loop.
+
+    The dashboard signal we want: a model that proposes well but rarely
+    *fixes* its own failures looks indistinguishable from one that
+    succeeds first-try, on the bandit reward alone (both produce one
+    Program row with a single ``combined_score``). This helper extracts
+    the in-loop dynamics from the ``ShinkaAgentHooks``-populated trace.
+
+    Keys returned:
+    * ``apply_attempts``: number of ``apply_patch`` tool calls, success
+      or fail. Multiple attempts indicates iteration; single attempt
+      indicates a one-shot fix.
+    * ``eval_attempts``: number of ``evaluate`` tool calls.
+    * ``had_failure_then_success``: True iff a failing ``evaluate``
+      entry (correct=False) appears in the trace earlier than a passing
+      one — i.e., the agent fixed an error within the run.
+    * ``final_correct``: success state of the final ``evaluate`` call,
+      or ``None`` when the agent never invoked ``evaluate``.
+
+    Tools other than ``apply_patch`` / ``evaluate`` are ignored — they
+    don't speak to fix-skill (e.g., web_search, read_host_file).
+    """
+    apply_attempts = 0
+    eval_attempts = 0
+    saw_eval_fail = False
+    had_failure_then_success = False
+    final_correct: Optional[bool] = None
+
+    for entry in tool_call_trace:
+        name = entry.get("name")
+        success = bool(entry.get("success"))
+        if name == "apply_patch":
+            apply_attempts += 1
+        elif name == "evaluate":
+            eval_attempts += 1
+            final_correct = success
+            if success and saw_eval_fail:
+                had_failure_then_success = True
+            if not success:
+                saw_eval_fail = True
+
+    return {
+        "apply_attempts": apply_attempts,
+        "eval_attempts": eval_attempts,
+        "had_failure_then_success": had_failure_then_success,
+        "final_correct": final_correct,
+    }
+
+
 def _make_agent_evaluator(
     scheduler: Any,
     exec_fname: str,
@@ -3971,6 +4024,13 @@ class ShinkaEvolveRunner:
                     )
                     diff_summary = {}
 
+            # Derive in-loop fix telemetry from the agent's tool trace
+            # (phase 1b of research-grounding). Captures whether the
+            # agent fixed an evaluate-failure within its single Runner.run
+            # — the signal that's otherwise invisible to the bandit
+            # because it folds propose-skill and fix-skill into one
+            # reward.
+            fix_telemetry = _summarize_fix_telemetry(tool_ctx.tool_call_trace)
             meta_patch_data: Dict[str, Any] = {
                 "api_costs": total_costs,
                 "patch_type": tool_ctx.last_successful_patch_type or patch_type,
@@ -3984,6 +4044,7 @@ class ShinkaEvolveRunner:
                 "patch_attempt": num_attempts,
                 "system_prompt_id": current_prompt_id,
                 "agent_tool_trace": list(tool_ctx.tool_call_trace),
+                "fix_telemetry": fix_telemetry,
                 **llm_kwargs,
                 "llm_result": response.to_dict() if response else None,
             }

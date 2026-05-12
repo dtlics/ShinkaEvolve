@@ -94,6 +94,48 @@ class EvolutionConfig:
     error_fix_shell_models: List[str] = field(
         default_factory=lambda: ["gpt-5-codex"]
     )
+    # --- Phase 5: deep-research meta pipeline ---
+    # When True, the meta callsite splits into a 4-stage pipeline
+    # (drift -> novelty -> deep_research -> code_grounding) at the
+    # ``dr_meta_interval`` cadence. The existing freeform meta still
+    # runs at ``meta_rec_interval`` cadence on the off-rounds so the
+    # off-the-shelf path stays warm.
+    enable_deep_research: bool = False
+    # Cadence (in evaluated programs) at which the DR pipeline fires.
+    # Must be >= meta_rec_interval; default 20 (every other freeform
+    # meta cycle).
+    dr_meta_interval: int = 20
+    # Model + endpoint config. The actual key/endpoint live in env vars
+    # so secrets never enter the config or git.
+    dr_model: str = "o3-deep-research"
+    dr_endpoint_env: str = "AZURE_DR_ENDPOINT"
+    dr_api_key_env: str = "AZURE_DR_API_KEY"
+    # Standard preset: medium reasoning + ~20 tool calls per DR run
+    # gives ~5-10 min wall clock at ~$5-10 / call. Background polling
+    # handles the long wait without dropping the HTTP socket.
+    dr_reasoning_effort: str = "medium"
+    dr_max_tool_calls: int = 20
+    dr_background: bool = True
+    # Hard cap on DR calls across a whole evolution run.
+    dr_max_calls_per_run: int = 30
+    # Above this cosine similarity, Stage B links to an existing brief
+    # instead of triggering another DR call (cross-island dedup).
+    dr_brief_cache_threshold: float = 0.95
+    # Below this drift score, Stage A short-circuits the pipeline and
+    # the island re-uses its previous brief unchanged.
+    dr_drift_threshold: float = 0.5
+    # Allowed-domains list for Stage D code grounding. Stage D's web
+    # search and fetch tools are constrained to these so they stay on
+    # task instead of wandering the internet.
+    dr_code_grounding_domains: List[str] = field(
+        default_factory=lambda: [
+            "github.com",
+            "arxiv.org",
+            "huggingface.co",
+            "paperswithcode.com",
+            "docs.python.org",
+        ]
+    )
     proposal_target_mode: str = "adaptive"
     proposal_target_min_samples: int = 5
     proposal_target_ratio_cap: float = 2.0

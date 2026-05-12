@@ -663,6 +663,58 @@ class ProgramDatabase:
                     "Error during %s migration: %s", column_name, e
                 )
 
+        # Migration 6: Deep-research meta-brief tables (Phase 5 of
+        # research-grounding). ``meta_briefs`` stores per-island Stage A/B/C/D
+        # outputs; ``dr_brief_cache`` is a query-embedding-keyed cache so
+        # parallel islands can reuse briefs when they drift to the same
+        # territory. Both tables are CREATE-TABLE-IF-NOT-EXISTS so the
+        # migration is idempotent on re-open.
+        try:
+            self.cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS meta_briefs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    island_idx INTEGER,
+                    generation INTEGER,
+                    stage TEXT NOT NULL,        -- 'A' / 'B' / 'C' / 'D'
+                    content TEXT,                -- human-readable rendered text
+                    structured_json TEXT,        -- structured items (Stage D)
+                    model_used TEXT,
+                    cost REAL DEFAULT 0.0,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            self.cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_meta_briefs_island_generation
+                ON meta_briefs(island_idx, generation)
+                """
+            )
+            self.cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dr_brief_cache (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query_text TEXT,
+                    query_embedding BLOB,        -- JSON-encoded float list
+                    brief_json TEXT,             -- the structured brief
+                    model_used TEXT,
+                    cost REAL DEFAULT 0.0,
+                    hits INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            self.cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_dr_brief_cache_created_at
+                ON dr_brief_cache(created_at)
+                """
+            )
+            self.conn.commit()
+        except sqlite3.Error as e:
+            logger.error("Error during deep-research migration: %s", e)
+
     @db_retry()
     def _load_metadata_from_db(self):
         if not self.cursor:

@@ -23,12 +23,52 @@ from shinka.prompts import (
     AttemptRecord,
     format_prior_attempt_log,
     format_traceback_section,
+    # Phase 6 literature_grounded mutation arm:
+    LIT_GROUNDED_SYS_FORMAT,
+    LIT_GROUNDED_ITER_MSG,
 )
 from shinka.prompts.prompts_init import INIT_SYSTEM_MSG, INIT_USER_MSG
 from shinka.defaults import default_patch_type_probs, default_patch_types
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _brief_has_grounded_item(island_brief: Optional[Any]) -> bool:
+    """True when the brief carries at least one item with a non-empty
+    ``reference_snippet`` -- the suppression rule from the design doc.
+
+    A brief without grounded items would force the literature_grounded
+    arm to fabricate a reference; we prefer to skip the arm entirely.
+    """
+    if island_brief is None:
+        return False
+    items = getattr(island_brief, "items", None) or []
+    for item in items:
+        snippet = getattr(item, "reference_snippet", "") or ""
+        if snippet.strip():
+            return True
+    return False
+
+
+def _pick_brief_item(island_brief: Optional[Any]) -> Optional[Any]:
+    """Pick one grounded brief item for a single literature_grounded call.
+
+    Random uniform across items that have a non-empty reference_snippet.
+    Returns ``None`` if no grounded item exists (caller should treat
+    that as a suppression signal).
+    """
+    if island_brief is None:
+        return None
+    candidates = [
+        item
+        for item in getattr(island_brief, "items", None) or []
+        if (getattr(item, "reference_snippet", "") or "").strip()
+    ]
+    if not candidates:
+        return None
+    idx = int(np.random.randint(0, len(candidates)))
+    return candidates[idx]
 
 
 def _render_island_brief(island_brief: Optional[Any]) -> Optional[str]:
@@ -132,14 +172,25 @@ class PromptSampler:
         else:
             sys_msg = self.task_sys_msg
 
-        # Sample coding type
-        # Filter out crossover if no inspirations
+        # Sample coding type. Apply suppression rules first:
+        # - "cross" is suppressed when there are no inspirations.
+        # - "literature_grounded" (Phase 6) is suppressed when the linked
+        #   island brief has no items carrying a non-empty
+        #   reference_snippet -- the arm has nothing to ground on.
+        suppressed_types: List[str] = []
         if len(archive_inspirations) == 0 and len(top_k_inspirations) == 0:
-            valid_types = [t for t in self.patch_types if t != "cross"]
+            suppressed_types.append("cross")
+        if not _brief_has_grounded_item(island_brief):
+            suppressed_types.append("literature_grounded")
+
+        if suppressed_types:
+            valid_types = [
+                t for t in self.patch_types if t not in suppressed_types
+            ]
             valid_probs = [
                 p
                 for t, p in zip(self.patch_types, self.patch_type_probs)
-                if t != "cross"
+                if t not in suppressed_types
             ]
             # Renormalize probabilities
             prob_sum = sum(valid_probs)
@@ -201,6 +252,8 @@ class PromptSampler:
             sys_msg += selected_format
         elif patch_type == "cross":
             sys_msg += CROSS_SYS_FORMAT
+        elif patch_type == "literature_grounded":
+            sys_msg += LIT_GROUNDED_SYS_FORMAT.format(language=self.language)
 
         # Build sorted inspiration context (combines archive + top-k)
         sorted_inspirations = self.context_builder.build_context(
@@ -254,6 +307,29 @@ class PromptSampler:
                 archive_inspirations,
                 top_k_inspirations,
                 language=self.language,
+            )
+        elif patch_type == "literature_grounded":
+            chosen_item = _pick_brief_item(island_brief)
+            if chosen_item is None:
+                # This should never fire because the suppression rule
+                # above filters literature_grounded out when no grounded
+                # item exists, but defend the dispatch path anyway.
+                raise ValueError(
+                    "literature_grounded sampled with no grounded brief item"
+                )
+            iter_msg = LIT_GROUNDED_ITER_MSG.format(
+                language=self.language,
+                code_content=parent.code,
+                performance_metrics=perf_str(
+                    parent.combined_score, parent.public_metrics
+                ),
+                text_feedback_section=text_feedback_section,
+                idea=getattr(chosen_item, "idea", ""),
+                rationale=getattr(chosen_item, "rationale", ""),
+                reference_snippet=getattr(chosen_item, "reference_snippet", ""),
+                source=getattr(chosen_item, "source", "")
+                or "(no source recorded)",
+                gotchas=getattr(chosen_item, "gotchas", "") or "(none recorded)",
             )
         elif patch_type == "paper":
             raise NotImplementedError("Paper edit not implemented.")

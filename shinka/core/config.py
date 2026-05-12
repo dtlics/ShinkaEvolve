@@ -136,6 +136,20 @@ class EvolutionConfig:
             "docs.python.org",
         ]
     )
+    # --- Phase 6: literature_grounded mutation arm ---
+    # New mutation type that consumes one structured DR brief item and
+    # uses bounded web search/fetch to confirm or extend the supplied
+    # reference snippet. Disabled by default; the arm is suppressed at
+    # sample time when the linked island brief carries no items with a
+    # non-empty reference snippet.
+    enable_literature_grounded: bool = False
+    # Probability mass for the arm when active. Spread the remainder
+    # across the other arms via patch_type_probs at the call site.
+    literature_grounded_prob: float = 0.1
+    # Tool-budget caps applied per literature_grounded call.
+    literature_grounded_max_searches: int = 3
+    literature_grounded_max_fetches: int = 2
+    literature_grounded_max_turns: int = 6
     proposal_target_mode: str = "adaptive"
     proposal_target_min_samples: int = 5
     proposal_target_ratio_cap: float = 2.0

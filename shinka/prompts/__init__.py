@@ -27,6 +27,10 @@ from .prompts_fix import (
     format_prior_attempt_log,
     format_traceback_section,
 )
+from .prompts_literature import (
+    LIT_GROUNDED_SYS_FORMAT,
+    LIT_GROUNDED_ITER_MSG,
+)
 from .prompts_init import INIT_SYSTEM_MSG, INIT_USER_MSG
 from .prompts_meta import (
     META_STEP1_SYSTEM_MSG,
@@ -73,6 +77,8 @@ __all__ = [
     "AttemptRecord",
     "format_prior_attempt_log",
     "format_traceback_section",
+    "LIT_GROUNDED_SYS_FORMAT",
+    "LIT_GROUNDED_ITER_MSG",
     "INIT_SYSTEM_MSG",
     "INIT_USER_MSG",
     "META_STEP1_SYSTEM_MSG",

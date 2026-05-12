@@ -27,7 +27,6 @@ dependencies = [
     "pandas",
     "requests",
     "pydantic",
-    "backoff",
     "python-dotenv",
     "instructor",
     "python-Levenshtein",

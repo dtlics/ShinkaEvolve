@@ -380,9 +380,12 @@ class ShinkaEvolveRunner:
         self.db = None
         self.async_db = None
 
-        # LLM clients
+        # LLM clients. ``delete_after`` controls whether each Responses API
+        # call is purged from Azure after retrieval (privacy default True);
+        # passed once to the client so all per-call queries inherit it.
         self.llm = AsyncLLMClient(
             model_names=evo_config.llm_models,
+            delete_after=evo_config.delete_llm_responses_after_retrieval,
             **evo_config.llm_kwargs,
         )
 
@@ -414,6 +417,7 @@ class ShinkaEvolveRunner:
             # Create async LLM client for meta analysis
             async_meta_llm = AsyncLLMClient(
                 model_names=evo_config.meta_llm_models or evo_config.llm_models,
+                delete_after=evo_config.delete_llm_responses_after_retrieval,
                 **evo_config.meta_llm_kwargs,
             )
             # Create sync summarizer for state management
@@ -436,6 +440,7 @@ class ShinkaEvolveRunner:
         if evo_config.novelty_llm_models:
             novelty_llm = AsyncLLMClient(
                 model_names=evo_config.novelty_llm_models,
+                delete_after=evo_config.delete_llm_responses_after_retrieval,
                 **evo_config.novelty_llm_kwargs,
             )
             sync_novelty_judge = NoveltyJudge(
@@ -468,6 +473,7 @@ class ShinkaEvolveRunner:
             prompt_llm_models = evo_config.prompt_llm_models or evo_config.llm_models
             self.prompt_llm = AsyncLLMClient(
                 model_names=prompt_llm_models,
+                delete_after=evo_config.delete_llm_responses_after_retrieval,
                 **evo_config.prompt_llm_kwargs,
             )
             logger.info(f"Prompt evolution enabled with models: {prompt_llm_models}")

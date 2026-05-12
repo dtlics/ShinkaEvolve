@@ -48,6 +48,12 @@ class EvolutionConfig:
     max_api_costs: Optional[float] = None
     inspiration_sort_order: str = "ascending"
     enable_controlled_oversubscription: bool = False
+    # Phase 2 of research-grounding: in bg+poll mode the Responses API
+    # requires server-side storage during the response lifecycle. When True
+    # (default) we issue ``responses.delete(id)`` after retrieval so Azure's
+    # 31-day retention is bypassed; when False the response lingers on Azure
+    # for 31 days.
+    delete_llm_responses_after_retrieval: bool = True
     proposal_target_mode: str = "adaptive"
     proposal_target_min_samples: int = 5
     proposal_target_ratio_cap: float = 2.0

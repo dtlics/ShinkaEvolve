@@ -130,6 +130,57 @@ def _create_kwargs(create_kwargs: dict) -> dict:
     return forced
 
 
+def _submit_with_transient_retry_sync(
+    create_callable, kwargs: dict
+) -> Any:
+    """Retry transient errors on the initial responses.create()/parse()."""
+    attempts_left = POLL_RETRIEVE_RETRIES
+    interval = POLL_INTERVAL_INITIAL
+    last_exc: Optional[BaseException] = None
+    while attempts_left > 0:
+        try:
+            return create_callable(**kwargs)
+        except _TRANSIENT_RETRIEVE_ERRORS as exc:
+            last_exc = exc
+            attempts_left -= 1
+            if attempts_left <= 0:
+                break
+            logger.info(
+                "Transient create error (%d retries left): %s",
+                attempts_left,
+                exc,
+            )
+            time.sleep(interval)
+            interval = _next_interval(interval)
+    assert last_exc is not None
+    raise last_exc
+
+
+async def _submit_with_transient_retry_async(
+    create_callable, kwargs: dict
+) -> Any:
+    attempts_left = POLL_RETRIEVE_RETRIES
+    interval = POLL_INTERVAL_INITIAL
+    last_exc: Optional[BaseException] = None
+    while attempts_left > 0:
+        try:
+            return await create_callable(**kwargs)
+        except _TRANSIENT_RETRIEVE_ERRORS as exc:
+            last_exc = exc
+            attempts_left -= 1
+            if attempts_left <= 0:
+                break
+            logger.info(
+                "Transient create error (%d retries left): %s",
+                attempts_left,
+                exc,
+            )
+            await asyncio.sleep(interval)
+            interval = _next_interval(interval)
+    assert last_exc is not None
+    raise last_exc
+
+
 def create_and_poll(
     client: Any,
     *,
@@ -144,7 +195,9 @@ def create_and_poll(
     On polling-budget exhaustion raises ``PollTimeoutError`` and leaves
     the server-side response in place (no delete).
     """
-    initial = client.responses.create(**_create_kwargs(create_kwargs))
+    initial = _submit_with_transient_retry_sync(
+        client.responses.create, _create_kwargs(create_kwargs)
+    )
     response_id = initial.id
     if initial.status in _TERMINAL_OK + _TERMINAL_PARTIAL:
         # Some short calls complete inline; skip polling.
@@ -209,7 +262,9 @@ async def create_and_poll_async(
     **create_kwargs: Any,
 ) -> Any:
     """Async mirror of :func:`create_and_poll`."""
-    initial = await client.responses.create(**_create_kwargs(create_kwargs))
+    initial = await _submit_with_transient_retry_async(
+        client.responses.create, _create_kwargs(create_kwargs)
+    )
     response_id = initial.id
     if initial.status in _TERMINAL_OK + _TERMINAL_PARTIAL:
         if delete_after:
@@ -278,9 +333,9 @@ def create_and_poll_parse(
     Uses ``responses.parse(background=True, ...)`` for the initial submit
     so structured outputs go through the same bg+poll machinery.
     """
-    initial = client.responses.parse(
-        text_format=text_format,
-        **_create_kwargs(create_kwargs),
+    initial = _submit_with_transient_retry_sync(
+        client.responses.parse,
+        {"text_format": text_format, **_create_kwargs(create_kwargs)},
     )
     response_id = initial.id
     if initial.status in _TERMINAL_OK + _TERMINAL_PARTIAL:
@@ -340,9 +395,9 @@ async def create_and_poll_parse_async(
     **create_kwargs: Any,
 ) -> Any:
     """Async mirror of :func:`create_and_poll_parse`."""
-    initial = await client.responses.parse(
-        text_format=text_format,
-        **_create_kwargs(create_kwargs),
+    initial = await _submit_with_transient_retry_async(
+        client.responses.parse,
+        {"text_format": text_format, **_create_kwargs(create_kwargs)},
     )
     response_id = initial.id
     if initial.status in _TERMINAL_OK + _TERMINAL_PARTIAL:

@@ -10,7 +10,10 @@ from .query import query, query_async
 from .kwargs import sample_model_kwargs
 from .providers import QueryResult
 
-MAX_RETRIES = 3
+# Bg+poll mode (Phase 2 of research-grounding) handles transient errors via
+# its retrieve / create retry loops. The whole-call retry layer below is now
+# only a fail-fast guard around fatal errors (auth, quota, bad request).
+MAX_RETRIES = 1
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,7 @@ class LLMClient:
         model_sample_probs: Optional[List[float]] = None,
         output_model: Optional[BaseModel] = None,
         verbose: bool = True,
+        delete_after: bool = True,
     ):
         self.temperatures = temperatures
         self.max_tokens = max_tokens
@@ -36,6 +40,7 @@ class LLMClient:
         self.output_model = output_model
         self.structured_output = output_model is not None
         self.verbose = verbose
+        self.delete_after = delete_after
 
     def batch_query(
         self,
@@ -240,6 +245,8 @@ class LLMClient:
         llm_kwargs: Optional[Dict] = None,
         model_sample_probs: Optional[List[float]] = None,
         model_posterior: Optional[List[float]] = None,
+        poll_timeout: Optional[float] = None,
+        delete_after: Optional[bool] = None,
     ) -> Optional[QueryResult]:
         """Execute a single query to the LLM.
 
@@ -290,16 +297,23 @@ class LLMClient:
             model_posteriors = dict(zip(self.model_names, model_posterior))
             model_posteriors = {k: float(v) for k, v in model_posteriors.items()}
 
+        effective_delete_after = (
+            delete_after if delete_after is not None else self.delete_after
+        )
+
         try_count = 0
         while try_count < MAX_RETRIES:
             try:
+                extra_kwargs = {"delete_after": effective_delete_after}
+                if poll_timeout is not None:
+                    extra_kwargs["poll_timeout"] = poll_timeout
                 result = query(
                     msg=msg,
                     system_msg=system_msg,
                     msg_history=msg_history,
                     output_model=self.output_model,
                     model_posteriors=model_posteriors,
-                    **llm_kwargs,
+                    **{**llm_kwargs, **extra_kwargs},
                 )
                 if self.verbose and hasattr(result, "cost") and result.cost is not None:
                     logger.info(f"==> QUERY: API cost: ${result.cost:.4f}")
@@ -320,6 +334,7 @@ class AsyncLLMClient:
         model_sample_probs: Optional[List[float]] = None,
         output_model: Optional[BaseModel] = None,
         verbose: bool = True,
+        delete_after: bool = True,
     ):
         self.temperatures = temperatures
         self.max_tokens = max_tokens
@@ -331,6 +346,10 @@ class AsyncLLMClient:
         self.output_model = output_model
         self.structured_output = output_model is not None
         self.verbose = verbose
+        # Default for ``delete_after`` on every query through this client.
+        # The runner sets this from ``EvolutionConfig.delete_llm_responses_after_retrieval``
+        # so the privacy policy is honored without per-call plumbing.
+        self.delete_after = delete_after
 
     async def batch_query(
         self,
@@ -512,6 +531,8 @@ class AsyncLLMClient:
         llm_kwargs: Optional[Dict] = None,
         model_sample_probs: Optional[List[float]] = None,
         model_posterior: Optional[List[float]] = None,
+        poll_timeout: Optional[float] = None,
+        delete_after: Optional[bool] = None,
     ) -> Optional[QueryResult]:
         """Execute a single query to the LLM asynchronously.
 
@@ -562,16 +583,23 @@ class AsyncLLMClient:
             model_posteriors = dict(zip(self.model_names, model_posterior))
             model_posteriors = {k: float(v) for k, v in model_posteriors.items()}
 
+        effective_delete_after = (
+            delete_after if delete_after is not None else self.delete_after
+        )
+
         try_count = 0
         while try_count < MAX_RETRIES:
             try:
+                extra_kwargs = {"delete_after": effective_delete_after}
+                if poll_timeout is not None:
+                    extra_kwargs["poll_timeout"] = poll_timeout
                 result = await query_async(
                     msg=msg,
                     system_msg=system_msg,
                     msg_history=msg_history,
                     output_model=self.output_model,
                     model_posteriors=model_posteriors,
-                    **llm_kwargs,
+                    **{**llm_kwargs, **extra_kwargs},
                 )
                 if self.verbose and hasattr(result, "cost") and result.cost is not None:
                     logger.info(f"==> QUERY: API cost: ${result.cost:.4f}")

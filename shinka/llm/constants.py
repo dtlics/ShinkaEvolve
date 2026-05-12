@@ -1,8 +1,8 @@
+# Per-call HTTP timeout on the OpenAI / Azure OpenAI SDK clients themselves.
+# In bg+poll mode the long wait happens in ``responses.retrieve``, not in a
+# single long-running HTTP call, so this only needs to cover the initial
+# create and each retrieve round-trip.
 TIMEOUT = 1200
-BACKOFF_MAX_TRIES = 20
-BACKOFF_MAX_VALUE = 20
-BACKOFF_MAX_TIME_MULTIPLIER = 5
-BACKOFF_MAX_TIME = TIMEOUT * BACKOFF_MAX_TIME_MULTIPLIER
 
 # --- bg+poll mode (Phase 2 of research-grounding) ---
 # Polling cadence applied while waiting for a background Responses API call.

@@ -39,6 +39,10 @@ from .prompts_deep_research import (
     DR_STAGE_D_SYS_MSG,
     DR_STAGE_D_USER_MSG,
 )
+from .prompts_literature import (
+    LIT_GROUNDED_SYS_FORMAT,
+    LIT_GROUNDED_ITER_MSG,
+)
 from .prompts_prompt_evo import (
     PROMPT_EVO_DIFF_SYSTEM,
     PROMPT_EVO_DIFF_USER,
@@ -87,6 +91,9 @@ __all__ = [
     "DR_STAGE_C_USER_MSG",
     "DR_STAGE_D_SYS_MSG",
     "DR_STAGE_D_USER_MSG",
+    # literature_grounded mutation prompts (phase 3 of research-grounding)
+    "LIT_GROUNDED_SYS_FORMAT",
+    "LIT_GROUNDED_ITER_MSG",
     # Prompt evolution prompts
     "PROMPT_EVO_DIFF_SYSTEM",
     "PROMPT_EVO_DIFF_USER",

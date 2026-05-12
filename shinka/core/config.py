@@ -142,6 +142,28 @@ class EvolutionConfig:
         ]
     )
 
+    # literature_grounded mutation arm (phase 3 of research-grounding).
+    #
+    # When enabled, a new mutation type joins ``diff`` / ``full`` /
+    # ``cross`` with probability ``literature_grounded_prob``. The
+    # orchestrator picks one ``BriefItem`` from the parent's island
+    # brief and asks the agent to attempt the technique. ``web_search``
+    # is enabled for THIS one call only (regardless of the global
+    # ``agentic_tools`` config) so the agent can confirm the
+    # reference snippet. The agent has explicit abort permission —
+    # when it returns the parent unchanged citing insufficient
+    # reference, the bandit update is skipped (we preserve the
+    # "aborts ≠ low-score" invariant).
+    #
+    # Requires ``enable_deep_research=True`` (this arm consumes DR
+    # brief items as inputs); silently no-ops otherwise.
+    enable_literature_grounded: bool = False
+    literature_grounded_prob: float = 0.1
+    literature_grounded_max_searches: int = 3
+    literature_grounded_max_fetches: int = 2
+    literature_grounded_max_turns: int = 6
+    literature_grounded_web_search_context_size: str = "high"
+
     # Meta-prompt evolution settings.
     evolve_prompts: bool = False
     prompt_patch_types: List[str] = field(default_factory=default_prompt_patch_types)

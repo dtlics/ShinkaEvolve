@@ -55,6 +55,14 @@ class EvolutionConfig:
     proposal_target_hard_cap: Optional[int] = None
     proposal_target_ewma_alpha: float = 0.3
 
+    # Agentic proposal — Phase D. When True, the proposal coordinator
+    # dispatches to ``_run_agent_proposal`` (AgentLLMClient.run_agent
+    # with apply_patch tool, agent-driven retry loop). When False
+    # (default), uses the legacy ``_run_patch_async`` with an explicit
+    # orchestrator-driven retry loop. Off by default so existing
+    # experiments don't change behavior without opt-in.
+    use_agentic_proposer: bool = False
+
     # Meta-prompt evolution settings.
     evolve_prompts: bool = False
     prompt_patch_types: List[str] = field(default_factory=default_prompt_patch_types)

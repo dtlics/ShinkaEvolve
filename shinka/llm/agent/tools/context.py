@@ -138,6 +138,14 @@ class ShinkaToolContext:
     # Telemetry, mutated by tool wrappers
     tool_call_trace: List[Dict[str, Any]] = field(default_factory=list)
 
+    # The most recent successful apply_patch's patch text. The
+    # orchestrator reads this after the agent run to populate the
+    # patch_text field of the proposal it submits for evaluation.
+    # None if no apply_patch succeeded in the run.
+    last_successful_patch_text: Optional[str] = None
+    last_successful_patch_type: Optional[str] = None
+    last_successful_num_applied: int = 0
+
     def __post_init__(self) -> None:
         # Seed current_code from parent_code if the caller didn't
         # provide it explicitly. Avoids the common bug where a tool

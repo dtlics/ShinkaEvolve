@@ -69,7 +69,7 @@ async def _apply_patch_impl(
         return f"Error: {msg}"
 
     try:
-        modified_code, num_applied, output_path, error_msg, _, _ = (
+        modified_code, num_applied, output_path, error_msg, patch_txt, _ = (
             await apply_patch_async(
                 original_str=state.current_code,
                 patch_str=patch_text,
@@ -100,6 +100,13 @@ async def _apply_patch_impl(
 
     if modified_code is not None:
         state.current_code = modified_code
+
+    # Record the patch artifacts on the context so the orchestrator
+    # can surface them after the agent run (without scanning the
+    # entire tool_call_trace for the latest success).
+    state.last_successful_patch_text = patch_txt or patch_text
+    state.last_successful_patch_type = patch_type
+    state.last_successful_num_applied = num_applied
 
     state.record_tool_call(
         "apply_patch",

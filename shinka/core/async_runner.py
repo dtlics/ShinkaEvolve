@@ -37,6 +37,7 @@ from shinka.llm import (
     ThompsonSampler,
 )
 from shinka.llm.agent import AgentLLMClient
+from shinka.llm.agent.tools import ShinkaToolContext, select_shinka_tools
 from shinka.embed import AsyncEmbeddingClient
 from shinka.launch import JobScheduler, JobConfig, LocalJobConfig
 from shinka.edit.async_apply import (
@@ -2694,8 +2695,21 @@ class ShinkaEvolveRunner:
                             model_posterior=model_posterior,
                         )
                     else:
-                        # NORMAL MODE: Generate patch
-                        patch_result = await self._run_patch_async(
+                        # NORMAL MODE: Generate patch. The agentic
+                        # proposer (Phase D) is opt-in via
+                        # evo_config.use_agentic_proposer; legacy
+                        # explicit-retry path remains the default.
+                        # ``getattr`` for backward compat with ad-hoc
+                        # SimpleNamespace evo_config stubs used in
+                        # async_runner_recovery tests.
+                        proposer = (
+                            self._run_agent_proposal
+                            if getattr(
+                                self.evo_config, "use_agentic_proposer", False
+                            )
+                            else self._run_patch_async
+                        )
+                        patch_result = await proposer(
                             parent_program,
                             archive_programs,
                             top_k_programs,
@@ -3508,6 +3522,178 @@ class ShinkaEvolveRunner:
         except Exception as e:
             logger.error(f"Error in fix patch async: {e}")
             return None, {"api_costs": 0.0, "error_attempt": str(e)}, False
+
+    async def _run_agent_proposal(
+        self,
+        parent_program: Program,
+        archive_programs: List[Program],
+        top_k_programs: List[Program],
+        generation: int,
+        meta_recs: Optional[str] = None,
+        novelty_attempt: int = 1,
+        resample_attempt: int = 1,
+        model_sample_probs: Optional[List[float]] = None,
+        model_posterior: Optional[List[float]] = None,
+    ) -> Optional[Tuple[Optional[str], Dict[str, Any], bool]]:
+        """Agentic alternative to ``_run_patch_async``.
+
+        Uses ``AgentLLMClient.run_agent`` with the ``apply_patch`` tool,
+        letting the LLM iterate on patch attempts inside the agent
+        loop (with the model's own error feedback) rather than the
+        orchestrator driving an explicit ``max_patch_attempts`` retry.
+        The evaluator still runs externally via the job scheduler —
+        that path is unchanged.
+
+        Same return contract as ``_run_patch_async``:
+        ``(patch_text, meta_patch_data, success)``. ``patch_text`` is
+        the most recent successful patch's text; ``meta_patch_data``
+        carries the standard fields plus an ``agent_tool_trace`` for
+        downstream telemetry/debugging.
+        """
+        original_task_sys_msg = self.prompt_sampler.task_sys_msg
+        current_prompt_id: Optional[str] = None
+        model_name: str = "unknown"
+        try:
+            current_sys_prompt, current_prompt_id = self._get_current_system_prompt()
+            if current_sys_prompt:
+                self.prompt_sampler.task_sys_msg = current_sys_prompt
+
+            patch_sys, patch_msg, patch_type = self.prompt_sampler.sample(
+                parent=parent_program,
+                archive_inspirations=archive_programs,
+                top_k_inspirations=top_k_programs,
+                meta_recommendations=meta_recs,
+            )
+            self.prompt_sampler.task_sys_msg = original_task_sys_msg
+            patch_type = str(patch_type)
+
+            if self.verbose:
+                logger.info(f"[agent] Generated patch type: {patch_type}")
+                if current_prompt_id:
+                    logger.info(
+                        f"[agent] Using evolved prompt: {current_prompt_id[:8]}..."
+                    )
+
+            llm_kwargs = self.llm.get_kwargs(model_sample_probs=model_sample_probs)
+            if self.llm_selection is not None:
+                model_name = llm_kwargs.get("model_name", "unknown")
+                self.llm_selection.update_submitted(model_name)
+
+            patch_dir = f"{self.results_dir}/{FOLDER_PREFIX}_{generation}"
+            language_str = str(self.evo_config.language)
+
+            tool_ctx = ShinkaToolContext(
+                patch_dir=patch_dir,
+                parent_code=parent_program.code,
+                language=language_str,
+                db_path=getattr(self.db, "db_path", None)
+                if self.db is not None
+                else None,
+            )
+
+            # Phase D wires only apply_patch as a tool. read_host_file
+            # and query_evolution_db can be enabled by future config
+            # surfaces (see AGENTIC_REWRITE.md "Phase F").
+            tools = select_shinka_tools(["apply_patch"], tool_ctx)
+
+            response = await self.llm.run_agent(
+                msg=patch_msg,
+                system_msg=patch_sys,
+                tool_context=tool_ctx,
+                tools=tools,
+                max_turns=max(1, self.evo_config.max_patch_attempts),
+                llm_kwargs=llm_kwargs,
+                model_sample_probs=model_sample_probs,
+                model_posterior=model_posterior,
+            )
+
+            total_costs = (
+                response.cost if (response and response.cost) else 0.0
+            )
+            if self.llm_selection is not None:
+                self.llm_selection.update_cost(arm=model_name, cost=total_costs)
+
+            success = tool_ctx.last_successful_patch_text is not None
+            patch_text = tool_ctx.last_successful_patch_text
+
+            patch_name: Optional[str] = None
+            patch_description: Optional[str] = None
+            if response and response.content:
+                patch_name = extract_between(
+                    response.content, "<NAME>", "</NAME>", False
+                )
+                patch_description = extract_between(
+                    response.content, "<DESCRIPTION>", "</DESCRIPTION>", False
+                )
+
+            apply_patch_calls = [
+                t for t in tool_ctx.tool_call_trace if t.get("name") == "apply_patch"
+            ]
+            num_attempts = max(1, len(apply_patch_calls))
+
+            error_msg_summary: Optional[str] = None
+            if not success:
+                last_error_entry = next(
+                    (
+                        t
+                        for t in reversed(tool_ctx.tool_call_trace)
+                        if t.get("name") == "apply_patch" and t.get("error")
+                    ),
+                    None,
+                )
+                error_msg_summary = (
+                    last_error_entry["error"]
+                    if last_error_entry
+                    else "Agent loop did not produce a successful patch."
+                )
+
+            await self._save_patch_attempt_async(
+                generation=generation,
+                novelty_attempt=novelty_attempt,
+                resample_attempt=resample_attempt,
+                patch_attempt=num_attempts,
+                response=response,
+                error_msg=error_msg_summary,
+                patch_text=patch_text,
+                num_applied=tool_ctx.last_successful_num_applied,
+                patch_name=patch_name,
+                patch_description=patch_description,
+                success=success,
+            )
+
+            meta_patch_data: Dict[str, Any] = {
+                "api_costs": total_costs,
+                "patch_type": tool_ctx.last_successful_patch_type or patch_type,
+                "patch_name": patch_name,
+                "patch_description": patch_description,
+                "num_applied": tool_ctx.last_successful_num_applied,
+                "error_attempt": error_msg_summary,
+                "novelty_attempt": novelty_attempt,
+                "resample_attempt": resample_attempt,
+                "patch_attempt": num_attempts,
+                "system_prompt_id": current_prompt_id,
+                "agent_tool_trace": list(tool_ctx.tool_call_trace),
+                **llm_kwargs,
+                "llm_result": response.to_dict() if response else None,
+            }
+
+            if self.verbose and success:
+                self._print_metadata_table(meta_patch_data, generation)
+
+            return patch_text, meta_patch_data, success
+
+        except Exception as e:
+            logger.error(f"Error in async agentic proposal: {e}")
+            self.prompt_sampler.task_sys_msg = original_task_sys_msg
+            return (
+                None,
+                {
+                    "api_costs": 0.0,
+                    "error_attempt": str(e),
+                    "system_prompt_id": current_prompt_id,
+                },
+                False,
+            )
 
     async def _run_patch_async(
         self,

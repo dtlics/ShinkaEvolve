@@ -1,8 +1,5 @@
 # Available models and pricing - loaded from pricing.csv as DataFrame
-# Anthropic: https://www.anthropic.com/pricing#anthropic-api
 # OpenAI: https://platform.openai.com/docs/pricing
-# DeepSeek: https://api-docs.deepseek.com/quick_start/pricing/
-# Gemini: https://ai.google.dev/gemini-api/docs/pricing
 
 import pandas as pd
 from pathlib import Path

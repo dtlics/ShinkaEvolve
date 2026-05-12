@@ -11,24 +11,13 @@ from shinka.embed.providers.pricing import (
 from shinka.embed.providers.pricing import (
     get_models_by_provider as get_embedding_models_by_provider,
 )
-from shinka.google_genai import google_genai_auth_mode
 from shinka.llm.providers.model_resolver import resolve_model_backend
 from shinka.llm.providers.pricing import get_all_providers, get_models_by_provider
 
 
 PROVIDER_ENV_REQUIREMENTS: dict[str, tuple[str, ...]] = {
-    "anthropic": ("ANTHROPIC_API_KEY",),
     "azure": ("AZURE_OPENAI_API_KEY", "AZURE_API_ENDPOINT", "AZURE_API_VERSION"),
-    "bedrock": ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION_NAME"),
-    "deepseek": ("DEEPSEEK_API_KEY",),
-    "google": ("GEMINI_API_KEY",),
     "openai": ("OPENAI_API_KEY",),
-    "openrouter": ("OPENROUTER_API_KEY",),
-    "vertexai": (
-        "GOOGLE_GENAI_USE_VERTEXAI",
-        "GOOGLE_CLOUD_PROJECT",
-        "GOOGLE_CLOUD_LOCATION",
-    ),
 }
 
 
@@ -49,8 +38,6 @@ def env_var_status(env_var_names: tuple[str, ...]) -> dict[str, bool]:
 
 def provider_env_requirements(provider: str) -> tuple[str, ...] | None:
     normalized_provider = "azure" if provider == "azure_openai" else provider
-    if normalized_provider == "google" and google_genai_auth_mode() == "vertexai":
-        return PROVIDER_ENV_REQUIREMENTS["vertexai"]
     return PROVIDER_ENV_REQUIREMENTS.get(normalized_provider)
 
 
@@ -127,7 +114,6 @@ def find_model_env_access_issues(
                 model_kind="llm",
                 model_name=model_name,
                 provider=resolved.provider,
-                api_key_env_name=resolved.api_key_env_name,
             )
         )
 
@@ -138,7 +124,6 @@ def find_model_env_access_issues(
                 model_kind="embedding",
                 model_name=model_name,
                 provider=resolved.provider,
-                api_key_env_name=resolved.api_key_env_name,
             )
         )
 
@@ -177,14 +162,8 @@ def _model_env_access_issues(
     model_kind: str,
     model_name: str,
     provider: str,
-    api_key_env_name: str | None,
 ) -> list[ModelEnvAccessIssue]:
     missing_env_vars = missing_env_vars_for_provider(provider)
-
-    if provider == "local_openai" and api_key_env_name:
-        missing_env_vars = (
-            (api_key_env_name,) if not os.getenv(api_key_env_name, "").strip() else ()
-        )
 
     if not missing_env_vars:
         return []

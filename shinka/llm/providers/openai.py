@@ -30,25 +30,11 @@ def get_openai_costs(response, model):
     all_out_tokens = response.usage.output_tokens
     out_tokens = response.usage.output_tokens - thinking_tokens
 
-    # Get actual costs from OpenRouter API if available -- if not use OAI
-    cost_details = getattr(response.usage, "cost_details", None)
-    if cost_details:
-        if isinstance(cost_details, dict):
-            input_cost = float(cost_details.get("upstream_inference_input_cost", 0.0))
-            output_cost = float(cost_details.get("upstream_inference_output_cost", 0.0))
-        else:
-            input_cost = float(
-                getattr(cost_details, "upstream_inference_input_cost", 0.0) or 0.0
-            )
-            output_cost = float(
-                getattr(cost_details, "upstream_inference_output_cost", 0.0) or 0.0
-            )
-    elif model_exists(model):
+    if model_exists(model):
         input_cost, output_cost = calculate_cost(model, in_tokens, all_out_tokens)
     else:
         logger.warning(
-            "Model '%s' has no pricing entry and response cost metadata is absent. "
-            "Defaulting query cost to 0.",
+            "Model '%s' has no pricing entry. Defaulting query cost to 0.",
             model,
         )
         input_cost, output_cost = 0.0, 0.0

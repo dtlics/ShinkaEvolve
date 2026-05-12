@@ -31,20 +31,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "Verbose output shape:\n"
         "  {\n"
         '    "available_providers": [\n'
-        '      {"provider": "google", "env_vars": {"GEMINI_API_KEY": true}, '
+        '      {"provider": "openai", "env_vars": {"OPENAI_API_KEY": true}, '
         '"llm_models": [...], "embedding_models": [...]}\n'
         "    ],\n"
         '    "embedding": [...],\n'
         '    "llm": [...]\n'
         "  }\n\n"
         "Readiness checks are strict and provider-specific:\n"
-        "  anthropic: ANTHROPIC_API_KEY\n"
         "  azure: AZURE_OPENAI_API_KEY + AZURE_API_ENDPOINT + AZURE_API_VERSION\n"
-        "  bedrock: AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY + AWS_REGION_NAME\n"
-        "  deepseek: DEEPSEEK_API_KEY\n"
-        "  google: GEMINI_API_KEY or GOOGLE_GENAI_USE_VERTEXAI + GOOGLE_CLOUD_PROJECT + GOOGLE_CLOUD_LOCATION\n"
-        "  openai: OPENAI_API_KEY\n"
-        "  openrouter: OPENROUTER_API_KEY\n\n"
+        "  openai: OPENAI_API_KEY\n\n"
         "Security:\n"
         "  only availability booleans are printed; API key values are never shown\n\n"
         "Default output:\n"

@@ -4,7 +4,6 @@ from typing import Union, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from shinka.google_genai import google_genai_auth_mode
 from .client import (
     get_async_client_embed,
     get_client_embed,
@@ -16,42 +15,6 @@ logger = logging.getLogger(__name__)
 
 # Cache for tiktoken encodings
 _tiktoken_cache = {}
-
-
-def _get_google_embeddings_and_cost(
-    client,
-    model_name: str,
-    texts: List[str],
-) -> Tuple[List[List[float]], float]:
-    """Embed texts with Gemini and bill using Gemini token counts when available."""
-    embeddings = []
-    total_tokens = 0
-    model = (
-        model_name if google_genai_auth_mode() == "vertexai" else f"models/{model_name}"
-    )
-    price_per_token = get_model_price(model_name)
-
-    for text in texts:
-        token_count = None
-        try:
-            token_response = client.models.count_tokens(model=model, contents=text)
-            token_count = getattr(token_response, "total_tokens", None)
-        except Exception as exc:
-            logger.warning(
-                "Gemini token counting failed for %s; falling back to whitespace "
-                "estimate. Error: %s",
-                model_name,
-                exc,
-            )
-
-        result = client.models.embed_content(model=model, contents=text)
-        embeddings.append(result.embeddings[0].values)
-
-        if token_count is None:
-            token_count = len(text.split())
-        total_tokens += token_count
-
-    return embeddings, total_tokens * price_per_token
 
 
 def _get_embedding_cost(response, model_name: str) -> float:
@@ -124,7 +87,7 @@ class EmbeddingClient:
         Initialize the EmbeddingClient.
 
         Args:
-            model_name (str): The OpenAI, Azure, or Gemini embedding model name to use.
+            model_name (str): The OpenAI or Azure OpenAI embedding model name to use.
             verbose (bool): Enable verbose logging.
         """
         self.model_name = model_name
@@ -161,26 +124,6 @@ class EmbeddingClient:
             single_code = True
         else:
             single_code = False
-
-        # Handle Gemini models
-        if self.provider == "google":
-            try:
-                embeddings, cost = _get_google_embeddings_and_cost(
-                    client=self.client,
-                    model_name=self.model,
-                    texts=code,
-                )
-
-                if single_code:
-                    return embeddings[0] if embeddings else [], cost
-                else:
-                    return embeddings, cost
-            except Exception as e:
-                logger.error(f"Error getting Gemini embedding: {e}")
-                if single_code:
-                    return [], 0.0
-                else:
-                    return [[]], 0.0
 
         # Handle OpenAI and Azure models (same interface)
         try:
@@ -391,7 +334,7 @@ class AsyncEmbeddingClient:
         Initialize the AsyncEmbeddingClient.
 
         Args:
-            model_name (str): The OpenAI, Azure, or Gemini embedding model name to use.
+            model_name (str): The OpenAI or Azure OpenAI embedding model name to use.
             verbose (bool): Enable verbose logging.
         """
         self.model_name = model_name
@@ -416,31 +359,6 @@ class AsyncEmbeddingClient:
             single_code = True
         else:
             single_code = False
-
-        # Handle Gemini models (no async API yet, use thread pool)
-        if self.provider == "google":
-            import asyncio
-
-            try:
-                loop = asyncio.get_event_loop()
-                embeddings, cost = await loop.run_in_executor(
-                    None,
-                    lambda: _get_google_embeddings_and_cost(
-                        client=self.async_client,
-                        model_name=self.model,
-                        texts=code,
-                    ),
-                )
-                if single_code:
-                    return embeddings[0] if embeddings else [], cost
-                else:
-                    return embeddings, cost
-            except Exception as e:
-                logger.error(f"Error getting Gemini embedding: {e}")
-                if single_code:
-                    return [], 0.0
-                else:
-                    return [[]], 0.0
 
         # Handle OpenAI and Azure models (true async)
         try:

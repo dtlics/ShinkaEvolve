@@ -95,8 +95,8 @@ def test_shinka_run_happy_path_with_authoritative_overrides(tmp_path, monkeypatc
     assert evo_config.max_patch_attempts == 1
     assert evo_config.llm_models == [
         "gpt-5-mini",
-        "gemini-3-flash-preview",
-        "gemini-3.1-pro-preview",
+        "gpt-5",
+        "gpt-5-codex",
         "gpt-5.4",
     ]
     assert evo_config.llm_dynamic_selection == "ucb"
@@ -462,8 +462,8 @@ def test_dataclass_defaults_match_shared_baseline():
     assert evo_config.max_patch_attempts == 1
     assert evo_config.llm_models == [
         "gpt-5-mini",
-        "gemini-3-flash-preview",
-        "gemini-3.1-pro-preview",
+        "gpt-5",
+        "gpt-5-codex",
         "gpt-5.4",
     ]
     assert evo_config.llm_dynamic_selection == "ucb"

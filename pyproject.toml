@@ -25,9 +25,7 @@ dependencies = [
     "openai",
     "numpy",
     "pandas",
-    "anthropic",
     "requests",
-    "boto3",
     "pydantic",
     "backoff",
     "python-dotenv",
@@ -45,7 +43,6 @@ dependencies = [
     "adjustText",
     "markdown",
     "aiofiles",
-    "google-genai",
     "psutil",
     "httpx==0.27"
 ]

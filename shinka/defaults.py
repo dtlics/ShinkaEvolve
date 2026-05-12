@@ -21,8 +21,8 @@ def default_patch_type_probs() -> list[float]:
 def default_llm_models() -> list[str]:
     return [
         "gpt-5-mini",
-        "gemini-3-flash-preview",
-        "gemini-3.1-pro-preview",
+        "gpt-5",
+        "gpt-5-codex",
         "gpt-5.4",
     ]
 

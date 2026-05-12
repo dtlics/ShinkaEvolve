@@ -569,10 +569,8 @@ def test_thompson_sampler_recomputes_observation_range_when_dropping_arms():
     assert target._obs_min == 1.0
 
 
-def test_asymmetric_ucb_print_summary_preserves_local_model_name():
-    arm_name = (
-        "local/example-model@https://api.example.test/v1?api_key_env=CUSTOM_API_KEY"
-    )
+def test_asymmetric_ucb_print_summary_uses_basename_for_path_like_arm():
+    arm_name = "gpt-5-codex"
     bandit = AsymmetricUCB(
         arm_names=[arm_name],
         exploration_coef=2.0,
@@ -585,26 +583,7 @@ def test_asymmetric_ucb_print_summary_preserves_local_model_name():
     bandit.print_summary(console=console)
     output = buffer.getvalue()
 
-    assert "local/example-mod" in output
-    assert "api.example.test" not in output
-    assert "CUSTOM_API_KEY" not in output
-
-
-def test_asymmetric_ucb_print_summary_preserves_openrouter_prefix():
-    arm_name = "openrouter/example-model"
-    bandit = AsymmetricUCB(
-        arm_names=[arm_name],
-        exploration_coef=2.0,
-        epsilon=0.1,
-        auto_decay=0.95,
-    )
-
-    buffer = StringIO()
-    console = Console(file=buffer, force_terminal=False, width=200)
-    bandit.print_summary(console=console)
-    output = buffer.getvalue()
-
-    assert "openrouter/exampl" in output
+    assert "gpt-5-codex" in output
 
 
 def test_asymmetric_ucb_print_summary_matches_standard_summary_width():

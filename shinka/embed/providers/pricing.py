@@ -1,6 +1,5 @@
 # Available embedding models and pricing - loaded from pricing.csv as DataFrame
 # OpenAI: https://platform.openai.com/docs/pricing
-# Gemini: https://ai.google.dev/gemini-api/docs/pricing
 
 import pandas as pd
 from pathlib import Path

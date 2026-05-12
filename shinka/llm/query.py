@@ -2,16 +2,8 @@ from typing import List, Optional, Dict
 from pydantic import BaseModel
 from .client import get_client_llm, get_async_client_llm
 from .providers import (
-    query_anthropic,
     query_openai,
-    query_deepseek,
-    query_gemini,
-    query_local_openai,
-    query_anthropic_async,
     query_openai_async,
-    query_deepseek_async,
-    query_gemini_async,
-    query_local_openai_async,
     QueryResult,
 )
 import logging
@@ -28,23 +20,13 @@ def query(
     model_posteriors: Optional[Dict[str, float]] = None,
     **kwargs,
 ) -> QueryResult:
-    """Query the LLM."""
+    """Query the LLM (OpenAI or Azure OpenAI only)."""
     client, model_name, provider = get_client_llm(
         model_name, structured_output=output_model is not None
     )
-    if provider in ("anthropic", "bedrock"):
-        query_fn = query_anthropic
-    elif provider in ("openai", "azure_openai", "openrouter"):
-        query_fn = query_openai
-    elif provider == "deepseek":
-        query_fn = query_deepseek
-    elif provider == "google":
-        query_fn = query_gemini
-    elif provider == "local_openai":
-        query_fn = query_local_openai
-    else:
+    if provider not in ("openai", "azure_openai"):
         raise ValueError(f"Model {model_name} not supported.")
-    result = query_fn(
+    result = query_openai(
         client,
         model_name,
         msg,
@@ -66,23 +48,13 @@ async def query_async(
     model_posteriors: Optional[Dict[str, float]] = None,
     **kwargs,
 ) -> QueryResult:
-    """Query the LLM asynchronously."""
+    """Query the LLM asynchronously (OpenAI or Azure OpenAI only)."""
     client, model_name, provider = get_async_client_llm(
         model_name, structured_output=output_model is not None
     )
-    if provider in ("anthropic", "bedrock"):
-        query_fn = query_anthropic_async
-    elif provider in ("openai", "azure_openai", "openrouter"):
-        query_fn = query_openai_async
-    elif provider == "deepseek":
-        query_fn = query_deepseek_async
-    elif provider == "google":
-        query_fn = query_gemini_async
-    elif provider == "local_openai":
-        query_fn = query_local_openai_async
-    else:
+    if provider not in ("openai", "azure_openai"):
         raise ValueError(f"Model {model_name} not supported.")
-    result = await query_fn(
+    result = await query_openai_async(
         client,
         model_name,
         msg,

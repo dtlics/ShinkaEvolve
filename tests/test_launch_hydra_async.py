@@ -58,8 +58,8 @@ def test_default_launch_config_uses_neutral_shared_defaults():
     assert cfg.evo_config.max_patch_attempts == 1
     assert cfg.evo_config.llm_models == [
         "gpt-5-mini",
-        "gemini-3-flash-preview",
-        "gemini-3.1-pro-preview",
+        "gpt-5",
+        "gpt-5-codex",
         "gpt-5.4",
     ]
     assert cfg.evo_config.llm_dynamic_selection == "ucb"

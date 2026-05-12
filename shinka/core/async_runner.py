@@ -384,8 +384,9 @@ class ShinkaEvolveRunner:
         # LLM clients. AgentLLMClient is the new agents-SDK-backed
         # adapter; it preserves AsyncLLMClient's public surface, so the
         # rest of this orchestrator is unchanged. For Azure/OpenAI it
-        # routes through background-mode polling + fresh-client retry;
-        # for other providers it falls back to the legacy code path.
+        # routes through background-mode polling and the OpenAI SDK's
+        # built-in retry. For other providers it falls back to the
+        # legacy code path (which keeps its outer per-call retry wrapper).
         self.llm = AgentLLMClient(
             model_names=evo_config.llm_models,
             **evo_config.llm_kwargs,

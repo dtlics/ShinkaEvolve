@@ -501,12 +501,13 @@ class AgentLLMClient:
           Defaults to the constructor's ``max_tool_steps``.
 
         For Azure/OpenAI text models, the run goes through the
-        agents SDK (bg+poll, fresh-client retry). For other
-        providers or structured-output requests, falls back to
-        ``query`` semantics — tools/context are ignored since the
-        legacy path doesn't support them. The caller is responsible
-        for handling that gracefully (typically by not setting
-        ``tool_context`` when running on non-OpenAI providers).
+        agents SDK (bg+poll transport + the OpenAI SDK's built-in
+        retry). For other providers or structured-output requests,
+        falls back to ``query`` semantics — tools/context are
+        ignored since the legacy path doesn't support them. The
+        caller is responsible for handling that gracefully
+        (typically by not setting ``tool_context`` when running on
+        non-OpenAI providers).
         """
         if msg_history is None:
             msg_history = []

@@ -205,6 +205,44 @@ def test_adapter_unknown_model_defaults_cost_to_zero() -> None:
     assert qr.output_cost == 0.0
 
 
+def test_adapter_model_name_and_kwargs_match_legacy_shape() -> None:
+    """Parity with the legacy QueryResult shape:
+
+    - ``model_name`` field stores the API name (e.g. ``"gpt-5.4-mini"``)
+      to match ``query_openai_async``, which receives the resolved
+      api_model_name from ``query_async`` and passes it through.
+    - ``kwargs`` stores temperature / max_output_tokens / reasoning
+      but NOT ``model_name`` — legacy ``query_async`` extracts
+      ``model_name`` as a named parameter so it's stripped from the
+      ``**kwargs`` dict by the time it reaches the provider.
+
+    Cross-path DB rows would diverge if either invariant broke.
+    """
+    run = _make_run_result(
+        raw_responses=[_make_raw_response(input_tokens=10, output_tokens=20)],
+    )
+    qr = _runresult_to_queryresult(
+        run,
+        msg="m",
+        system_msg="s",
+        msg_history=[],
+        shinka_model_name="azure-gpt-5.4-mini",
+        api_model_name="gpt-5.4-mini",
+        llm_kwargs={
+            "model_name": "azure-gpt-5.4-mini",
+            "temperature": 0.5,
+            "max_output_tokens": 1000,
+        },
+        model_posteriors=None,
+        verbose=False,
+    )
+    # API name lives on the field — matches legacy.
+    assert qr.model_name == "gpt-5.4-mini"
+    # kwargs preserves temperature/max_tokens but excludes model_name.
+    assert qr.kwargs == {"temperature": 0.5, "max_output_tokens": 1000}
+    assert "model_name" not in qr.kwargs
+
+
 def test_adapter_preserves_existing_msg_history() -> None:
     """If caller passes prior history, the new history appends the
     current turn on top of it."""
@@ -741,6 +779,65 @@ def test_run_agent_uses_per_call_tools_not_constructor_tools(
     # The Agent was constructed with per_call_tool, not constructor_tool.
     assert per_call_tool in captured_agent_tools[-1]
     assert constructor_tool not in captured_agent_tools[-1]
+
+
+def test_batch_kwargs_query_threads_posterior_into_query_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When batch_kwargs_query is given model_sample_probs, that
+    distribution must be threaded to query_async as
+    ``model_posteriors`` — matching AsyncLLMClient's behavior so
+    bandit-accounting code that reads result.model_posteriors works
+    identically across paths.
+
+    We verify by inspecting the kwargs passed to query_async (which
+    receives ``model_posteriors`` from our adapter and forwards to
+    the provider, which stores it on the QueryResult)."""
+    import shinka.llm.agent.client as agent_client_mod
+
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock(return_value=None))
+
+    captured_posteriors: list = []
+
+    async def fake_query_async(*args: Any, **kwargs: Any) -> QueryResult:
+        captured_posteriors.append(kwargs.get("model_posteriors"))
+        return QueryResult(
+            content="ok",
+            msg="m",
+            system_msg="s",
+            new_msg_history=[],
+            model_name="claude-3-5-haiku-20241022",
+            kwargs={},
+            input_tokens=1,
+            output_tokens=1,
+            model_posteriors=kwargs.get("model_posteriors"),
+        )
+
+    monkeypatch.setattr(agent_client_mod, "query_async", fake_query_async)
+
+    client = AgentLLMClient(
+        model_names=["claude-3-5-haiku-20241022"],
+        temperatures=0.5,
+        max_tokens=1000,
+        reasoning_efforts="disabled",
+        verbose=False,
+    )
+    results = asyncio.run(
+        client.batch_kwargs_query(
+            num_samples=2,
+            msg="hi",
+            system_msg="sys",
+            model_sample_probs=[1.0],
+        )
+    )
+    assert len(results) == 2
+    # The provider received the posterior dict.
+    assert all(
+        p == {"claude-3-5-haiku-20241022": 1.0} for p in captured_posteriors
+    )
+    # And it ended up on the result objects.
+    for r in results:
+        assert r.model_posteriors == {"claude-3-5-haiku-20241022": 1.0}
 
 
 def test_batch_query_runs_concurrently_and_filters_errors(

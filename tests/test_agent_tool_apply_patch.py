@@ -53,6 +53,12 @@ def test_success_updates_current_code_and_returns_ok(
     assert trace["patch_type"] == "diff"
     assert trace["num_applied"] == 1
     assert trace["output_path"] == "/tmp/gen-0/evolve.py"
+    # All last_successful_* fields are set on success so the
+    # orchestrator can read them after the agent run.
+    assert state.last_successful_patch_text == "patch"
+    assert state.last_successful_patch_type == "diff"
+    assert state.last_successful_num_applied == 1
+    assert state.last_successful_patch_path == "/tmp/gen-0/patch.diff"
 
 
 def test_invalid_patch_type_short_circuits_without_calling_apply(
@@ -120,6 +126,38 @@ def test_apply_patch_raises_is_caught_and_returned_as_error(
     assert state.current_code == original
     assert state.tool_call_trace[0]["success"] is False
     assert "disk full" in state.tool_call_trace[0]["error"]
+
+
+def test_no_changes_applied_is_treated_as_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A patch that parses cleanly but produces no actual change
+    (num_applied == 0, no error_msg) must surface as an error so the
+    agent retries — matching _run_patch_async's contract. Without
+    this, an no-op diff would falsely flip ctx.last_successful_*
+    and the orchestrator would persist an empty proposal."""
+    state = _ctx()
+    original = state.current_code
+    # apply_patch_async returns clean (no error) but 0 changes and no
+    # modified_code — the "patch parsed but did nothing" case.
+    mock_apply = AsyncMock(return_value=(None, 0, None, None, None, None))
+    monkeypatch.setattr(
+        "shinka.llm.agent.tools.apply_patch.apply_patch_async", mock_apply
+    )
+
+    result = asyncio.run(_apply_patch_impl(state, "no-op diff"))
+
+    assert result.startswith("Error:")
+    assert "No changes applied" in result
+    # current_code untouched.
+    assert state.current_code == original
+    # last_successful_* must NOT be set.
+    assert state.last_successful_patch_text is None
+    assert state.last_successful_num_applied == 0
+    # Trace records failure with the right metadata.
+    trace = state.tool_call_trace[0]
+    assert trace["success"] is False
+    assert trace["num_applied"] == 0
 
 
 def test_multiple_successful_applies_chain_current_code_updates(

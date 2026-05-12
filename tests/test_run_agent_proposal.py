@@ -290,3 +290,197 @@ def test_config_flag_default_routes_to_legacy() -> None:
 
     config = EvolutionConfig()
     assert config.use_agentic_proposer is False
+
+
+def test_db_path_threaded_from_runner_db_config(tmp_path: Path) -> None:
+    """The ShinkaToolContext.db_path should come from
+    ``runner.db.config.db_path`` (the real attribute path on
+    ``ProgramDatabase``), so query_evolution_db_tool can read the
+    evolution database. We verify by capturing the context that
+    run_agent receives."""
+    runner = _build_stub_runner(tmp_path)
+    runner.db = SimpleNamespace(
+        config=SimpleNamespace(db_path="/tmp/run-7/programs.sqlite")
+    )
+
+    captured_ctx: list = []
+
+    async def capture(*args: Any, **kwargs: Any) -> Any:
+        captured_ctx.append(kwargs["tool_context"])
+        return None
+
+    runner.llm.run_agent = AsyncMock(side_effect=capture)
+
+    asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=9,
+        )
+    )
+    assert captured_ctx
+    assert captured_ctx[0].db_path == "/tmp/run-7/programs.sqlite"
+
+
+def test_diff_summary_populated_from_last_successful_patch_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """For parity with the legacy ``_run_patch_async`` path, the
+    agentic proposal must populate ``meta_patch_data["diff_summary"]``
+    via ``summarize_diff(last_successful_patch_path)`` — the webui
+    visualization reads this field."""
+    runner = _build_stub_runner(tmp_path)
+    runner.lang_ext = "py"  # used by the diff_summary unpack
+
+    # Stub summarize_diff to a known return so we can verify wiring
+    # without producing a real diff file.
+    captured_args: list = []
+
+    def fake_summarize_diff(path: str) -> dict:
+        captured_args.append(path)
+        return {"original.py": {"lines_added": 5, "lines_removed": 2}}
+
+    monkeypatch.setattr(
+        "shinka.core.async_runner.summarize_diff", fake_summarize_diff
+    )
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        ctx = kwargs["tool_context"]
+        ctx.last_successful_patch_text = "diff body"
+        ctx.last_successful_patch_type = "diff"
+        ctx.last_successful_num_applied = 3
+        ctx.last_successful_patch_path = "/tmp/gen-11/patch.diff"
+        ctx.current_code = "new code"
+        ctx.record_tool_call(
+            "apply_patch", latency_sec=0.01, success=True,
+            extra={"patch_type": "diff", "num_applied": 3},
+        )
+        return SimpleNamespace(content="", cost=0.1, to_dict=lambda: {})
+
+    runner.llm.run_agent = AsyncMock(side_effect=fake_run_agent)
+
+    result = asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=11,
+        )
+    )
+
+    assert result is not None
+    _, meta, _ = result
+    # summarize_diff was called with the path the tool recorded.
+    assert captured_args == ["/tmp/gen-11/patch.diff"]
+    # The orchestrator unpacks original.{lang_ext} per the legacy
+    # convention so the webui-friendly shape is exposed at the top.
+    assert meta["diff_summary"] == {"lines_added": 5, "lines_removed": 2}
+
+
+def test_diff_summary_empty_when_no_patch_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the agent never produced a successful patch (no patch_path),
+    diff_summary should be an empty dict so downstream code doesn't
+    have to special-case missing fields."""
+    runner = _build_stub_runner(tmp_path)
+    runner.lang_ext = "py"
+
+    def should_not_call(path: str) -> dict:
+        raise AssertionError(
+            "summarize_diff should not be called when no patch succeeded"
+        )
+
+    monkeypatch.setattr(
+        "shinka.core.async_runner.summarize_diff", should_not_call
+    )
+
+    async def fake_no_success(*args: Any, **kwargs: Any) -> Any:
+        # Don't set last_successful_*. Default values stand.
+        return SimpleNamespace(content="", cost=0.0, to_dict=lambda: {})
+
+    runner.llm.run_agent = AsyncMock(side_effect=fake_no_success)
+
+    result = asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=12,
+        )
+    )
+    assert result is not None
+    _, meta, _ = result
+    assert meta["diff_summary"] == {}
+
+
+def test_diff_summary_swallows_summarize_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If summarize_diff raises (corrupt diff file etc.), we log
+    and continue with an empty dict — never propagate."""
+    runner = _build_stub_runner(tmp_path)
+    runner.lang_ext = "py"
+
+    def boom(path: str) -> dict:
+        raise RuntimeError("corrupt diff")
+
+    monkeypatch.setattr(
+        "shinka.core.async_runner.summarize_diff", boom
+    )
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        ctx = kwargs["tool_context"]
+        ctx.last_successful_patch_text = "diff body"
+        ctx.last_successful_patch_type = "diff"
+        ctx.last_successful_num_applied = 1
+        ctx.last_successful_patch_path = "/tmp/gen-13/patch.diff"
+        return SimpleNamespace(content="", cost=0.0, to_dict=lambda: {})
+
+    runner.llm.run_agent = AsyncMock(side_effect=fake_run_agent)
+
+    result = asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=13,
+        )
+    )
+    assert result is not None
+    _, meta, success = result
+    # The agentic-side metadata still claims success (patch text exists),
+    # but diff_summary degraded gracefully.
+    assert success is True
+    assert meta["diff_summary"] == {}
+
+
+def test_db_path_is_none_when_runner_db_is_none(tmp_path: Path) -> None:
+    """If ``runner.db`` is None (e.g. early during setup), the tool
+    context must still construct without crashing and db_path is
+    None — query_evolution_db_tool surfaces this as an Error."""
+    runner = _build_stub_runner(tmp_path)
+    runner.db = None  # explicit
+    captured_ctx: list = []
+
+    async def capture(*args: Any, **kwargs: Any) -> Any:
+        captured_ctx.append(kwargs["tool_context"])
+        return None
+
+    runner.llm.run_agent = AsyncMock(side_effect=capture)
+    asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=10,
+        )
+    )
+    assert captured_ctx
+    assert captured_ctx[0].db_path is None

@@ -3582,13 +3582,21 @@ class ShinkaEvolveRunner:
             patch_dir = f"{self.results_dir}/{FOLDER_PREFIX}_{generation}"
             language_str = str(self.evo_config.language)
 
+            # The evolution-DB path lives at ``self.db.config.db_path``
+            # — ``ProgramDatabase`` stores its config and exposes the
+            # path through it (see _setup_async). Tools that don't
+            # need DB access (apply_patch, evaluate) ignore this field.
+            db_path: Optional[str] = None
+            if self.db is not None:
+                db_config = getattr(self.db, "config", None)
+                if db_config is not None:
+                    db_path = getattr(db_config, "db_path", None)
+
             tool_ctx = ShinkaToolContext(
                 patch_dir=patch_dir,
                 parent_code=parent_program.code,
                 language=language_str,
-                db_path=getattr(self.db, "db_path", None)
-                if self.db is not None
-                else None,
+                db_path=db_path,
             )
 
             # Phase D wires only apply_patch as a tool. read_host_file
@@ -3661,6 +3669,28 @@ class ShinkaEvolveRunner:
                 success=success,
             )
 
+            # Produce a diff_summary for parity with _run_patch_async
+            # (webui visualization reads metadata.diff_summary). Empty
+            # dict on no successful patch keeps the field present so
+            # downstream code doesn't have to special-case agentic
+            # rows.
+            diff_summary: Dict[str, Any] = {}
+            if tool_ctx.last_successful_patch_path:
+                try:
+                    diff_summary = summarize_diff(
+                        tool_ctx.last_successful_patch_path
+                    )
+                    original_filename = f"original.{self.lang_ext}"
+                    if original_filename in diff_summary:
+                        diff_summary = diff_summary[original_filename]
+                except Exception as exc:
+                    logger.info(
+                        "[agent] summarize_diff failed for %s: %s",
+                        tool_ctx.last_successful_patch_path,
+                        exc,
+                    )
+                    diff_summary = {}
+
             meta_patch_data: Dict[str, Any] = {
                 "api_costs": total_costs,
                 "patch_type": tool_ctx.last_successful_patch_type or patch_type,
@@ -3668,6 +3698,7 @@ class ShinkaEvolveRunner:
                 "patch_description": patch_description,
                 "num_applied": tool_ctx.last_successful_num_applied,
                 "error_attempt": error_msg_summary,
+                "diff_summary": diff_summary,
                 "novelty_attempt": novelty_attempt,
                 "resample_attempt": resample_attempt,
                 "patch_attempt": num_attempts,

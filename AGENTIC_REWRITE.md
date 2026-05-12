@@ -248,4 +248,5 @@ Pass criteria:
 | 2026-05-12 | Phase C.6 — `web_search` opt-in tool + opt-in registry flag + 7 tests | done | `317335d` |
 | 2026-05-12 | Phase D.1 — `AgentLLMClient.run_agent` per-call tools + context + 5 tests | done | `d7dddf1` |
 | 2026-05-12 | Phase D.2+D.3 — `_run_agent_proposal` orchestrator method + `use_agentic_proposer` flag + 7 tests | done | `1c48b2b` |
-| 2026-05-12 | Cleanup F.1 — remove `RobustRunner`, rely on OpenAI SDK's built-in retry; rewire tests | done | (this commit) |
+| 2026-05-12 | Cleanup F.1 — remove `RobustRunner`, rely on OpenAI SDK's built-in retry; rewire tests | done | `1510145` |
+| 2026-05-12 | Verification F.2 — parity fixes: `QueryResult.model_name` stores API name, `kwargs` strips `model_name`, `batch_kwargs_query` threads posterior, `_run_agent_proposal` reads `db.config.db_path`, `apply_patch_tool` treats `num_applied=0` as failure, `diff_summary` populated for webui parity. 8 new tests. | done | (this commit) |

@@ -288,7 +288,13 @@ class AgentLLMClient:
         msg_history: Union[List[Dict[str, Any]], List[List[Dict[str, Any]]]] = (),
         model_sample_probs: Optional[List[float]] = None,
     ) -> List[QueryResult]:
-        """Concurrent batch where each task samples its own kwargs."""
+        """Concurrent batch where each task samples its own kwargs.
+
+        Matches ``AsyncLLMClient.batch_kwargs_query``: ``model_sample_probs``
+        is used both as the sampling distribution AND as the posterior
+        recorded on each resulting ``QueryResult.model_posteriors`` for
+        downstream bandit accounting.
+        """
         posterior = (
             model_sample_probs
             if model_sample_probs is not None
@@ -304,13 +310,49 @@ class AgentLLMClient:
             )
             for _ in range(num_samples)
         ]
-        return await self.batch_query(
-            num_samples=num_samples,
-            msg=msg,
-            system_msg=system_msg,
-            msg_history=msg_history,
-            llm_kwargs=per_task_kwargs,
-        )
+        # Normalize message inputs the same way batch_query does, so we
+        # can dispatch individual tasks through self.query() with the
+        # posterior threaded as model_posterior (which becomes
+        # QueryResult.model_posteriors). batch_query() expects msg/
+        # system_msg either as a single string or as a list — we
+        # delegate the spread to it via the per-task lists.
+        if isinstance(msg, str):
+            msg_list = [msg] * num_samples
+        else:
+            msg_list = list(msg)
+        if isinstance(system_msg, str):
+            sys_list = [system_msg] * num_samples
+        else:
+            sys_list = list(system_msg)
+        if len(msg_history) == 0:
+            histories: List[List[Dict[str, Any]]] = [[] for _ in range(num_samples)]
+        elif isinstance(msg_history[0], dict):
+            histories = [list(msg_history) for _ in range(num_samples)]  # type: ignore[list-item]
+        else:
+            histories = [list(h) for h in msg_history]  # type: ignore[arg-type]
+
+        tasks = [
+            self.query(
+                msg=msg_list[i],
+                system_msg=sys_list[i],
+                msg_history=histories[i],
+                llm_kwargs=per_task_kwargs[i],
+                model_sample_probs=posterior,
+                model_posterior=posterior,
+            )
+            for i in range(num_samples)
+        ]
+        gathered = await asyncio.gather(*tasks, return_exceptions=True)
+        final: List[QueryResult] = []
+        for i, item in enumerate(gathered):
+            if isinstance(item, Exception):
+                logger.info("Error in batch query task %d: %s", i, item)
+            elif item is not None:
+                final.append(item)
+        if self.verbose:
+            costs = [r.cost for r in final if r.cost is not None]
+            logger.info("==> SAMPLING: Total API costs: $%.4f", sum(costs))
+        return final
 
     # ------------------------------------------------------------------
     # Internal: agents-SDK path
@@ -665,13 +707,32 @@ def _runresult_to_queryresult(
         {"role": "assistant", "content": content},
     ]
 
+    # Parity with legacy QueryResult shape:
+    #
+    # - ``model_name`` stores the API name (e.g. ``"gpt-5.4-mini"``).
+    #   Matches ``query_openai_async`` which receives the resolved
+    #   api_model_name from ``query_async`` and passes it through.
+    #   Downstream analysis (DB metadata via to_dict, shinka_visualize)
+    #   then sees the same string regardless of proposal path.
+    #
+    # - ``kwargs`` stores temperature / max_output_tokens / reasoning /
+    #   etc. but NOT ``model_name``. Legacy ``query_async`` extracts
+    #   ``model_name`` as a named parameter, so by the time it
+    #   reaches ``query_*_async(**kwargs)`` the dict has been
+    #   stripped. Reproducing that strip keeps the DB row's
+    #   ``llm_result.kwargs`` consistent across paths.
+    #
+    # The shinka-prefixed model id is preserved separately by the
+    # orchestrator in ``meta_patch_data`` via ``**llm_kwargs``.
+    kwargs_without_model = {k: v for k, v in llm_kwargs.items() if k != "model_name"}
+
     return QueryResult(
         content=content,
         msg=msg,
         system_msg=system_msg,
         new_msg_history=new_msg_history,
-        model_name=shinka_model_name,
-        kwargs=llm_kwargs,
+        model_name=api_model_name,
+        kwargs=kwargs_without_model,
         input_tokens=total_input_tokens,
         output_tokens=visible_output_tokens,
         thinking_tokens=total_thinking_tokens,

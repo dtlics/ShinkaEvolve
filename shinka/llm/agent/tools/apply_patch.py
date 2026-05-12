@@ -69,7 +69,7 @@ async def _apply_patch_impl(
         return f"Error: {msg}"
 
     try:
-        modified_code, num_applied, output_path, error_msg, patch_txt, _ = (
+        modified_code, num_applied, output_path, error_msg, patch_txt, patch_path = (
             await apply_patch_async(
                 original_str=state.current_code,
                 patch_str=patch_text,
@@ -98,8 +98,24 @@ async def _apply_patch_impl(
         )
         return f"Error: {error_msg}"
 
-    if modified_code is not None:
-        state.current_code = modified_code
+    # ``apply_patch_async`` may return ``error_msg=None`` together
+    # with ``num_applied=0`` for inputs that parse cleanly but
+    # produce no changes (e.g. a no-op diff). Mirror
+    # ``_run_patch_async``'s contract: that's a failure, not a
+    # success — surface a clear error so the agent can retry with
+    # a real patch.
+    if num_applied <= 0 or modified_code is None:
+        msg = "No changes applied (patch parsed cleanly but produced no diff)."
+        state.record_tool_call(
+            "apply_patch",
+            latency,
+            success=False,
+            error=msg,
+            extra={"patch_type": patch_type, "num_applied": num_applied},
+        )
+        return f"Error: {msg}"
+
+    state.current_code = modified_code
 
     # Record the patch artifacts on the context so the orchestrator
     # can surface them after the agent run (without scanning the
@@ -107,6 +123,7 @@ async def _apply_patch_impl(
     state.last_successful_patch_text = patch_txt or patch_text
     state.last_successful_patch_type = patch_type
     state.last_successful_num_applied = num_applied
+    state.last_successful_patch_path = str(patch_path) if patch_path else None
 
     state.record_tool_call(
         "apply_patch",

@@ -145,6 +145,11 @@ class ShinkaToolContext:
     last_successful_patch_text: Optional[str] = None
     last_successful_patch_type: Optional[str] = None
     last_successful_num_applied: int = 0
+    # Path to the on-disk patch file produced by the most recent
+    # successful apply_patch. The orchestrator passes this to
+    # ``summarize_diff`` to produce the diff_summary the webui
+    # visualization renders.
+    last_successful_patch_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Seed current_code from parent_code if the caller didn't

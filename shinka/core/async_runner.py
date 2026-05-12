@@ -380,12 +380,29 @@ class ShinkaEvolveRunner:
         self.db = None
         self.async_db = None
 
+        # Stable identifier for this run -- threaded into every Responses API
+        # call's ``metadata`` and ``safety_identifier`` so Azure dashboards
+        # can group costs and abuse-detection flags per-run.
+        self.run_id = uuid.uuid4().hex
+
+        # Helper: client-level metadata for a given LLM purpose. The runner
+        # uses this to baseline every AsyncLLMClient; per-call overrides
+        # (e.g. ``generation``, ``island_idx``) merge on top in
+        # AsyncLLMClient.query().
+        def _client_metadata(purpose: str) -> Optional[Dict[str, str]]:
+            if not evo_config.tag_calls_with_metadata:
+                return None
+            return {"run_id": self.run_id, "purpose": purpose}
+
         # LLM clients. ``delete_after`` controls whether each Responses API
         # call is purged from Azure after retrieval (privacy default True);
         # passed once to the client so all per-call queries inherit it.
         self.llm = AsyncLLMClient(
             model_names=evo_config.llm_models,
             delete_after=evo_config.delete_llm_responses_after_retrieval,
+            cache_static_prompt=evo_config.cache_static_system_prompt,
+            call_metadata=_client_metadata("proposer"),
+            safety_identifier=self.run_id,
             **evo_config.llm_kwargs,
         )
 
@@ -418,6 +435,9 @@ class ShinkaEvolveRunner:
             async_meta_llm = AsyncLLMClient(
                 model_names=evo_config.meta_llm_models or evo_config.llm_models,
                 delete_after=evo_config.delete_llm_responses_after_retrieval,
+                cache_static_prompt=evo_config.cache_static_system_prompt,
+                call_metadata=_client_metadata("meta"),
+                safety_identifier=self.run_id,
                 **evo_config.meta_llm_kwargs,
             )
             # Create sync summarizer for state management
@@ -441,6 +461,9 @@ class ShinkaEvolveRunner:
             novelty_llm = AsyncLLMClient(
                 model_names=evo_config.novelty_llm_models,
                 delete_after=evo_config.delete_llm_responses_after_retrieval,
+                cache_static_prompt=evo_config.cache_static_system_prompt,
+                call_metadata=_client_metadata("novelty"),
+                safety_identifier=self.run_id,
                 **evo_config.novelty_llm_kwargs,
             )
             sync_novelty_judge = NoveltyJudge(
@@ -474,6 +497,9 @@ class ShinkaEvolveRunner:
             self.prompt_llm = AsyncLLMClient(
                 model_names=prompt_llm_models,
                 delete_after=evo_config.delete_llm_responses_after_retrieval,
+                cache_static_prompt=evo_config.cache_static_system_prompt,
+                call_metadata=_client_metadata("prompt_evolution"),
+                safety_identifier=self.run_id,
                 **evo_config.prompt_llm_kwargs,
             )
             logger.info(f"Prompt evolution enabled with models: {prompt_llm_models}")

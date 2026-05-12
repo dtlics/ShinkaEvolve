@@ -54,6 +54,14 @@ class EvolutionConfig:
     # 31-day retention is bypassed; when False the response lingers on Azure
     # for 31 days.
     delete_llm_responses_after_retrieval: bool = True
+    # Phase 3b: hash the static system prompt into ``prompt_cache_key`` so
+    # repeated calls with identical system messages get OpenAI's prompt-cache
+    # discount on input tokens.
+    cache_static_system_prompt: bool = True
+    # Phase 3b: tag every Responses API call with metadata
+    # ``{run_id, generation, island_idx, purpose}`` so Azure dashboards can
+    # break costs down per-run / per-generation / per-stage.
+    tag_calls_with_metadata: bool = True
     proposal_target_mode: str = "adaptive"
     proposal_target_min_samples: int = 5
     proposal_target_ratio_cap: float = 2.0

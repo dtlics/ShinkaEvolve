@@ -29,6 +29,9 @@ class LLMClient:
         output_model: Optional[BaseModel] = None,
         verbose: bool = True,
         delete_after: bool = True,
+        cache_static_prompt: Optional[bool] = True,
+        call_metadata: Optional[Dict] = None,
+        safety_identifier: Optional[str] = None,
     ):
         self.temperatures = temperatures
         self.max_tokens = max_tokens
@@ -41,6 +44,11 @@ class LLMClient:
         self.structured_output = output_model is not None
         self.verbose = verbose
         self.delete_after = delete_after
+        # Phase 3b defaults; per-call overrides on .query() / .query_async()
+        # still apply.
+        self.cache_static_prompt = cache_static_prompt
+        self.call_metadata = call_metadata
+        self.safety_identifier = safety_identifier
 
     def batch_query(
         self,
@@ -250,6 +258,9 @@ class LLMClient:
         tools=None,
         tool_budget=None,
         tool_context: Optional[Dict] = None,
+        cache_static_prompt: Optional[bool] = None,
+        call_metadata: Optional[Dict] = None,
+        safety_identifier: Optional[str] = None,
     ) -> Optional[QueryResult]:
         """Execute a single query to the LLM.
 
@@ -316,6 +327,30 @@ class LLMClient:
                     extra_kwargs["tool_budget"] = tool_budget
                 if tool_context is not None:
                     extra_kwargs["tool_context"] = tool_context
+                # Cost + observability kwargs (Phase 3b). When not supplied
+                # per-call, fall back to the client-level default (set by
+                # the runner from EvolutionConfig). Metadata MERGES so the
+                # runner can set ``run_id``/``purpose`` once at the client
+                # level and per-call sites add ``generation``/``island_idx``.
+                effective_cache = (
+                    cache_static_prompt
+                    if cache_static_prompt is not None
+                    else self.cache_static_prompt
+                )
+                if effective_cache is not None:
+                    extra_kwargs["cache_static_prompt"] = effective_cache
+                if self.call_metadata or call_metadata:
+                    extra_kwargs["call_metadata"] = {
+                        **(self.call_metadata or {}),
+                        **(call_metadata or {}),
+                    }
+                effective_safety_id = (
+                    safety_identifier
+                    if safety_identifier is not None
+                    else self.safety_identifier
+                )
+                if effective_safety_id is not None:
+                    extra_kwargs["safety_identifier"] = effective_safety_id
                 result = query(
                     msg=msg,
                     system_msg=system_msg,
@@ -344,6 +379,9 @@ class AsyncLLMClient:
         output_model: Optional[BaseModel] = None,
         verbose: bool = True,
         delete_after: bool = True,
+        cache_static_prompt: Optional[bool] = True,
+        call_metadata: Optional[Dict] = None,
+        safety_identifier: Optional[str] = None,
     ):
         self.temperatures = temperatures
         self.max_tokens = max_tokens
@@ -359,6 +397,12 @@ class AsyncLLMClient:
         # The runner sets this from ``EvolutionConfig.delete_llm_responses_after_retrieval``
         # so the privacy policy is honored without per-call plumbing.
         self.delete_after = delete_after
+        # Phase 3b client-level defaults. None means "don't pass the kwarg";
+        # True/False / dict / str sets a baseline that per-call overrides
+        # can still replace.
+        self.cache_static_prompt = cache_static_prompt
+        self.call_metadata = call_metadata
+        self.safety_identifier = safety_identifier
 
     async def batch_query(
         self,
@@ -545,6 +589,9 @@ class AsyncLLMClient:
         tools=None,
         tool_budget=None,
         tool_context: Optional[Dict] = None,
+        cache_static_prompt: Optional[bool] = None,
+        call_metadata: Optional[Dict] = None,
+        safety_identifier: Optional[str] = None,
     ) -> Optional[QueryResult]:
         """Execute a single query to the LLM asynchronously.
 
@@ -611,6 +658,30 @@ class AsyncLLMClient:
                     extra_kwargs["tool_budget"] = tool_budget
                 if tool_context is not None:
                     extra_kwargs["tool_context"] = tool_context
+                # Cost + observability kwargs (Phase 3b). When not supplied
+                # per-call, fall back to the client-level default (set by
+                # the runner from EvolutionConfig). Metadata MERGES so the
+                # runner can set ``run_id``/``purpose`` once at the client
+                # level and per-call sites add ``generation``/``island_idx``.
+                effective_cache = (
+                    cache_static_prompt
+                    if cache_static_prompt is not None
+                    else self.cache_static_prompt
+                )
+                if effective_cache is not None:
+                    extra_kwargs["cache_static_prompt"] = effective_cache
+                if self.call_metadata or call_metadata:
+                    extra_kwargs["call_metadata"] = {
+                        **(self.call_metadata or {}),
+                        **(call_metadata or {}),
+                    }
+                effective_safety_id = (
+                    safety_identifier
+                    if safety_identifier is not None
+                    else self.safety_identifier
+                )
+                if effective_safety_id is not None:
+                    extra_kwargs["safety_identifier"] = effective_safety_id
                 result = await query_async(
                     msg=msg,
                     system_msg=system_msg,

@@ -6,6 +6,7 @@ Phase 3a now also accepts a ``tools`` kwarg + companion ``tool_budget`` /
 returns ``status="requires_action"``.
 """
 
+import hashlib
 import json
 import logging
 from typing import Any, Dict, Iterable, List, Optional
@@ -28,6 +29,23 @@ from ..tools import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_prompt_cache_key(system_msg: str) -> str:
+    """Stable 32-char key for OpenAI's prompt cache.
+
+    The Responses API discounts the input cost when the same key reappears
+    in subsequent calls. Hash on the system message so identical prompts
+    (which is the common case across a generation batch) share a key.
+    """
+    return hashlib.sha256(system_msg.encode("utf-8")).hexdigest()[:32]
+
+
+def _coerce_metadata(metadata: Optional[Dict[str, Any]]) -> Optional[Dict[str, str]]:
+    """OpenAI's ``metadata`` kwarg requires string keys and string values."""
+    if not metadata:
+        return None
+    return {str(k): str(v) for k, v in metadata.items()}
 
 
 def _build_tool_dispatcher(
@@ -190,6 +208,9 @@ def query_openai(
     tools: Optional[Iterable[ToolSpec]] = None,
     tool_budget: Optional[ToolBudget] = None,
     tool_context: Optional[Dict[str, Any]] = None,
+    cache_static_prompt: bool = True,
+    call_metadata: Optional[Dict[str, Any]] = None,
+    safety_identifier: Optional[str] = None,
     **kwargs,
 ) -> QueryResult:
     """Query an OpenAI / Azure OpenAI Responses model in bg+poll mode."""
@@ -205,6 +226,13 @@ def query_openai(
         extra_create_kwargs.setdefault("tool_choice", "auto")
         # Force serial dispatch so client-side budgeting actually bites.
         extra_create_kwargs["parallel_tool_calls"] = False
+    if cache_static_prompt and system_msg:
+        extra_create_kwargs["prompt_cache_key"] = _compute_prompt_cache_key(system_msg)
+    coerced_metadata = _coerce_metadata(call_metadata)
+    if coerced_metadata:
+        extra_create_kwargs["metadata"] = coerced_metadata
+    if safety_identifier:
+        extra_create_kwargs["safety_identifier"] = safety_identifier
     dispatcher = _build_tool_dispatcher(tools, tool_budget, tool_context, tool_trace)
 
     if output_model is None:
@@ -282,6 +310,9 @@ async def query_openai_async(
     tools: Optional[Iterable[ToolSpec]] = None,
     tool_budget: Optional[ToolBudget] = None,
     tool_context: Optional[Dict[str, Any]] = None,
+    cache_static_prompt: bool = True,
+    call_metadata: Optional[Dict[str, Any]] = None,
+    safety_identifier: Optional[str] = None,
     **kwargs,
 ) -> QueryResult:
     """Async mirror of :func:`query_openai`."""
@@ -294,6 +325,13 @@ async def query_openai_async(
         extra_create_kwargs["tools"] = serialized_tools
         extra_create_kwargs.setdefault("tool_choice", "auto")
         extra_create_kwargs["parallel_tool_calls"] = False
+    if cache_static_prompt and system_msg:
+        extra_create_kwargs["prompt_cache_key"] = _compute_prompt_cache_key(system_msg)
+    coerced_metadata = _coerce_metadata(call_metadata)
+    if coerced_metadata:
+        extra_create_kwargs["metadata"] = coerced_metadata
+    if safety_identifier:
+        extra_create_kwargs["safety_identifier"] = safety_identifier
     dispatcher = _build_tool_dispatcher_async(
         tools, tool_budget, tool_context, tool_trace
     )

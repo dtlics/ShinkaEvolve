@@ -384,6 +384,167 @@ def test_create_and_poll_handles_unknown_tool_name(monkeypatch):
     assert "unknown tool" in submitted["error"]
 
 
+# ---------------------------------------------------------------------------
+# Phase 3b: prompt_cache_key + metadata + safety_identifier
+# ---------------------------------------------------------------------------
+
+
+def test_query_openai_passes_prompt_cache_key_and_metadata(monkeypatch):
+    """Phase 3b: cache_static_prompt and call_metadata reach the API client."""
+    _patch_sleep(monkeypatch)
+
+    from shinka.llm.providers.openai import query_openai
+
+    captured: Dict[str, Any] = {}
+
+    class _CapturingResponses:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return _response(status="completed", tool_calls=None)
+
+        def retrieve(self, response_id):  # pragma: no cover -- inline completed
+            return _response(response_id=response_id, status="completed")
+
+        def delete(self, response_id):
+            pass
+
+    class _CapturingClient:
+        def __init__(self):
+            self.responses = _CapturingResponses()
+
+    # Build a minimal response with usage info so get_openai_costs works.
+    def _patch_response_for_cost(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            id="resp_test",
+            status="completed",
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    content=[SimpleNamespace(text="hello")],
+                )
+            ],
+            usage=SimpleNamespace(
+                input_tokens=100,
+                output_tokens=50,
+                output_tokens_details=SimpleNamespace(reasoning_tokens=0),
+            ),
+            error=None,
+            required_action=None,
+        )
+
+    client = _CapturingClient()
+    client.responses.create = _patch_response_for_cost  # type: ignore[assignment]
+
+    result = query_openai(
+        client=client,
+        model="gpt-5-mini",
+        msg="user prompt",
+        system_msg="STATIC SYSTEM PROMPT",
+        msg_history=[],
+        output_model=None,
+        cache_static_prompt=True,
+        call_metadata={"run_id": "abc123", "purpose": "proposer"},
+        safety_identifier="user_abc",
+    )
+
+    assert result is not None
+    assert "prompt_cache_key" in captured
+    # SHA-256 hash truncated to 32 chars -- deterministic per identical system_msg
+    assert len(captured["prompt_cache_key"]) == 32
+    assert all(c in "0123456789abcdef" for c in captured["prompt_cache_key"])
+    assert captured["metadata"] == {"run_id": "abc123", "purpose": "proposer"}
+    assert captured["safety_identifier"] == "user_abc"
+    # bg+poll mode forces these:
+    assert captured["background"] is True
+    assert captured["store"] is True
+
+
+def test_query_openai_skips_cache_key_when_disabled(monkeypatch):
+    _patch_sleep(monkeypatch)
+    from shinka.llm.providers.openai import query_openai
+
+    captured: Dict[str, Any] = {}
+
+    def _patch_response(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            id="r",
+            status="completed",
+            output=[
+                SimpleNamespace(
+                    type="message",
+                    content=[SimpleNamespace(text="ok")],
+                )
+            ],
+            usage=SimpleNamespace(
+                input_tokens=1,
+                output_tokens=1,
+                output_tokens_details=SimpleNamespace(reasoning_tokens=0),
+            ),
+            error=None,
+            required_action=None,
+        )
+
+    class _Client:
+        def __init__(self):
+            self.responses = SimpleNamespace(
+                create=_patch_response,
+                retrieve=lambda response_id: _patch_response(),
+                delete=lambda response_id: None,
+            )
+
+    query_openai(
+        client=_Client(),
+        model="gpt-5-mini",
+        msg="x",
+        system_msg="some system",
+        msg_history=[],
+        output_model=None,
+        cache_static_prompt=False,
+    )
+    assert "prompt_cache_key" not in captured
+
+
+def test_async_llm_client_merges_per_call_metadata(monkeypatch):
+    """Client-level metadata + per-call call_metadata MERGE before dispatch."""
+    _patch_sleep(monkeypatch)
+    import shinka.llm.llm as llm_module
+    from shinka.llm import AsyncLLMClient
+
+    captured_kwargs: Dict[str, Any] = {}
+
+    async def _fake_query_async(**kwargs):
+        captured_kwargs.update(kwargs)
+        return SimpleNamespace(
+            cost=0.0, content="x", to_dict=lambda: {}
+        )
+
+    # AsyncLLMClient binds query_async at import time; patch the local ref.
+    monkeypatch.setattr(llm_module, "query_async", _fake_query_async)
+
+    client = AsyncLLMClient(
+        model_names=["gpt-5-mini"],
+        max_tokens=128,
+        call_metadata={"run_id": "abc", "purpose": "proposer"},
+    )
+
+    asyncio.run(
+        client.query(
+            msg="hi",
+            system_msg="sys",
+            call_metadata={"generation": "7", "island_idx": "2"},
+        )
+    )
+
+    assert captured_kwargs["call_metadata"] == {
+        "run_id": "abc",
+        "purpose": "proposer",
+        "generation": "7",
+        "island_idx": "2",
+    }
+
+
 def test_async_dispatch_handles_web_fetch(monkeypatch, tmp_path: Path):
     _patch_sleep(monkeypatch)
     fetch_fn, counter = _fake_fetcher_factory(content="async-page")

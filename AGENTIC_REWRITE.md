@@ -228,4 +228,6 @@ Pass criteria:
 
 | Date | Phase | Status | Commit |
 |------|-------|--------|--------|
-| 2026-05-12 | Architecture sketch | done | (this commit) |
+| 2026-05-12 | Architecture sketch | done | `690269e` |
+| 2026-05-12 | Phase A.1 — `BackgroundOpenAIResponsesModel` + 8 tests | done | `a9eb325` |
+| 2026-05-12 | Phase A.2 — `RobustRunner` + 9 tests | done | `6cf6a79` |

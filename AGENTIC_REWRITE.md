@@ -240,3 +240,5 @@ Pass criteria:
 | 2026-05-12 | Phase C.4 — `query_evolution_db_tool` + 17 tests | done | `d3cb3d6` |
 | 2026-05-12 | Phase C.5 — `read_host_file_tool` + 13 tests | done | `5ac0808` |
 | 2026-05-12 | Phase C.6 — `web_search` opt-in tool + opt-in registry flag + 7 tests | done | `317335d` |
+| 2026-05-12 | Phase D.1 — `AgentLLMClient.run_agent` per-call tools + context + 5 tests | done | `d7dddf1` |
+| 2026-05-12 | Phase D.2+D.3 — `_run_agent_proposal` orchestrator method + `use_agentic_proposer` flag + 7 tests | done | `1c48b2b` |

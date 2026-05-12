@@ -46,7 +46,7 @@ from shinka.llm import (
     AsymmetricUCB,
     ThompsonSampler,
 )
-from shinka.llm.agent import AgentLLMClient
+from shinka.llm.agent import AgentLLMClient, PatchProposalOutput
 from shinka.llm.agent.tools import ShinkaToolContext, select_shinka_tools
 from shinka.embed import AsyncEmbeddingClient
 from shinka.launch import JobScheduler, JobConfig, LocalJobConfig
@@ -3795,6 +3795,7 @@ class ShinkaEvolveRunner:
                 tools=tools,
                 max_turns=agent_max_turns,
                 llm_kwargs=llm_kwargs,
+                output_type=PatchProposalOutput,
                 model_sample_probs=model_sample_probs,
                 model_posterior=model_posterior,
             )
@@ -3808,9 +3809,19 @@ class ShinkaEvolveRunner:
             success = tool_ctx.last_successful_patch_text is not None
             patch_text = tool_ctx.last_successful_patch_text
 
+            # Prefer the SDK's structured output (Phase C4) — when the
+            # agent ran with output_type=PatchProposalOutput, the typed
+            # instance is on response.final_output_obj. Fall back to
+            # the legacy <NAME>/<DESCRIPTION> regex if the agent path
+            # didn't fire (non-OpenAI provider, or final output was
+            # text for some reason).
             patch_name: Optional[str] = None
             patch_description: Optional[str] = None
-            if response and response.content:
+            final_obj = getattr(response, "final_output_obj", None) if response else None
+            if isinstance(final_obj, PatchProposalOutput):
+                patch_name = final_obj.name
+                patch_description = final_obj.description
+            elif response and response.content:
                 patch_name = extract_between(
                     response.content, "<NAME>", "</NAME>", False
                 )

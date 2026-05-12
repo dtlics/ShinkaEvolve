@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 class QueryResult:
@@ -20,6 +20,7 @@ class QueryResult:
         model_posteriors: Optional[Dict[str, float]] = None,
         num_tool_calls: int = 0,
         num_total_queries: int = 1,
+        final_output_obj: Optional[Any] = None,
     ):
         self.content = content
         self.msg = msg
@@ -37,26 +38,12 @@ class QueryResult:
         self.model_posteriors = model_posteriors or {}
         self.num_tool_calls = num_tool_calls
         self.num_total_queries = num_total_queries
-
-    def to_dict(self):
-        return {
-            "content": self.content,
-            "msg": self.msg,
-            "system_msg": self.system_msg,
-            "new_msg_history": self.new_msg_history,
-            "model_name": self.model_name,
-            "kwargs": self.kwargs,
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
-            "thinking_tokens": self.thinking_tokens,
-            "cost": self.cost,
-            "input_cost": self.input_cost,
-            "output_cost": self.output_cost,
-            "thought": self.thought,
-            "model_posteriors": self.model_posteriors,
-            "num_tool_calls": self.num_tool_calls,
-            "num_total_queries": self.num_total_queries,
-        }
+        # Structured output (e.g. a Pydantic model instance) when the
+        # caller requested ``output_type=`` on the agent. Legacy / text
+        # paths leave this as None. Kept off ``to_dict`` because the
+        # object isn't always JSON-serializable and the orchestrator
+        # consumes it programmatically rather than via the DB row.
+        self.final_output_obj = final_output_obj
 
     def __str__(self):
         """Return string representation of query result."""

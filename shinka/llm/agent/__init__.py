@@ -11,9 +11,11 @@ from .background_model import (
     BackgroundPollTimeout,
 )
 from .client import AgentLLMClient
+from .types import PatchProposalOutput
 
 __all__ = [
     "AgentLLMClient",
     "BackgroundOpenAIResponsesModel",
     "BackgroundPollTimeout",
+    "PatchProposalOutput",
 ]

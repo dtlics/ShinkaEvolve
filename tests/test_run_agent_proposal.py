@@ -731,6 +731,110 @@ def test_no_cached_eval_keys_when_agent_did_not_evaluate(tmp_path: Path) -> None
     assert "_cached_eval_rtime" not in meta
 
 
+def test_structured_output_used_when_final_output_obj_set(tmp_path: Path) -> None:
+    """C4: when the agent returns a PatchProposalOutput on
+    response.final_output_obj, the orchestrator prefers the typed
+    fields over regex-extracting from response.content."""
+    from shinka.llm.agent import PatchProposalOutput
+
+    runner = _build_stub_runner(tmp_path)
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        ctx: ShinkaToolContext = kwargs["tool_context"]
+        ctx.last_successful_patch_text = "patch"
+        ctx.last_successful_patch_type = "diff"
+        ctx.last_successful_num_applied = 1
+        ctx.record_tool_call("apply_patch", 0.01, success=True)
+        # The agent returned BOTH a structured object AND text with
+        # tags. The orchestrator must prefer the typed object.
+        return SimpleNamespace(
+            content="<NAME>regex-name</NAME><DESCRIPTION>regex-desc</DESCRIPTION>",
+            final_output_obj=PatchProposalOutput(
+                name="typed-name", description="typed-desc"
+            ),
+            cost=0.01,
+            to_dict=lambda: {},
+        )
+
+    runner.llm.run_agent = AsyncMock(side_effect=fake_run_agent)
+    result = asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=14,
+        )
+    )
+    assert result is not None
+    _patch, meta, success = result
+    assert success is True
+    # The structured output wins; the regex would have produced
+    # "regex-name"/"regex-desc".
+    assert meta["patch_name"] == "typed-name"
+    assert meta["patch_description"] == "typed-desc"
+
+
+def test_structured_output_falls_back_to_regex_when_obj_missing(tmp_path: Path) -> None:
+    """C4: when response.final_output_obj is None (e.g. legacy provider
+    path, or output_type unsupported), the orchestrator falls back to
+    extract_between on response.content for parity."""
+    runner = _build_stub_runner(tmp_path)
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        ctx: ShinkaToolContext = kwargs["tool_context"]
+        ctx.last_successful_patch_text = "patch"
+        ctx.last_successful_patch_type = "diff"
+        ctx.last_successful_num_applied = 1
+        ctx.record_tool_call("apply_patch", 0.01, success=True)
+        return SimpleNamespace(
+            content="<NAME>fallback</NAME><DESCRIPTION>fb-desc</DESCRIPTION>",
+            final_output_obj=None,
+            cost=0.01,
+            to_dict=lambda: {},
+        )
+
+    runner.llm.run_agent = AsyncMock(side_effect=fake_run_agent)
+    result = asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=15,
+        )
+    )
+    assert result is not None
+    _patch, meta, _success = result
+    assert meta["patch_name"] == "fallback"
+    assert meta["patch_description"] == "fb-desc"
+
+
+def test_output_type_is_passed_to_run_agent(tmp_path: Path) -> None:
+    """C4: _run_agent_proposal passes PatchProposalOutput as output_type
+    so the SDK auto-instructs the model to produce structured output."""
+    from shinka.llm.agent import PatchProposalOutput
+
+    runner = _build_stub_runner(tmp_path)
+    captured: dict = {}
+
+    async def capture(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return None
+
+    runner.llm.run_agent = AsyncMock(side_effect=capture)
+    asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=16,
+        )
+    )
+    assert captured.get("output_type") is PatchProposalOutput
+
+
 def test_async_running_job_cached_results_defaults_none() -> None:
     """The AsyncRunningJob dataclass adds cached_results=None as default
     so legacy (scheduler-submit) jobs don't need to know about Phase E."""

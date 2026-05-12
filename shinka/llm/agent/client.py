@@ -369,6 +369,7 @@ class AgentLLMClient:
         tools_override: Optional[List[Any]] = None,
         tool_context: Optional[Any] = None,
         max_turns_override: Optional[int] = None,
+        output_type: Optional[type] = None,
     ) -> Optional[QueryResult]:
         """Internal agents-SDK run.
 
@@ -426,13 +427,21 @@ class AgentLLMClient:
             poll_timeout_sec=self._poll_timeout_sec,
             max_queued_wait_sec=self._max_queued_wait_sec,
         )
-        agent = Agent(
-            name="shinka",
-            instructions=system_msg,
-            model=model,
-            model_settings=ModelSettings(**model_settings_kwargs),
-            tools=effective_tools,
-        )
+        agent_kwargs: Dict[str, Any] = {
+            "name": "shinka",
+            "instructions": system_msg,
+            "model": model,
+            "model_settings": ModelSettings(**model_settings_kwargs),
+            "tools": effective_tools,
+        }
+        if output_type is not None:
+            # The SDK instructs the model to emit a final response
+            # matching this schema and parses it into a typed instance
+            # accessible via ``run_result.final_output``. We surface
+            # that on the returned ``QueryResult.final_output_obj`` so
+            # callers don't need to re-parse text with regex.
+            agent_kwargs["output_type"] = output_type
+        agent = Agent(**agent_kwargs)
 
         # Compose the agent input: prior history items if any, plus
         # the current user message. The agents SDK accepts a plain
@@ -484,6 +493,7 @@ class AgentLLMClient:
         max_turns: Optional[int] = None,
         msg_history: Optional[List[Dict[str, Any]]] = None,
         llm_kwargs: Optional[Dict[str, Any]] = None,
+        output_type: Optional[type] = None,
         model_sample_probs: Optional[List[float]] = None,
         model_posterior: Optional[List[float]] = None,
     ) -> Optional[QueryResult]:
@@ -565,6 +575,7 @@ class AgentLLMClient:
                 tools_override=tools,
                 tool_context=tool_context,
                 max_turns_override=max_turns,
+                output_type=output_type,
             )
 
         # Non-OpenAI: tools/context can't be honored. Fall back to
@@ -574,6 +585,12 @@ class AgentLLMClient:
             logger.warning(
                 "run_agent: tools requested on non-OpenAI provider %r; "
                 "falling back to single-turn query (tools ignored).",
+                provider,
+            )
+        if output_type is not None:
+            logger.warning(
+                "run_agent: output_type requested on non-OpenAI provider %r; "
+                "structured output is silently ignored on the legacy path.",
                 provider,
             )
         return await self._query_via_legacy(
@@ -701,7 +718,21 @@ def _runresult_to_queryresult(
             num_tool_calls += 1
 
     final_output = getattr(run_result, "final_output", "")
-    content = final_output if isinstance(final_output, str) else str(final_output)
+    if isinstance(final_output, str):
+        content = final_output
+        final_output_obj: Optional[Any] = None
+    else:
+        # Structured output (e.g. a Pydantic instance) — caller will
+        # consume the typed object; keep ``content`` as a string repr
+        # so the rest of the QueryResult shape is unchanged.
+        final_output_obj = final_output
+        if hasattr(final_output, "model_dump_json"):
+            try:
+                content = final_output.model_dump_json()
+            except Exception:
+                content = str(final_output)
+        else:
+            content = str(final_output)
 
     new_msg_history = list(msg_history) + [
         {"role": "user", "content": msg},
@@ -744,4 +775,5 @@ def _runresult_to_queryresult(
         model_posteriors=model_posteriors,
         num_tool_calls=num_tool_calls,
         num_total_queries=len(raw_responses),
+        final_output_obj=final_output_obj,
     )

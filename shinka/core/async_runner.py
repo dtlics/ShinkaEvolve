@@ -29,7 +29,6 @@ from shinka.database.prompt_dbase import (
     create_system_prompt,
 )
 from shinka.llm import (
-    AsyncLLMClient,  # legacy: kept available for fallback during migration
     extract_between,
     BanditBase,
     FixedSampler,

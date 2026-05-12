@@ -153,14 +153,25 @@ async def _apply_patch_tool(
     patched code becomes the new current state and is written to the
     patch directory ready for evaluation.
 
+    **Format**: the system prompt (above) specifies the exact format
+    you must use. Pass that content as ``patch_text`` verbatim and
+    set ``patch_type`` to match the format the system prompt
+    described:
+
+    - ``"diff"``: shinka's SEARCH/REPLACE block format (NOT a unified
+      diff). The system prompt shows the ``<<<<<<< SEARCH / =======
+      / >>>>>>> REPLACE`` template. Replacements are constrained to
+      lines between ``EVOLVE-BLOCK-START`` and ``EVOLVE-BLOCK-END``
+      markers in the program. Preferred for small targeted edits.
+    - ``"full"``: a complete rewrite of the program in a single
+      markdown code fence (e.g. ```python ... ```). Use only when
+      restructuring substantially.
+    - ``"cross"``: crossover between two parent programs. Rare.
+
     Args:
-        patch_text: The patch content. Format depends on ``patch_type``:
-            - ``"diff"``: unified diff format (preferred for small
-              targeted edits — minimizes token use)
-            - ``"full"``: a complete rewrite of the program. Use only
-              when you need to restructure substantially.
-            - ``"cross"``: crossover format combining two programs.
-              Rarely needed in single-program flows.
+        patch_text: The patch content in the format the system prompt
+            specifies. Copy SEARCH text verbatim (including
+            indentation) when using ``diff``.
         patch_type: One of ``"diff"`` (default), ``"full"``, ``"cross"``.
 
     Returns:

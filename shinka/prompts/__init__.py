@@ -20,6 +20,12 @@ from .prompts_fix import (
     FIX_SYS_FORMAT,
     FIX_ITER_MSG,
     format_error_output_section,
+    # Phase 4 error-fix retry loop:
+    ERROR_FIX_SYS_FORMAT,
+    ERROR_FIX_ITER_MSG,
+    AttemptRecord,
+    format_prior_attempt_log,
+    format_traceback_section,
 )
 from .prompts_init import INIT_SYSTEM_MSG, INIT_USER_MSG
 from .prompts_meta import (
@@ -62,6 +68,11 @@ __all__ = [
     "FIX_SYS_FORMAT",
     "FIX_ITER_MSG",
     "format_error_output_section",
+    "ERROR_FIX_SYS_FORMAT",
+    "ERROR_FIX_ITER_MSG",
+    "AttemptRecord",
+    "format_prior_attempt_log",
+    "format_traceback_section",
     "INIT_SYSTEM_MSG",
     "INIT_USER_MSG",
     "META_STEP1_SYSTEM_MSG",

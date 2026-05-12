@@ -2,10 +2,15 @@ import importlib.util
 import json
 import os
 import time
+import traceback as traceback_module
 import numpy as np
 import pickle
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from typing import Callable, Any, Dict, List, Tuple, Optional, Union
+
+# Phase 4 of research-grounding: cap traceback strings stored alongside
+# correct.json so a runaway evaluator can't blow up disk / model context.
+_MAX_TRACEBACK_CHARS = 8 * 1024  # 8 KB
 
 from shinka.utils.eval_stop import (
     EarlyStopMethod,
@@ -84,11 +89,26 @@ def save_json_results(
     metrics: Dict[str, Any],
     correct: bool,
     error: Optional[str] = None,
+    error_traceback: Optional[str] = None,
 ) -> None:
-    """Saves metrics and correctness status to JSON files."""
+    """Saves metrics and correctness status to JSON files.
+
+    Phase 4 of research-grounding adds the optional ``error_traceback``
+    field consumed by the error-fix retry loop. It is truncated to
+    ``_MAX_TRACEBACK_CHARS`` to keep the file (and downstream prompt
+    context) bounded.
+    """
     os.makedirs(results_dir, exist_ok=True)
 
-    correct_payload = {"correct": correct, "error": error}
+    correct_payload: Dict[str, Any] = {"correct": correct, "error": error}
+    if error_traceback:
+        truncated = error_traceback.strip()
+        if len(truncated) > _MAX_TRACEBACK_CHARS:
+            truncated = (
+                truncated[: _MAX_TRACEBACK_CHARS]
+                + f"\n... [truncated, full length {len(error_traceback)}]"
+            )
+        correct_payload["error_traceback"] = truncated
     correct_file = os.path.join(results_dir, "correct.json")
     with open(correct_file, "w") as f:
         json.dump(correct_payload, f, indent=4)
@@ -425,6 +445,10 @@ def run_shinka_eval(
                     first_error_message = f"combined_score is inf ({combined_score})"
 
     except Exception as e:
+        # Phase 4: capture the full traceback so the error-fix retry loop can
+        # show it to the model verbatim (instead of just ``str(e)`` which
+        # often drops the call site).
+        captured_traceback = traceback_module.format_exc()
         print(f"Evaluation error: {e}")
         metrics = {
             k: effective_default_metrics.get(k, v_default)
@@ -440,6 +464,7 @@ def run_shinka_eval(
             metrics.setdefault("all_validation_errors", [str(e)])
 
         first_error_message = str(e)
+        first_error_traceback = captured_traceback
         overall_correct_flag = False
 
     if "extra_data" in metrics:
@@ -480,5 +505,11 @@ def run_shinka_eval(
             except Exception as e:
                 print(f"Error generating plots: {e}")
 
-    save_json_results(results_dir, metrics, overall_correct_flag, first_error_message)
+    save_json_results(
+        results_dir,
+        metrics,
+        overall_correct_flag,
+        first_error_message,
+        error_traceback=locals().get("first_error_traceback"),
+    )
     return metrics, overall_correct_flag, first_error_message

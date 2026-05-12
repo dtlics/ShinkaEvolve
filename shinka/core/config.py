@@ -62,6 +62,38 @@ class EvolutionConfig:
     # ``{run_id, generation, island_idx, purpose}`` so Azure dashboards can
     # break costs down per-run / per-generation / per-stage.
     tag_calls_with_metadata: bool = True
+    # --- Phase 4: error-fix retry loop ---
+    # When True, evaluator failures route into an iterative retry loop with
+    # the error in context (different from the existing bootstrap fix mode
+    # in sample_fix(); the retry loop is per-candidate, not per-island).
+    enable_error_fix_loop: bool = False
+    # Per-mutation-type retry budgets (hardcoded for v1 per the doc; tune
+    # once we have real per-round success-rate data).
+    error_fix_rounds_by_type: dict = field(
+        default_factory=lambda: {
+            "diff": 2,
+            "full": 3,
+            "cross": 3,
+            "literature_grounded": 4,
+        }
+    )
+    # Decay factor applied to the proposer-bandit reward on successful fixes:
+    # reward = final_score * decay ** attempt_round. 0.7 means a fix at round
+    # 1 gets 70% credit, round 2 gets 49%, etc. Captures first-pass quality
+    # without zeroing rescued candidates.
+    error_fix_score_decay: float = 0.7
+    # Separate bandit instance dedicated to selecting the model that RUNS the
+    # fix rounds. Disabling falls back to reusing the proposer-model bandit's
+    # current pick.
+    enable_fixer_bandit: bool = True
+    fixer_bandit_algorithm: str = "ucb"
+    # Optional Codex server-side shell tool, gated to the error-fix loop ONLY
+    # (never proposer / meta / DR / lit_grounded). Disabled by default.
+    error_fix_enable_shell: bool = False
+    error_fix_shell_budget: int = 4
+    error_fix_shell_models: List[str] = field(
+        default_factory=lambda: ["gpt-5-codex"]
+    )
     proposal_target_mode: str = "adaptive"
     proposal_target_min_samples: int = 5
     proposal_target_ratio_cap: float = 2.0

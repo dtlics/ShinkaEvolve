@@ -17,6 +17,12 @@ from shinka.prompts import (
     FIX_SYS_FORMAT,
     FIX_ITER_MSG,
     format_error_output_section,
+    # Phase 4 error-fix retry loop:
+    ERROR_FIX_SYS_FORMAT,
+    ERROR_FIX_ITER_MSG,
+    AttemptRecord,
+    format_prior_attempt_log,
+    format_traceback_section,
 )
 from shinka.prompts.prompts_init import INIT_SYSTEM_MSG, INIT_USER_MSG
 from shinka.defaults import default_patch_type_probs, default_patch_types
@@ -283,3 +289,76 @@ class PromptSampler:
             eval_history_msg + "\n" + iter_msg if eval_history_msg else iter_msg,
             patch_type,
         )
+
+    def sample_error_fix(
+        self,
+        parent: Program,
+        failed: Program,
+        mutation_intent: Optional[str],
+        prior_attempts: List[AttemptRecord],
+        round_number: int,
+        rounds_remaining: int,
+    ) -> Tuple[str, str, str]:
+        """Generate prompts for the per-candidate error-fix retry loop.
+
+        Distinct from :meth:`sample_fix`, which is the single-shot bootstrap
+        fix used when an island has *no* correct parents at all. This method
+        runs on a per-candidate basis (the same parent + failed mutation is
+        re-prompted up to ``error_fix_rounds_by_type`` times). The contract:
+
+        - ``mutation_intent`` is the validated MutationIntent render or the
+          ``NO_INTENT_RECORDED`` sentinel -- never freeform prompt text.
+        - ``prior_attempts`` summarizes earlier rounds as structured rows
+          (one short line per attempt). The model never sees the full
+          previous prompt/response pairs.
+        - The system prompt explicitly tells the model how many fix
+          attempts remain so it can abort if the cause isn't clear.
+
+        Returns ``(sys_msg, user_msg, patch_type="error_fix")``.
+        """
+        if self.task_sys_msg is None:
+            sys_msg = BASE_SYSTEM_MSG
+        else:
+            sys_msg = self.task_sys_msg
+
+        sys_msg += ERROR_FIX_SYS_FORMAT.format(
+            language=self.language,
+            n_remaining=max(0, int(rounds_remaining)),
+        )
+
+        metadata = failed.metadata or {}
+        error_message = (
+            metadata.get("error_message")
+            or metadata.get("stderr_log", "").strip()
+            or "No error message recorded."
+        )
+        traceback_section = format_traceback_section(failed.error_traceback)
+        prior_attempts_section = format_prior_attempt_log(prior_attempts)
+
+        text_feedback_section = ""
+        if self.use_text_feedback and failed.text_feedback:
+            text_feedback_section = "\n" + format_text_feedback_section(
+                failed.text_feedback
+            )
+
+        iter_msg = ERROR_FIX_ITER_MSG.format(
+            round_number=int(round_number),
+            mutation_intent=mutation_intent or "no intent recorded",
+            language=self.language,
+            parent_code=parent.code,
+            failed_code=failed.code,
+            error_message=error_message,
+            traceback_section=traceback_section,
+            prior_attempts_section=prior_attempts_section,
+            text_feedback_section=text_feedback_section,
+        )
+
+        patch_type = "error_fix"
+        logger.info(
+            "Generated ERROR_FIX prompt round=%d remaining=%d parent=%s failed=%s",
+            round_number,
+            rounds_remaining,
+            getattr(parent, "id", "?"),
+            getattr(failed, "id", "?"),
+        )
+        return sys_msg, iter_msg, patch_type

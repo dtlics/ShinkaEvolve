@@ -1,3 +1,17 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Shinka run artifacts
+**/evolution_db.sqlite
+**/wandb/
+**/_baseline_cache.json
+**/evolution_run.log
+
+# Claude Code per-task worktrees (machine-local)
+.claude/worktrees/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

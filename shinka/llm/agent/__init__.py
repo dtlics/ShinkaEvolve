@@ -10,9 +10,11 @@ from .background_model import (
     BackgroundOpenAIResponsesModel,
     BackgroundPollTimeout,
 )
+from .client import AgentLLMClient
 from .robust_runner import RobustRunner
 
 __all__ = [
+    "AgentLLMClient",
     "BackgroundOpenAIResponsesModel",
     "BackgroundPollTimeout",
     "RobustRunner",

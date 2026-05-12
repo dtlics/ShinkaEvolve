@@ -1,0 +1,553 @@
+"""``AgentLLMClient`` — drop-in replacement for ``AsyncLLMClient`` that
+routes OpenAI / Azure OpenAI calls through the ``openai-agents`` SDK
+with background-mode polling and fresh-client retry.
+
+Design constraints
+------------------
+The existing orchestrator (`shinka.core.async_runner._run_patch_async`)
+expects a `.query(msg, system_msg, ...) -> Optional[QueryResult]`
+contract. The same expectation propagates through
+`prompt_evolver`, `meta-LLM`, `novelty`, and `sampler` call sites. To
+let these call sites migrate one at a time without coordinated
+changes, `AgentLLMClient` exposes exactly the same public surface as
+`AsyncLLMClient`:
+
+* ``.query()``
+* ``.batch_query()``
+* ``.batch_kwargs_query()``
+* ``.get_kwargs()``
+
+Provider routing
+----------------
+For Azure / OpenAI text generation (the user's primary stack), calls
+flow through:
+
+    AgentLLMClient.query
+        -> _query_via_agents
+            -> RobustRunner.run               (fresh client per attempt)
+                -> agents.Runner.run
+                    -> BackgroundOpenAIResponsesModel._fetch_response
+                        -> client.responses.create(background=True)
+                        -> client.responses.retrieve(id)  (poll loop)
+            -> _runresult_to_queryresult       (RunResult -> QueryResult)
+
+For non-OpenAI providers (Anthropic, Gemini, DeepSeek, Bedrock, etc.)
+and for structured-output requests, calls fall back to the existing
+``query_async`` path in ``shinka.llm.query``. This preserves
+provider-specific quirks (e.g. Gemini's automatic function calling
+config, Anthropic's tool_use protocol) without the agents-SDK
+overhead.
+
+Phase B.1 scope
+---------------
+Plain text generation only. Tools (``apply_patch``, ``evaluate``,
+``web_search``, ``query_evolution_db``, ``read_host_file``) land in
+Phase C and slot into the existing agent-factory closure with no
+public API change. Structured output via ``output_type`` is also
+deferred — Phase B.1 falls back to the legacy path when
+``output_model`` is provided.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any, Callable, Dict, List, Optional, Union
+
+from pydantic import BaseModel
+
+from ..client import get_async_client_llm
+from ..kwargs import sample_model_kwargs
+from ..providers import QueryResult
+from ..providers.pricing import calculate_cost, model_exists
+from ..providers.model_resolver import resolve_model_backend
+from ..query import query_async
+from .background_model import (
+    BackgroundOpenAIResponsesModel,
+    DEFAULT_MAX_QUEUED_WAIT_SEC,
+    DEFAULT_POLL_INTERVAL_SEC,
+    DEFAULT_POLL_TIMEOUT_SEC,
+)
+from .robust_runner import RobustRunner
+
+logger = logging.getLogger(__name__)
+
+
+# Providers we route through the agents SDK. Everything else falls
+# back to the legacy ``query_async`` path.
+_AGENT_SDK_PROVIDERS = frozenset({"azure_openai", "openai"})
+
+DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_MAX_TURNS = 10
+
+
+class AgentLLMClient:
+    """Async LLM client that routes Azure/OpenAI through agents SDK.
+
+    Constructor matches ``AsyncLLMClient`` 1:1 so existing call sites
+    can swap class names without touching anything else. Extra
+    parameters specific to the agentic path are keyword-only and
+    optional.
+    """
+
+    def __init__(
+        self,
+        model_names: Union[List[str], str] = "gpt-5.1",
+        temperatures: Union[float, List[float]] = 0.75,
+        max_tokens: Union[int, List[int]] = 4096,
+        reasoning_efforts: Union[str, List[str]] = "disabled",
+        model_sample_probs: Optional[List[float]] = None,
+        output_model: Optional[type[BaseModel]] = None,
+        verbose: bool = True,
+        *,
+        # Agent-loop tunables. Hidden from the legacy interface so
+        # AsyncLLMClient call sites don't need to know about them; the
+        # defaults match production sizing.
+        tools: Optional[List[Any]] = None,
+        builtin_tools: Optional[List[str]] = None,
+        max_tool_steps: int = DEFAULT_MAX_TURNS,
+        poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC,
+        poll_timeout_sec: float = DEFAULT_POLL_TIMEOUT_SEC,
+        max_queued_wait_sec: float = DEFAULT_MAX_QUEUED_WAIT_SEC,
+        max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    ) -> None:
+        if isinstance(model_names, str):
+            model_names = [model_names]
+        self.model_names = model_names
+        self.temperatures = temperatures
+        self.max_tokens = max_tokens
+        self.reasoning_efforts = reasoning_efforts
+        self.model_sample_probs = model_sample_probs
+        self.output_model = output_model
+        self.structured_output = output_model is not None
+        self.verbose = verbose
+
+        # Agent-loop config
+        self._tools = list(tools or [])
+        self._builtin_tools = list(builtin_tools or [])
+        self._max_tool_steps = max_tool_steps
+        self._poll_interval_sec = poll_interval_sec
+        self._poll_timeout_sec = poll_timeout_sec
+        self._max_queued_wait_sec = max_queued_wait_sec
+        self._max_attempts = max_attempts
+
+    # ------------------------------------------------------------------
+    # Public API — parity with AsyncLLMClient
+    # ------------------------------------------------------------------
+
+    def get_kwargs(
+        self, model_sample_probs: Optional[List[float]] = None
+    ) -> Dict[str, Any]:
+        """Sample per-call kwargs from configured model/temperature/effort lists.
+
+        Identical to ``AsyncLLMClient.get_kwargs``.
+        """
+        posterior = (
+            model_sample_probs
+            if model_sample_probs is not None
+            else self.model_sample_probs
+        )
+        if self.verbose:
+            lines = ["==> SAMPLING:"]
+            default_probs = [1.0 / len(self.model_names)] * len(self.model_names)
+            probs_to_display = posterior if posterior is not None else default_probs
+            for name, prob in zip(self.model_names, probs_to_display):
+                lines.append(f"  {name:<30} {prob:>8.4f}")
+            logger.info("\n".join(lines))
+        return sample_model_kwargs(
+            model_names=self.model_names,
+            temperatures=self.temperatures,
+            max_tokens=self.max_tokens,
+            reasoning_efforts=self.reasoning_efforts,
+            model_sample_probs=posterior,
+        )
+
+    async def query(
+        self,
+        msg: str,
+        system_msg: str,
+        msg_history: Optional[List[Dict[str, Any]]] = None,
+        llm_kwargs: Optional[Dict[str, Any]] = None,
+        model_sample_probs: Optional[List[float]] = None,
+        model_posterior: Optional[List[float]] = None,
+    ) -> Optional[QueryResult]:
+        """Single query. Routes to agents SDK for OpenAI/Azure, legacy
+        path otherwise. Returns ``None`` only after exhausting all
+        retry attempts (matches ``AsyncLLMClient.query``)."""
+        if msg_history is None:
+            msg_history = []
+        posterior = (
+            model_sample_probs
+            if model_sample_probs is not None
+            else self.model_sample_probs
+        )
+        if llm_kwargs is None:
+            llm_kwargs = sample_model_kwargs(
+                model_names=self.model_names,
+                temperatures=self.temperatures,
+                max_tokens=self.max_tokens,
+                reasoning_efforts=self.reasoning_efforts,
+                model_sample_probs=posterior,
+            )
+        elif "model_name" not in llm_kwargs:
+            sampled = sample_model_kwargs(
+                model_names=self.model_names,
+                temperatures=self.temperatures,
+                max_tokens=self.max_tokens,
+                reasoning_efforts=self.reasoning_efforts,
+                model_sample_probs=posterior,
+            )
+            llm_kwargs = {**sampled, **llm_kwargs}
+
+        if self.verbose:
+            logger.info(
+                "==> QUERYING: %s", [str(v) for v in llm_kwargs.values()]
+            )
+
+        model_posteriors: Optional[Dict[str, float]] = None
+        if model_posterior is not None:
+            model_posteriors = {
+                name: float(prob)
+                for name, prob in zip(self.model_names, model_posterior)
+            }
+
+        # Provider routing.
+        resolved = resolve_model_backend(llm_kwargs["model_name"])
+        provider = resolved.provider
+        use_agents_sdk = (
+            provider in _AGENT_SDK_PROVIDERS and not self.structured_output
+        )
+
+        if use_agents_sdk:
+            return await self._query_via_agents(
+                msg=msg,
+                system_msg=system_msg,
+                msg_history=msg_history,
+                llm_kwargs=llm_kwargs,
+                model_posteriors=model_posteriors,
+            )
+        return await self._query_via_legacy(
+            msg=msg,
+            system_msg=system_msg,
+            msg_history=msg_history,
+            llm_kwargs=llm_kwargs,
+            model_posteriors=model_posteriors,
+        )
+
+    async def batch_query(
+        self,
+        num_samples: int,
+        msg: Union[str, List[str]],
+        system_msg: Union[str, List[str]],
+        msg_history: Union[List[Dict[str, Any]], List[List[Dict[str, Any]]]] = (),
+        llm_kwargs: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[QueryResult]:
+        """Concurrent batch — wraps ``self.query`` with ``asyncio.gather``."""
+        if isinstance(msg, str):
+            msg = [msg] * num_samples
+        if isinstance(system_msg, str):
+            system_msg = [system_msg] * num_samples
+        if len(msg_history) == 0:
+            histories: List[List[Dict[str, Any]]] = [[] for _ in range(num_samples)]
+        elif isinstance(msg_history[0], dict):
+            histories = [list(msg_history) for _ in range(num_samples)]  # type: ignore[list-item]
+        else:
+            histories = [list(h) for h in msg_history]  # type: ignore[arg-type]
+
+        if llm_kwargs is None:
+            llm_kwargs = [None] * num_samples  # type: ignore[list-item]
+
+        tasks = [
+            self.query(
+                msg=msg[i],
+                system_msg=system_msg[i],
+                msg_history=histories[i],
+                llm_kwargs=llm_kwargs[i],
+            )
+            for i in range(num_samples)
+        ]
+        gathered = await asyncio.gather(*tasks, return_exceptions=True)
+
+        final: List[QueryResult] = []
+        for i, item in enumerate(gathered):
+            if isinstance(item, Exception):
+                logger.info("Error in batch query task %d: %s", i, item)
+            elif item is not None:
+                final.append(item)
+        if self.verbose:
+            costs = [r.cost for r in final if r.cost is not None]
+            logger.info("==> SAMPLING: Total API costs: $%.4f", sum(costs))
+        return final
+
+    async def batch_kwargs_query(
+        self,
+        num_samples: int,
+        msg: Union[str, List[str]],
+        system_msg: Union[str, List[str]],
+        msg_history: Union[List[Dict[str, Any]], List[List[Dict[str, Any]]]] = (),
+        model_sample_probs: Optional[List[float]] = None,
+    ) -> List[QueryResult]:
+        """Concurrent batch where each task samples its own kwargs."""
+        posterior = (
+            model_sample_probs
+            if model_sample_probs is not None
+            else self.model_sample_probs
+        )
+        per_task_kwargs = [
+            sample_model_kwargs(
+                model_names=self.model_names,
+                temperatures=self.temperatures,
+                max_tokens=self.max_tokens,
+                reasoning_efforts=self.reasoning_efforts,
+                model_sample_probs=posterior,
+            )
+            for _ in range(num_samples)
+        ]
+        return await self.batch_query(
+            num_samples=num_samples,
+            msg=msg,
+            system_msg=system_msg,
+            msg_history=msg_history,
+            llm_kwargs=per_task_kwargs,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal: agents-SDK path
+    # ------------------------------------------------------------------
+
+    async def _query_via_agents(
+        self,
+        msg: str,
+        system_msg: str,
+        msg_history: List[Dict[str, Any]],
+        llm_kwargs: Dict[str, Any],
+        model_posteriors: Optional[Dict[str, float]],
+    ) -> Optional[QueryResult]:
+        from agents import Agent, ModelSettings
+
+        model_name = llm_kwargs["model_name"]
+        # Resolve API model name once, before the factory closure — the
+        # answer is deterministic for a given shinka model id.
+        resolved = resolve_model_backend(model_name)
+        api_model_name = resolved.api_model_name
+
+        # Pre-build the ModelSettings from sampled llm_kwargs. Same
+        # settings on every retry attempt; only the client (and
+        # therefore the pool) changes.
+        model_settings_kwargs: Dict[str, Any] = {}
+        if "temperature" in llm_kwargs and llm_kwargs["temperature"] is not None:
+            model_settings_kwargs["temperature"] = llm_kwargs["temperature"]
+        if "max_output_tokens" in llm_kwargs:
+            model_settings_kwargs["max_tokens"] = llm_kwargs["max_output_tokens"]
+        reasoning_spec = llm_kwargs.get("reasoning")
+        if reasoning_spec and reasoning_spec.get("effort"):
+            # Lazy import keeps this module importable when the
+            # openai SDK structure changes.
+            from openai.types.shared import Reasoning
+
+            reasoning_payload: Dict[str, Any] = {"effort": reasoning_spec["effort"]}
+            if "summary" in reasoning_spec:
+                reasoning_payload["summary"] = reasoning_spec["summary"]
+            model_settings_kwargs["reasoning"] = Reasoning(**reasoning_payload)
+
+        def make_agent() -> Any:
+            """Construct a fresh Agent (and AsyncOpenAI client) per attempt.
+
+            Called by ``RobustRunner`` once at start and again after
+            each transport-shaped failure. The client is built via
+            ``get_async_client_llm`` which already implements the
+            base_url + api_version overrides we need for Azure.
+            """
+            client, _api_model, _provider = get_async_client_llm(
+                model_name, structured_output=False
+            )
+            model = BackgroundOpenAIResponsesModel(
+                model=api_model_name,
+                openai_client=client,
+                poll_interval_sec=self._poll_interval_sec,
+                poll_timeout_sec=self._poll_timeout_sec,
+                max_queued_wait_sec=self._max_queued_wait_sec,
+            )
+            return Agent(
+                name="shinka",
+                instructions=system_msg,
+                model=model,
+                model_settings=ModelSettings(**model_settings_kwargs),
+                tools=list(self._tools),
+            )
+
+        runner = RobustRunner(make_agent, max_attempts=self._max_attempts)
+
+        # Compose the agent input: prior history items if any, plus
+        # the current user message. The agents SDK accepts a plain
+        # string for single-turn input, but msg_history makes it
+        # multi-turn.
+        agent_input: Union[str, List[Dict[str, Any]]]
+        if msg_history:
+            agent_input = [*msg_history, {"role": "user", "content": msg}]
+        else:
+            agent_input = msg
+
+        try:
+            run_result = await runner.run(
+                agent_input,
+                max_turns=self._max_tool_steps,
+            )
+        except Exception as exc:
+            logger.info("Agent run failed after retries: %s", exc)
+            return None
+
+        return _runresult_to_queryresult(
+            run_result,
+            msg=msg,
+            system_msg=system_msg,
+            msg_history=msg_history,
+            shinka_model_name=model_name,
+            api_model_name=api_model_name,
+            llm_kwargs=llm_kwargs,
+            model_posteriors=model_posteriors,
+            verbose=self.verbose,
+        )
+
+    # ------------------------------------------------------------------
+    # Internal: legacy (non-agents-SDK) path
+    # ------------------------------------------------------------------
+
+    async def _query_via_legacy(
+        self,
+        msg: str,
+        system_msg: str,
+        msg_history: List[Dict[str, Any]],
+        llm_kwargs: Dict[str, Any],
+        model_posteriors: Optional[Dict[str, float]],
+    ) -> Optional[QueryResult]:
+        """Fall through to existing ``query_async`` for non-OpenAI
+        providers and structured-output requests. Mirrors the inner
+        retry loop of ``AsyncLLMClient.query``."""
+        try_count = 0
+        while try_count < self._max_attempts:
+            try:
+                result = await query_async(
+                    msg=msg,
+                    system_msg=system_msg,
+                    msg_history=msg_history,
+                    output_model=self.output_model,
+                    model_posteriors=model_posteriors,
+                    **llm_kwargs,
+                )
+                if (
+                    self.verbose
+                    and hasattr(result, "cost")
+                    and result.cost is not None
+                ):
+                    logger.info("==> QUERY: API cost: $%.4f", result.cost)
+                return result
+            except Exception as exc:
+                try_count += 1
+                logger.info(
+                    "%d/%d Error in legacy query: %s",
+                    try_count,
+                    self._max_attempts,
+                    exc,
+                )
+                if try_count < self._max_attempts:
+                    await asyncio.sleep(1.0)
+        return None
+
+
+# ----------------------------------------------------------------------
+# RunResult -> QueryResult adapter
+# ----------------------------------------------------------------------
+
+
+def _runresult_to_queryresult(
+    run_result: Any,
+    *,
+    msg: str,
+    system_msg: str,
+    msg_history: List[Dict[str, Any]],
+    shinka_model_name: str,
+    api_model_name: str,
+    llm_kwargs: Dict[str, Any],
+    model_posteriors: Optional[Dict[str, float]],
+    verbose: bool,
+) -> QueryResult:
+    """Adapt an agents-SDK ``RunResult`` into shinka's ``QueryResult``.
+
+    Sums token usage across all underlying ``raw_responses`` (an agent
+    run may make multiple LLM calls if it invokes tools). Costs are
+    computed via the existing pricing module so we stay consistent
+    with the legacy path and the ``programs.cost`` field in the DB.
+    """
+    raw_responses = list(getattr(run_result, "raw_responses", []) or [])
+
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_thinking_tokens = 0
+    for resp in raw_responses:
+        usage = getattr(resp, "usage", None)
+        if usage is None:
+            continue
+        total_input_tokens += getattr(usage, "input_tokens", 0) or 0
+        total_output_tokens += getattr(usage, "output_tokens", 0) or 0
+        out_details = getattr(usage, "output_tokens_details", None)
+        if out_details is not None:
+            total_thinking_tokens += getattr(out_details, "reasoning_tokens", 0) or 0
+
+    # output_tokens from the API includes reasoning_tokens; shinka's
+    # convention (see openai.py:get_openai_costs) is to surface
+    # non-thinking output separately.
+    visible_output_tokens = max(0, total_output_tokens - total_thinking_tokens)
+
+    if model_exists(api_model_name):
+        input_cost, output_cost = calculate_cost(
+            api_model_name,
+            total_input_tokens,
+            total_output_tokens,  # total = visible + thinking, matches legacy path
+        )
+    else:
+        if verbose:
+            logger.warning(
+                "Model %r has no pricing entry; defaulting cost to 0",
+                api_model_name,
+            )
+        input_cost, output_cost = 0.0, 0.0
+
+    # Tool call count. ``run_result.new_items`` is a list of RunItem
+    # objects; tool calls are typed differently per SDK version. We
+    # count via ``type`` attribute which is the stable string
+    # discriminator (`tool_call_item`, `function_call_item`, etc.).
+    num_tool_calls = 0
+    for item in getattr(run_result, "new_items", []) or []:
+        item_type = getattr(item, "type", "")
+        if isinstance(item_type, str) and (
+            "tool_call" in item_type or "function_call" in item_type
+        ):
+            num_tool_calls += 1
+
+    final_output = getattr(run_result, "final_output", "")
+    content = final_output if isinstance(final_output, str) else str(final_output)
+
+    new_msg_history = list(msg_history) + [
+        {"role": "user", "content": msg},
+        {"role": "assistant", "content": content},
+    ]
+
+    return QueryResult(
+        content=content,
+        msg=msg,
+        system_msg=system_msg,
+        new_msg_history=new_msg_history,
+        model_name=shinka_model_name,
+        kwargs=llm_kwargs,
+        input_tokens=total_input_tokens,
+        output_tokens=visible_output_tokens,
+        thinking_tokens=total_thinking_tokens,
+        cost=input_cost + output_cost,
+        input_cost=input_cost,
+        output_cost=output_cost,
+        thought="",  # TODO Phase B follow-up: extract reasoning summary
+        model_posteriors=model_posteriors,
+        num_tool_calls=num_tool_calls,
+        num_total_queries=len(raw_responses),
+    )

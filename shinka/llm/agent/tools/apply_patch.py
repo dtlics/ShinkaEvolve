@@ -29,7 +29,6 @@ directly, which avoids having to construct the SDK's ToolContext.
 from __future__ import annotations
 
 import logging
-import time
 from typing import Any
 
 from agents import RunContextWrapper, function_tool
@@ -54,19 +53,19 @@ async def _apply_patch_impl(
 ) -> str:
     """Pure tool body. Easier to unit-test than the decorated
     function_tool wrapper because the caller passes the state object
-    directly instead of going through ``RunContextWrapper``."""
-    start = time.monotonic()
+    directly instead of going through ``RunContextWrapper``.
 
+    Telemetry: name + latency + success are recorded by
+    ``ShinkaAgentHooks.on_tool_end`` (success is inferred from the
+    return-string prefix ``"OK"`` vs ``"Error:"``). Structured per-call
+    data goes on ``state.last_tool_extras``; the hook merges it into
+    the trace entry.
+    """
     if patch_type not in _VALID_PATCH_TYPES:
-        latency = time.monotonic() - start
-        msg = (
-            f"Invalid patch_type {patch_type!r}. Expected one of "
+        return (
+            f"Error: Invalid patch_type {patch_type!r}. Expected one of "
             f"{sorted(_VALID_PATCH_TYPES)}."
         )
-        state.record_tool_call(
-            "apply_patch", latency, success=False, error=msg
-        )
-        return f"Error: {msg}"
 
     try:
         modified_code, num_applied, output_path, error_msg, patch_txt, patch_path = (
@@ -79,23 +78,11 @@ async def _apply_patch_impl(
             )
         )
     except Exception as exc:
-        latency = time.monotonic() - start
         logger.info("apply_patch tool raised: %s", exc)
-        state.record_tool_call(
-            "apply_patch", latency, success=False, error=str(exc)
-        )
         return f"Error: {exc}"
 
-    latency = time.monotonic() - start
-
     if error_msg:
-        state.record_tool_call(
-            "apply_patch",
-            latency,
-            success=False,
-            error=error_msg,
-            extra={"patch_type": patch_type},
-        )
+        state.last_tool_extras = {"patch_type": patch_type}
         return f"Error: {error_msg}"
 
     # ``apply_patch_async`` may return ``error_msg=None`` together
@@ -105,15 +92,14 @@ async def _apply_patch_impl(
     # success — surface a clear error so the agent can retry with
     # a real patch.
     if num_applied <= 0 or modified_code is None:
-        msg = "No changes applied (patch parsed cleanly but produced no diff)."
-        state.record_tool_call(
-            "apply_patch",
-            latency,
-            success=False,
-            error=msg,
-            extra={"patch_type": patch_type, "num_applied": num_applied},
+        state.last_tool_extras = {
+            "patch_type": patch_type,
+            "num_applied": num_applied,
+        }
+        return (
+            "Error: No changes applied (patch parsed cleanly but "
+            "produced no diff)."
         )
-        return f"Error: {msg}"
 
     state.current_code = modified_code
 
@@ -125,16 +111,11 @@ async def _apply_patch_impl(
     state.last_successful_num_applied = num_applied
     state.last_successful_patch_path = str(patch_path) if patch_path else None
 
-    state.record_tool_call(
-        "apply_patch",
-        latency,
-        success=True,
-        extra={
-            "patch_type": patch_type,
-            "num_applied": num_applied,
-            "output_path": str(output_path) if output_path else None,
-        },
-    )
+    state.last_tool_extras = {
+        "patch_type": patch_type,
+        "num_applied": num_applied,
+        "output_path": str(output_path) if output_path else None,
+    }
     return (
         f"OK: applied {num_applied} change(s) via {patch_type} patch. "
         f"Updated program written to {output_path}."

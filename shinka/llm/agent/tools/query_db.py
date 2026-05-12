@@ -29,7 +29,6 @@ import asyncio
 import json
 import logging
 import sqlite3
-import time
 from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -222,45 +221,26 @@ async def _query_evolution_db_impl(
     program_id: Optional[str] = None,
     generation: Optional[int] = None,
 ) -> str:
-    start = time.monotonic()
-
+    """Telemetry: name + latency + success are recorded by
+    ``ShinkaAgentHooks.on_tool_end``. The JSON success payload doesn't
+    start with ``"OK"`` so the hook's success-detection falls through
+    its escape hatch (non-error → success); error returns are prefixed
+    ``"Error:"`` and detected normally."""
     if state.db_path is None:
-        latency = time.monotonic() - start
-        state.record_tool_call(
-            "query_evolution_db",
-            latency,
-            success=False,
-            error="no_db_path",
-        )
         return "Error: evolution database is not configured for this run."
 
     if query_type not in _VALID_QUERY_TYPES:
-        latency = time.monotonic() - start
-        msg = (
-            f"Invalid query_type {query_type!r}. Expected one of "
+        return (
+            f"Error: Invalid query_type {query_type!r}. Expected one of "
             f"{sorted(_VALID_QUERY_TYPES)}."
         )
-        state.record_tool_call(
-            "query_evolution_db", latency, success=False, error=msg
-        )
-        return f"Error: {msg}"
 
     # Validate required args up front so the error doesn't get masked
     # by the more general database-open error when the path is wrong.
     if query_type == "by_generation" and generation is None:
-        latency = time.monotonic() - start
-        msg = "query_type='by_generation' requires the 'generation' arg."
-        state.record_tool_call(
-            "query_evolution_db", latency, success=False, error=msg
-        )
-        return f"Error: {msg}"
+        return "Error: query_type='by_generation' requires the 'generation' arg."
     if query_type == "lineage_of" and not program_id:
-        latency = time.monotonic() - start
-        msg = "query_type='lineage_of' requires the 'program_id' arg."
-        state.record_tool_call(
-            "query_evolution_db", latency, success=False, error=msg
-        )
-        return f"Error: {msg}"
+        return "Error: query_type='lineage_of' requires the 'program_id' arg."
 
     effective_limit = max(1, min(limit, _MAX_RESULT_ROWS))
 
@@ -275,36 +255,20 @@ async def _query_evolution_db_impl(
             program_id,
             generation,
         )
-    except FileNotFoundError as exc:
-        latency = time.monotonic() - start
-        state.record_tool_call(
-            "query_evolution_db", latency, success=False, error=str(exc)
-        )
+    except FileNotFoundError:
         return f"Error: evolution_db.sqlite not found at {state.db_path}"
     except sqlite3.Error as exc:
-        latency = time.monotonic() - start
         logger.info("query_evolution_db sqlite error: %s", exc)
-        state.record_tool_call(
-            "query_evolution_db", latency, success=False, error=str(exc)
-        )
         return f"Error: database error: {exc}"
     except ValueError as exc:
         # Raised by _execute_query when required args are missing.
-        latency = time.monotonic() - start
-        state.record_tool_call(
-            "query_evolution_db", latency, success=False, error=str(exc)
-        )
         return f"Error: {exc}"
 
     summaries = _summarize_rows(rows)
-    latency = time.monotonic() - start
-    state.record_tool_call(
-        "query_evolution_db",
-        latency,
-        success=True,
-        extra={"query_type": query_type, "result_count": len(summaries)},
-    )
-
+    state.last_tool_extras = {
+        "query_type": query_type,
+        "result_count": len(summaries),
+    }
     payload = {"query_type": query_type, "count": len(summaries), "rows": summaries}
     return json.dumps(payload, default=repr, separators=(",", ":"))
 

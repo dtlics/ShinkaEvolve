@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from typing import Any, Dict
 
 from agents import RunContextWrapper, function_tool
@@ -57,46 +56,33 @@ _MAX_METRICS_JSON_CHARS = 2000
 
 
 async def _evaluate_impl(state: ShinkaToolContext) -> str:
-    """Pure tool body; unit-test target."""
-    start = time.monotonic()
+    """Pure tool body; unit-test target.
 
+    Telemetry: name + latency + success are recorded by
+    ``ShinkaAgentHooks.on_tool_end``. The hook treats ``"FAILED:"``
+    and ``"Error:"`` prefixes as failure. Structured per-call data
+    (combined_score, metrics_keys) goes on ``state.last_tool_extras``.
+    """
     if state.evaluator is None:
-        latency = time.monotonic() - start
-        msg = (
-            "Evaluator is not configured for this run. Apply your patch "
-            "and report your reasoning; scoring will be performed by "
-            "the orchestrator."
+        return (
+            "Error: Evaluator is not configured for this run. Apply your "
+            "patch and report your reasoning; scoring will be performed "
+            "by the orchestrator."
         )
-        state.record_tool_call(
-            "evaluate", latency, success=False, error="no_evaluator_bound"
-        )
-        return f"Error: {msg}"
 
     try:
         metrics, correct, first_error = await state.evaluator()
     except Exception as exc:
-        latency = time.monotonic() - start
         logger.info("evaluate tool raised: %s", exc)
-        state.record_tool_call(
-            "evaluate", latency, success=False, error=str(exc)
-        )
         return f"Error: {exc}"
 
-    latency = time.monotonic() - start
     combined_score = metrics.get("combined_score") if isinstance(metrics, dict) else None
-
-    state.record_tool_call(
-        "evaluate",
-        latency,
-        success=correct,
-        error=first_error,
-        extra={
-            "combined_score": combined_score,
-            "metrics_keys": (
-                sorted(metrics.keys()) if isinstance(metrics, dict) else None
-            ),
-        },
-    )
+    state.last_tool_extras = {
+        "combined_score": combined_score,
+        "metrics_keys": (
+            sorted(metrics.keys()) if isinstance(metrics, dict) else None
+        ),
+    }
 
     metrics_json = _compact_metrics_json(metrics)
 

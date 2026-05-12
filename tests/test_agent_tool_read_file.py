@@ -38,10 +38,10 @@ def test_reads_file_inside_sandbox(tmp_path: Path) -> None:
 
     assert result.startswith("OK: path=")
     assert "hello world" in result
-    trace = state.tool_call_trace[0]
-    assert trace["success"] is True
-    assert trace["bytes_returned"] == 11
-    assert trace["truncated"] is False
+    extras = state.last_tool_extras
+    assert extras is not None
+    assert extras["bytes_returned"] == 11
+    assert extras["truncated"] is False
 
 
 def test_accepts_relative_path_resolved_against_root(tmp_path: Path) -> None:
@@ -60,9 +60,10 @@ def test_truncates_when_file_exceeds_max_bytes(tmp_path: Path) -> None:
 
     result = asyncio.run(_read_host_file_impl(state, str(big_file)))
     assert "(truncated at 100 bytes)" in result
-    trace = state.tool_call_trace[0]
-    assert trace["truncated"] is True
-    assert trace["bytes_returned"] == 100
+    extras = state.last_tool_extras
+    assert extras is not None
+    assert extras["truncated"] is True
+    assert extras["bytes_returned"] == 100
 
 
 def test_agent_requested_max_bytes_clamped_to_context_cap(
@@ -79,7 +80,7 @@ def test_agent_requested_max_bytes_clamped_to_context_cap(
     )
     # Truncated at 200, not 10000.
     assert "(truncated at 200 bytes)" in result
-    assert state.tool_call_trace[0]["bytes_returned"] == 200
+    assert state.last_tool_extras["bytes_returned"] == 200
 
 
 def test_rejects_absolute_path_outside_sandbox(tmp_path: Path) -> None:
@@ -91,7 +92,6 @@ def test_rejects_absolute_path_outside_sandbox(tmp_path: Path) -> None:
 
     assert result.startswith("Error:")
     assert "outside the sandbox root" in result
-    assert state.tool_call_trace[0]["success"] is False
 
 
 def test_rejects_dot_dot_escape(tmp_path: Path) -> None:

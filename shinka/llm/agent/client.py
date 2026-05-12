@@ -427,12 +427,22 @@ class AgentLLMClient:
             poll_timeout_sec=self._poll_timeout_sec,
             max_queued_wait_sec=self._max_queued_wait_sec,
         )
+        # Lazy import — avoids a top-level circular reference between
+        # client.py and hooks.py (hooks pulls in the tool-context type).
+        from .hooks import ShinkaAgentHooks
+
         agent_kwargs: Dict[str, Any] = {
             "name": "shinka",
             "instructions": system_msg,
             "model": model,
             "model_settings": ModelSettings(**model_settings_kwargs),
             "tools": effective_tools,
+            # SDK-native lifecycle hooks. Replace the legacy
+            # ``record_tool_call`` plumbing each tool wrapper used to
+            # carry; tools now just set ``ctx.last_tool_extras`` if
+            # they have structured per-call data, and the hook
+            # appends a trace entry on ``on_tool_end``.
+            "hooks": ShinkaAgentHooks(),
         }
         if output_type is not None:
             # The SDK instructs the model to emit a final response

@@ -77,7 +77,6 @@ def test_returns_error_when_db_path_unset() -> None:
     )
     assert result.startswith("Error:")
     assert "not configured" in result
-    assert state.tool_call_trace[0]["error"] == "no_db_path"
 
 
 def test_returns_error_for_unknown_query_type(tmp_path: Path) -> None:
@@ -266,7 +265,6 @@ def test_missing_db_file_is_returned_as_error(tmp_path: Path) -> None:
         _query_evolution_db_impl(state, query_type="top_n_by_score")
     )
     assert result.startswith("Error:")
-    assert state.tool_call_trace[0]["success"] is False
 
 
 def test_code_preview_is_truncated(tmp_path: Path) -> None:

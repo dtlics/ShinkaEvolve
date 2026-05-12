@@ -36,13 +36,14 @@ def _ctx(evaluator: Optional[Any] = None) -> ShinkaToolContext:
 
 def test_returns_error_when_evaluator_not_bound() -> None:
     """A run without an evaluator shouldn't crash the agent loop;
-    the tool returns a clear error message instead."""
+    the tool returns a clear error message instead. ShinkaAgentHooks
+    classifies the ``"Error: ..."`` prefix as failure when the agent
+    loop is active; here we just check the return value."""
     state = _ctx(evaluator=None)
     result = asyncio.run(_evaluate_impl(state))
     assert result.startswith("Error:")
     assert "not configured" in result
-    assert state.tool_call_trace[0]["success"] is False
-    assert state.tool_call_trace[0]["error"] == "no_evaluator_bound"
+    assert state.last_tool_extras is None
 
 
 def test_success_path_returns_score_and_metrics_json() -> None:
@@ -65,11 +66,12 @@ def test_success_path_returns_score_and_metrics_json() -> None:
     assert parsed["combined_score"] == 0.85
     assert parsed["num_successful_runs"] == 3
 
-    trace = state.tool_call_trace[0]
-    assert trace["name"] == "evaluate"
-    assert trace["success"] is True
-    assert trace["combined_score"] == 0.85
-    assert "metrics_keys" in trace
+    # Structured per-call data exposed for the hooks layer to merge
+    # into tool_call_trace inside the agent loop.
+    extras = state.last_tool_extras
+    assert extras is not None
+    assert extras["combined_score"] == 0.85
+    assert "metrics_keys" in extras
 
 
 def test_failed_validation_returns_failed_prefix() -> None:
@@ -87,9 +89,11 @@ def test_failed_validation_returns_failed_prefix() -> None:
     assert result.startswith("FAILED:")
     assert "circle out of bounds" in result
     assert "partial_metrics=" in result
-    # The trace records success=False (because correct=False).
-    assert state.tool_call_trace[0]["success"] is False
-    assert state.tool_call_trace[0]["error"] == "circle out of bounds"
+    # last_tool_extras carries the structured metric data; hooks will
+    # see success=False from the "FAILED:" prefix.
+    extras = state.last_tool_extras
+    assert extras is not None
+    assert extras["combined_score"] == 0.1
 
 
 def test_evaluator_raises_is_caught_and_returned_as_error() -> None:
@@ -102,8 +106,8 @@ def test_evaluator_raises_is_caught_and_returned_as_error() -> None:
     result = asyncio.run(_evaluate_impl(state))
 
     assert result == "Error: eval subprocess died"
-    assert state.tool_call_trace[0]["success"] is False
-    assert "eval subprocess died" in state.tool_call_trace[0]["error"]
+    # Pre-evaluator exception path doesn't get to set extras.
+    assert state.last_tool_extras is None
 
 
 def test_non_dict_metrics_does_not_crash_serializer() -> None:

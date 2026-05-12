@@ -135,8 +135,16 @@ class ShinkaToolContext:
     # therefore the per-call cost. "medium" is the SDK default.
     web_search_context_size: str = "medium"
 
-    # Telemetry, mutated by tool wrappers
+    # Telemetry, mutated by ``ShinkaAgentHooks.on_tool_end`` (which is
+    # the SDK-native code path), or by ``record_tool_call`` calls if a
+    # tool wants to bypass the hooks (e.g. legacy unit tests that
+    # exercise tool wrappers directly without the agent loop).
     tool_call_trace: List[Dict[str, Any]] = field(default_factory=list)
+    # Slot a tool wrapper writes to before returning when it has
+    # structured per-call data (e.g. ``patch_type``, ``num_applied``,
+    # ``combined_score``). ``ShinkaAgentHooks.on_tool_end`` merges
+    # this into the trace entry; ``on_tool_start`` clears it.
+    last_tool_extras: Optional[Dict[str, Any]] = None
 
     # The most recent successful apply_patch's patch text. The
     # orchestrator reads this after the agent run to populate the

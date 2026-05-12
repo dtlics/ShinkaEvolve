@@ -46,13 +46,14 @@ def test_success_updates_current_code_and_returns_ok(
 
     assert result.startswith("OK: applied 1 change")
     assert state.current_code == new_code
-    assert len(state.tool_call_trace) == 1
-    trace = state.tool_call_trace[0]
-    assert trace["name"] == "apply_patch"
-    assert trace["success"] is True
-    assert trace["patch_type"] == "diff"
-    assert trace["num_applied"] == 1
-    assert trace["output_path"] == "/tmp/gen-0/evolve.py"
+    # Tool surfaces structured per-call data on last_tool_extras;
+    # ShinkaAgentHooks.on_tool_end merges this into tool_call_trace
+    # when called inside the agent loop (not exercised in unit tests).
+    extras = state.last_tool_extras
+    assert extras is not None
+    assert extras["patch_type"] == "diff"
+    assert extras["num_applied"] == 1
+    assert extras["output_path"] == "/tmp/gen-0/evolve.py"
     # All last_successful_* fields are set on success so the
     # orchestrator can read them after the agent run.
     assert state.last_successful_patch_text == "patch"
@@ -79,9 +80,8 @@ def test_invalid_patch_type_short_circuits_without_calling_apply(
     mock_apply.assert_not_awaited()
     # Original code unchanged.
     assert state.current_code == "def f():\n    return 1\n"
-    # Failure was recorded.
-    assert state.tool_call_trace[0]["success"] is False
-    assert "Invalid patch_type" in state.tool_call_trace[0]["error"]
+    # No structured extras for the invalid-input early return.
+    assert state.last_tool_extras is None
 
 
 def test_patch_application_returns_error_keeps_current_code(
@@ -103,8 +103,8 @@ def test_patch_application_returns_error_keeps_current_code(
 
     assert result == "Error: could not parse diff hunk"
     assert state.current_code == original
-    assert state.tool_call_trace[0]["success"] is False
-    assert state.tool_call_trace[0]["error"] == "could not parse diff hunk"
+    # Structured failure metadata for the hooks layer to attach.
+    assert state.last_tool_extras == {"patch_type": "diff"}
 
 
 def test_apply_patch_raises_is_caught_and_returned_as_error(
@@ -124,8 +124,9 @@ def test_apply_patch_raises_is_caught_and_returned_as_error(
 
     assert result == "Error: disk full"
     assert state.current_code == original
-    assert state.tool_call_trace[0]["success"] is False
-    assert "disk full" in state.tool_call_trace[0]["error"]
+    # No extras when the underlying call raises before we have any
+    # structured data to surface.
+    assert state.last_tool_extras is None
 
 
 def test_no_changes_applied_is_treated_as_failure(
@@ -154,10 +155,8 @@ def test_no_changes_applied_is_treated_as_failure(
     # last_successful_* must NOT be set.
     assert state.last_successful_patch_text is None
     assert state.last_successful_num_applied == 0
-    # Trace records failure with the right metadata.
-    trace = state.tool_call_trace[0]
-    assert trace["success"] is False
-    assert trace["num_applied"] == 0
+    # Failure metadata exposed for the hooks layer.
+    assert state.last_tool_extras == {"patch_type": "diff", "num_applied": 0}
 
 
 def test_multiple_successful_applies_chain_current_code_updates(
@@ -192,9 +191,9 @@ def test_multiple_successful_applies_chain_current_code_updates(
     assert first_call.kwargs["original_str"] == "v1"
     assert second_call.kwargs["original_str"] == "v2"
 
-    # Trace has two entries, both successful.
-    assert len(state.tool_call_trace) == 2
-    assert all(t["success"] for t in state.tool_call_trace)
+    # The most recent call's extras win (second apply's data).
+    assert state.last_tool_extras is not None
+    assert state.last_tool_extras["num_applied"] == 2
 
 
 def test_valid_patch_types_constant() -> None:

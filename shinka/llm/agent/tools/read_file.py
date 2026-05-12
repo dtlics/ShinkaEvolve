@@ -25,7 +25,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import time
 from pathlib import Path
 from typing import Any
 
@@ -84,17 +83,12 @@ async def _read_host_file_impl(
     max_bytes: int = 0,
 ) -> str:
     """Pure tool body. ``max_bytes <= 0`` falls back to the context
-    default."""
-    start = time.monotonic()
-
+    default. Telemetry is owned by ``ShinkaAgentHooks``; per-call
+    structured data (resolved path, bytes_returned, truncated) goes on
+    ``state.last_tool_extras``."""
     root_str = state.tool_root_dir
     if not root_str:
-        latency = time.monotonic() - start
-        msg = "tool_root_dir is not set; read_host_file is disabled."
-        state.record_tool_call(
-            "read_host_file", latency, success=False, error=msg
-        )
-        return f"Error: {msg}"
+        return "Error: tool_root_dir is not set; read_host_file is disabled."
 
     effective_max = max_bytes if max_bytes and max_bytes > 0 else state.read_file_max_bytes
     # Hard cap regardless of agent request to prevent unbounded
@@ -106,51 +100,27 @@ async def _read_host_file_impl(
     try:
         resolved = _resolve_under_root(root, Path(path))
     except ValueError as exc:
-        latency = time.monotonic() - start
-        state.record_tool_call(
-            "read_host_file", latency, success=False, error=str(exc)
-        )
         return f"Error: {exc}"
 
     if not resolved.exists():
-        latency = time.monotonic() - start
-        msg = f"File not found: {resolved}"
-        state.record_tool_call(
-            "read_host_file", latency, success=False, error=msg
-        )
-        return f"Error: {msg}"
+        return f"Error: File not found: {resolved}"
 
     if resolved.is_dir():
-        latency = time.monotonic() - start
-        msg = f"Path is a directory, not a file: {resolved}"
-        state.record_tool_call(
-            "read_host_file", latency, success=False, error=msg
-        )
-        return f"Error: {msg}"
+        return f"Error: Path is a directory, not a file: {resolved}"
 
     try:
         text, truncated = await asyncio.to_thread(
             _read_file_sync, resolved, effective_max
         )
     except OSError as exc:
-        latency = time.monotonic() - start
         logger.info("read_host_file OSError: %s", exc)
-        state.record_tool_call(
-            "read_host_file", latency, success=False, error=str(exc)
-        )
         return f"Error: {exc}"
 
-    latency = time.monotonic() - start
-    state.record_tool_call(
-        "read_host_file",
-        latency,
-        success=True,
-        extra={
-            "path": str(resolved),
-            "bytes_returned": len(text),
-            "truncated": truncated,
-        },
-    )
+    state.last_tool_extras = {
+        "path": str(resolved),
+        "bytes_returned": len(text),
+        "truncated": truncated,
+    }
 
     suffix = (
         f"\n\n...(truncated at {effective_max} bytes)"

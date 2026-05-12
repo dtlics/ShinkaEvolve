@@ -23,6 +23,7 @@ classifiers = [
 urls = {Homepage = "https://sakana.ai/shinka-evolve/", Documentation = "https://sakanaai.github.io/ShinkaEvolve/", Repository = "https://github.com/SakanaAI/ShinkaEvolve", Issues = "https://github.com/SakanaAI/ShinkaEvolve/issues"}
 dependencies = [
     "openai",
+    "openai-agents>=0.17.2",
     "numpy",
     "pandas",
     "anthropic",
@@ -47,7 +48,7 @@ dependencies = [
     "aiofiles",
     "google-genai",
     "psutil",
-    "httpx==0.27"
+    "httpx>=0.28"
 ]
 
 [project.scripts]

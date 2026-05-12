@@ -231,3 +231,5 @@ Pass criteria:
 | 2026-05-12 | Architecture sketch | done | `690269e` |
 | 2026-05-12 | Phase A.1 — `BackgroundOpenAIResponsesModel` + 8 tests | done | `a9eb325` |
 | 2026-05-12 | Phase A.2 — `RobustRunner` + 9 tests | done | `6cf6a79` |
+| 2026-05-12 | Phase B.1 — `AgentLLMClient` + 13 tests | done | `297f5ea` |
+| 2026-05-12 | Phase B.3 — `pyproject.toml`: add `openai-agents>=0.17.2`, relax `httpx>=0.28` | done | (this commit) |

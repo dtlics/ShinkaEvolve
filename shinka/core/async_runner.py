@@ -11,6 +11,7 @@ import time
 import uuid
 import os
 import math
+import numpy as np
 import psutil
 import threading
 from datetime import datetime
@@ -593,6 +594,10 @@ class ShinkaEvolveRunner:
         # DR at the meta callsite based on programs_evaluated cadence.
         self.dr_summarizer: Optional[DeepResearchSummarizer] = None
         self._latest_island_briefs: Dict[Optional[int], str] = {}
+        # Phase 3 of research-grounding: keep the structured DRBrief
+        # alongside its rendered markdown so the literature_grounded
+        # arm can pick a specific BriefItem to ground in.
+        self._latest_island_brief_obj: Dict[Optional[int], Any] = {}
         # Programs added to the meta accumulator since the last DR cycle.
         # Decoupled from the freeform meta interval so DR can run at a
         # slower cadence (default 20 vs freeform's 10).
@@ -4080,15 +4085,36 @@ class ShinkaEvolveRunner:
             # exists for this parent's island, it takes priority over
             # the freeform meta_recommendations. Islands without a
             # brief still see the freeform string as-is.
-            island_brief = self._latest_island_briefs.get(
-                getattr(parent_program, "island_idx", None)
-            )
+            island_idx_for_brief = getattr(parent_program, "island_idx", None)
+            island_brief = self._latest_island_briefs.get(island_idx_for_brief)
+            # Phase 3 of research-grounding: pick ONE BriefItem with a
+            # non-empty reference_snippet so the sampler can render the
+            # literature_grounded prompt. The sampler suppresses the
+            # arm when this is None, so we pick eagerly and let it
+            # decide.
+            literature_grounded_item: Optional[Dict[str, Any]] = None
+            if getattr(self.evo_config, "enable_literature_grounded", False):
+                brief_obj = self._latest_island_brief_obj.get(island_idx_for_brief)
+                if brief_obj is not None and getattr(brief_obj, "items", None):
+                    eligible = [
+                        it
+                        for it in brief_obj.items
+                        if str(getattr(it, "reference_snippet", "") or "").strip()
+                    ]
+                    if eligible:
+                        chosen = eligible[
+                            int(np.random.randint(0, len(eligible)))
+                        ]
+                        from dataclasses import asdict as _dc_asdict
+
+                        literature_grounded_item = _dc_asdict(chosen)
             patch_sys, patch_msg, patch_type = self.prompt_sampler.sample(
                 parent=parent_program,
                 archive_inspirations=archive_programs,
                 top_k_inspirations=top_k_programs,
                 meta_recommendations=meta_recs,
                 island_brief=island_brief,
+                literature_grounded_item=literature_grounded_item,
             )
             self.prompt_sampler.task_sys_msg = original_task_sys_msg
             patch_type = str(patch_type)
@@ -4155,6 +4181,20 @@ class ShinkaEvolveRunner:
                     ["apply_patch", "evaluate"],
                 )
             ) or ["apply_patch", "evaluate"]
+
+            # Phase 3 of research-grounding: for the literature_grounded
+            # arm only, force web_search ON for this single call,
+            # regardless of the global agentic_tools config. The brief
+            # item is the focus material; the agent needs web_search to
+            # confirm or extend the reference snippet.
+            if patch_type == "literature_grounded":
+                requested_tools = ["apply_patch", "evaluate", "web_search"]
+                tool_ctx.web_search_context_size = getattr(
+                    self.evo_config,
+                    "literature_grounded_web_search_context_size",
+                    "high",
+                )
+
             try:
                 tools = select_shinka_tools(requested_tools, tool_ctx)
             except KeyError as tool_err:
@@ -4170,11 +4210,33 @@ class ShinkaEvolveRunner:
             # Budget covers (apply_patch → evaluate → reflect) cycles.
             # Each loop iteration consumes ~3 turns; max_patch_attempts
             # is the number of apply attempts the legacy path allows.
-            agent_max_turns = max(
-                1, int(self.evo_config.max_patch_attempts) * 3
+            # literature_grounded gets a bigger budget (default 6 turns)
+            # because the search-confirm-then-edit loop needs the extra
+            # room.
+            if patch_type == "literature_grounded":
+                agent_max_turns = max(
+                    1,
+                    int(
+                        getattr(
+                            self.evo_config,
+                            "literature_grounded_max_turns",
+                            6,
+                        )
+                    ),
+                )
+            else:
+                agent_max_turns = max(
+                    1, int(self.evo_config.max_patch_attempts) * 3
+                )
+            # Tag the call with the right purpose so Azure cost
+            # dashboards can break literature_grounded out separately.
+            _call_purpose = (
+                "lit_grounded"
+                if patch_type == "literature_grounded"
+                else "proposer"
             )
             call_metadata = self._build_call_metadata(
-                purpose="proposer",
+                purpose=_call_purpose,
                 generation=generation,
                 island_idx=getattr(parent_program, "island_idx", None),
             )
@@ -4294,6 +4356,22 @@ class ShinkaEvolveRunner:
             # because it folds propose-skill and fix-skill into one
             # reward.
             fix_telemetry = _summarize_fix_telemetry(tool_ctx.tool_call_trace)
+
+            # Phase 3 of research-grounding: distinguish a legitimate
+            # literature_grounded abort (agent chose to return parent
+            # unchanged citing insufficient reference) from a regular
+            # failure (agent tried apply_patch but couldn't make it
+            # work). The bandit update at the post-eval site skips
+            # entries with ``abort_reason`` set so the "aborts ≠
+            # low-score" invariant holds.
+            abort_reason: Optional[str] = None
+            if (
+                patch_type == "literature_grounded"
+                and not success
+                and len(apply_patch_calls) == 0
+            ):
+                abort_reason = "insufficient_reference"
+
             meta_patch_data: Dict[str, Any] = {
                 "api_costs": total_costs,
                 "patch_type": tool_ctx.last_successful_patch_type or patch_type,
@@ -4311,6 +4389,8 @@ class ShinkaEvolveRunner:
                 **llm_kwargs,
                 "llm_result": response.to_dict() if response else None,
             }
+            if abort_reason is not None:
+                meta_patch_data["abort_reason"] = abort_reason
 
             # Surface the cached eval result so the downstream pipeline
             # (around _submit_evaluation_job_with_slot) can skip submitting
@@ -5241,6 +5321,10 @@ class ShinkaEvolveRunner:
                                         self._latest_island_briefs[island_idx] = (
                                             brief.rendered_markdown
                                         )
+                                    # Keep the structured brief so the
+                                    # literature_grounded arm can pick a
+                                    # specific BriefItem to ground in.
+                                    self._latest_island_brief_obj[island_idx] = brief
                                 if briefs:
                                     logger.info(
                                         "DR cycle produced %d island brief(s) at gen %s",
@@ -5289,21 +5373,38 @@ class ShinkaEvolveRunner:
             if self.llm_selection is not None and "model_name" in (
                 program.metadata or {}
             ):
-                try:
-                    parent = None
-                    if program.parent_id:
-                        parent = await self.async_db.get_async(program.parent_id)
-                    baseline = parent.combined_score if parent else None
-                    reward = program.combined_score if program.correct else None
-                    model_name = program.metadata["model_name"]
-                    self.llm_selection.update(
-                        arm=model_name, reward=reward, baseline=baseline
-                    )
+                # Phase 3 of research-grounding: skip the bandit update
+                # when the agent legitimately aborted (e.g.
+                # literature_grounded with insufficient reference).
+                # Preserves the "aborts ≠ low-score" invariant — the
+                # model isn't being punished for declining to
+                # fabricate.
+                _abort = (program.metadata or {}).get("abort_reason")
+                if _abort:
                     if self.verbose:
-                        self.llm_selection.print_summary(console=self.console)
-                except Exception as e:
-                    logger.warning(f"LLM selection update error for {job.job_id}: {e}")
-                    # Don't fail the whole job for LLM selection issues
+                        logger.info(
+                            "Skipping bandit update for job %s: abort_reason=%s",
+                            job.job_id,
+                            _abort,
+                        )
+                else:
+                    try:
+                        parent = None
+                        if program.parent_id:
+                            parent = await self.async_db.get_async(program.parent_id)
+                        baseline = parent.combined_score if parent else None
+                        reward = program.combined_score if program.correct else None
+                        model_name = program.metadata["model_name"]
+                        self.llm_selection.update(
+                            arm=model_name, reward=reward, baseline=baseline
+                        )
+                        if self.verbose:
+                            self.llm_selection.print_summary(console=self.console)
+                    except Exception as e:
+                        logger.warning(
+                            f"LLM selection update error for {job.job_id}: {e}"
+                        )
+                        # Don't fail the whole job for LLM selection issues
 
             # Update best solution
             try:

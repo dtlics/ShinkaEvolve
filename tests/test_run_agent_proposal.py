@@ -84,6 +84,10 @@ def _build_stub_runner(tmp_path: Path) -> SimpleNamespace:
         # sampler. Tests default to empty so no brief is injected
         # unless they populate it explicitly.
         _latest_island_briefs={},
+        # Phase 3 of research-grounding: the proposer reads
+        # _latest_island_brief_obj to pick a BriefItem for the
+        # literature_grounded mutation arm. Empty by default.
+        _latest_island_brief_obj={},
         # Mocked methods on the class — bind them as plain async funcs.
         _get_current_system_prompt=MagicMock(return_value=(None, None)),
         _save_patch_attempt_async=AsyncMock(),

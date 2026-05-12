@@ -469,3 +469,163 @@ def test_stage_a_output_tolerant_of_garbage() -> None:
     assert out.drift_score == 0.0
     assert out.justification == ""
     assert out.candidate_question == ""
+
+
+# ----------------------------------------------------------------------
+# Phase 2c: real Stage C/D wiring via stage_c_fn / stage_d_fn injection,
+# and the sampler island_brief plumbing.
+# ----------------------------------------------------------------------
+
+
+def test_dr_stage_c_fn_replaces_placeholder_when_injected() -> None:
+    """When ``stage_c_fn`` is wired, the summarizer calls it and treats
+    the returned items as a fresh brief (not a placeholder)."""
+
+    async def fake_stage_c(*, candidate_question, programs):
+        return (
+            [BriefItem(idea="injected-technique", rationale="r", reference_source="s")],
+            0.5,
+            "o3-deep-research",
+        )
+
+    async def fake_stage_d(items):
+        # Stage D in real flow can confirm/extend; here just pass through.
+        return list(items), 0.0
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = ProgramDatabase(
+            config=DatabaseConfig(
+                db_path=str(Path(tmpdir) / "db.sqlite"), num_islands=1
+            ),
+            embedding_model="",
+        )
+        try:
+            assert db.conn is not None
+            meta = MetaSummarizer(meta_llm_client=None, async_mode=True)
+
+            async def fake_judge(*, system_msg, user_msg):
+                return (
+                    '{"drift_score": 0.9, "justification": "drift", "candidate_question": "Q?"}',
+                    0.0,
+                )
+
+            async def fake_embed(text):
+                return [0.5, 0.5, 0.5], 0.0
+
+            dr = DeepResearchSummarizer(
+                meta_summarizer=meta,
+                stage_a_judge=fake_judge,
+                embedder=fake_embed,
+                stage_c_fn=fake_stage_c,
+                stage_d_fn=fake_stage_d,
+                db_conn=db.conn,
+                drift_threshold=0.5,
+                brief_cache_threshold=0.99,
+            )
+
+            meta.add_evaluated_program(_program("p0", island_idx=0))
+            result = asyncio.run(
+                dr.update_async(generation=20, island_indices=[0])
+            )
+            assert 0 in result
+            brief = result[0]
+            assert brief.source == "fresh"
+            assert len(brief.items) == 1
+            assert brief.items[0].idea == "injected-technique"
+            assert "injected-technique" in brief.rendered_markdown
+            # The Stage C budget counter incremented (this consumed a real call).
+            assert dr._stage_c_call_count == 1
+
+            # And a meta_briefs row with stage="fresh" + model_used was persisted.
+            row = db.cursor.execute(
+                "SELECT stage, model_used FROM meta_briefs WHERE island_idx = 0"
+            ).fetchone()
+            assert row["stage"] == "fresh"
+            assert row["model_used"] == "o3-deep-research"
+
+            # And the brief landed in dr_brief_cache so a future Stage B
+            # lookup can short-circuit.
+            cached = db.cursor.execute(
+                "SELECT brief_json FROM dr_brief_cache"
+            ).fetchone()
+            assert cached is not None
+        finally:
+            db.close()
+
+
+def test_dr_stage_c_exception_falls_back_to_placeholder() -> None:
+    """If stage_c_fn raises, the summarizer must emit a placeholder
+    rather than crashing the meta cycle."""
+
+    async def raising_stage_c(**_kwargs):
+        raise RuntimeError("DR endpoint exploded")
+
+    meta = MetaSummarizer(meta_llm_client=None, async_mode=True)
+
+    async def fake_judge(*, system_msg, user_msg):
+        return (
+            '{"drift_score": 0.9, "justification": "drift", "candidate_question": "Q?"}',
+            0.0,
+        )
+
+    dr = DeepResearchSummarizer(
+        meta_summarizer=meta,
+        stage_a_judge=fake_judge,
+        stage_c_fn=raising_stage_c,
+    )
+    meta.add_evaluated_program(_program("p0", island_idx=0))
+    result = asyncio.run(dr.update_async(generation=20, island_indices=[0]))
+    assert 0 in result
+    assert result[0].source == "placeholder"
+    assert "stage_c_failed" in result[0].rendered_markdown
+    # Budget NOT consumed on failure.
+    assert dr._stage_c_call_count == 0
+
+
+def test_sampler_prefers_island_brief_over_meta_recommendations() -> None:
+    """When island_brief is provided, the sampler injects it into the
+    # Potential Recommendations slot in place of meta_recommendations."""
+    from shinka.core.sampler import PromptSampler
+
+    sampler = PromptSampler(
+        task_sys_msg=None,
+        patch_types=["diff"],
+        patch_type_probs=[1.0],
+        language="python",
+    )
+
+    parent = _program("parent", island_idx=0, correct=True)
+    sys_msg, _user_msg, patch_type = sampler.sample(
+        parent=parent,
+        archive_inspirations=[],
+        top_k_inspirations=[],
+        meta_recommendations="GENERIC FREEFORM REC",
+        island_brief="ISLAND-SPECIFIC BRIEF",
+    )
+    assert patch_type == "diff"
+    # The island brief landed in the slot; the freeform rec was
+    # overridden (it does NOT appear separately).
+    assert "ISLAND-SPECIFIC BRIEF" in sys_msg
+    assert "GENERIC FREEFORM REC" not in sys_msg
+
+
+def test_sampler_falls_back_to_meta_recommendations_without_island_brief() -> None:
+    """No island_brief ⇒ the freeform meta_recommendations are still
+    injected (existing behavior preserved for islands DR didn't touch)."""
+    from shinka.core.sampler import PromptSampler
+
+    sampler = PromptSampler(
+        task_sys_msg=None,
+        patch_types=["diff"],
+        patch_type_probs=[1.0],
+        language="python",
+    )
+    parent = _program("parent", island_idx=0, correct=True)
+    sys_msg, _user_msg, patch_type = sampler.sample(
+        parent=parent,
+        archive_inspirations=[],
+        top_k_inspirations=[],
+        meta_recommendations="GENERIC FREEFORM REC",
+        island_brief=None,
+    )
+    assert "GENERIC FREEFORM REC" in sys_msg

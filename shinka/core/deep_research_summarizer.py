@@ -392,6 +392,8 @@ class DeepResearchSummarizer:
         meta_summarizer: Any,  # MetaSummarizer instance — kept loose
         stage_a_judge: Optional[StageAJudgeFn] = None,
         embedder: Optional[EmbedFn] = None,
+        stage_c_fn: Optional[Callable[..., Awaitable[Tuple[List[BriefItem], float, str]]]] = None,
+        stage_d_fn: Optional[Callable[..., Awaitable[Tuple[List[BriefItem], float]]]] = None,
         db_conn: Optional[Any] = None,
         drift_threshold: float = 0.5,
         brief_cache_threshold: float = 0.95,
@@ -403,6 +405,12 @@ class DeepResearchSummarizer:
         self.meta_summarizer = meta_summarizer
         self.stage_a_judge = stage_a_judge
         self.embedder = embedder
+        # Phase 2c: the runner injects real Stage C/D implementations
+        # here. When ``stage_c_fn`` is None we fall back to the
+        # placeholder ``_run_stage_c`` (which signals "DR not
+        # configured"); same for D.
+        self.stage_c_fn = stage_c_fn
+        self.stage_d_fn = stage_d_fn
         self.db_conn = db_conn
         self.drift_threshold = drift_threshold
         self.brief_cache_threshold = brief_cache_threshold
@@ -658,12 +666,15 @@ class DeepResearchSummarizer:
         candidate_question: str,
         programs: List[Program],
     ) -> Tuple[List[BriefItem], float, str]:
-        """Placeholder Stage C — phase 2c replaces this with a real
-        ``o3-deep-research`` call. Returns an empty items list, zero
-        cost, and a sentinel model name so the caller knows DR didn't
-        actually run."""
+        """Real Stage C when ``stage_c_fn`` was injected; placeholder
+        otherwise (returns empty items + sentinel model name so the
+        caller routes to ``_placeholder_brief``)."""
+        if self.stage_c_fn is not None:
+            return await self.stage_c_fn(
+                candidate_question=candidate_question, programs=programs
+            )
         logger.info(
-            "DR Stage C placeholder fired (phase 2c implements this); "
+            "DR Stage C placeholder fired (no stage_c_fn injected); "
             "candidate_question=%r",
             (candidate_question or "")[:120],
         )
@@ -672,9 +683,10 @@ class DeepResearchSummarizer:
     async def _run_stage_d(
         self, items: List[BriefItem]
     ) -> Tuple[List[BriefItem], float]:
-        """Placeholder Stage D — phase 2c replaces this with an agent
-        run using ``web_search`` for grounding. The default is the
-        identity: items pass through unchanged at zero cost."""
+        """Real Stage D when ``stage_d_fn`` was injected; identity
+        passthrough otherwise."""
+        if self.stage_d_fn is not None:
+            return await self.stage_d_fn(items)
         return list(items), 0.0
 
     # ------------------------------------------------------------------

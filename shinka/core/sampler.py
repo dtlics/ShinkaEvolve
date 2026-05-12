@@ -80,11 +80,20 @@ class PromptSampler:
         archive_inspirations: List[Program],
         top_k_inspirations: List[Program],
         meta_recommendations: Optional[str] = None,
+        island_brief: Optional[str] = None,
     ) -> Tuple[str, str, str]:
         if self.task_sys_msg is None:
             sys_msg = BASE_SYSTEM_MSG
         else:
             sys_msg = self.task_sys_msg
+
+        # Phase 2 of research-grounding: when the orchestrator has a
+        # fresh DR brief for this parent's island, prefer it over the
+        # global freeform meta_recommendations. The freeform string
+        # still acts as a fallback for islands the DR cadence didn't
+        # touch this cycle.
+        if island_brief:
+            meta_recommendations = island_brief
 
         # Sample coding type
         # Filter out crossover if no inspirations

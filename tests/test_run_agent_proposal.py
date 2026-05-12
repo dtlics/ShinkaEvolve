@@ -79,6 +79,11 @@ def _build_stub_runner(tmp_path: Path) -> SimpleNamespace:
         # _build_call_metadata. Tests don't care about the dict contents;
         # they just need the helper to exist on the stub.
         run_id="test-run",
+        # Phase 2 of research-grounding: the proposer reads
+        # _latest_island_briefs to inject per-island DR briefs into the
+        # sampler. Tests default to empty so no brief is injected
+        # unless they populate it explicitly.
+        _latest_island_briefs={},
         # Mocked methods on the class — bind them as plain async funcs.
         _get_current_system_prompt=MagicMock(return_value=(None, None)),
         _save_patch_attempt_async=AsyncMock(),

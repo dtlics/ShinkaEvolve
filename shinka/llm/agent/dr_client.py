@@ -147,6 +147,102 @@ def get_dr_async_client(
     return client, base_url
 
 
+async def run_dr_call(
+    client: Any,
+    *,
+    model: str,
+    system_msg: str,
+    user_msg: str,
+    reasoning_effort: str = "medium",
+    max_tool_calls: int = 20,
+    background: bool = True,
+    poll_interval_sec: float = DR_POLL_INTERVAL_SEC,
+    poll_timeout_sec: float = DR_TIMEOUT,
+    call_metadata: dict | None = None,
+) -> tuple[str, float]:
+    """Submit a single ``o3-deep-research`` call and return its text output.
+
+    Bypasses the agents SDK — DR is one-shot, no tool loop on our side
+    (the model uses internal web tools). Background mode + polling
+    keeps the connection lifetime short, matching the long-running
+    inference characteristic of DR.
+
+    Returns ``(text, cost_estimate)``. We don't have per-token DR
+    pricing reliably exposed, so ``cost`` is best-effort and may be
+    zero — the rendered ``meta_briefs.cost`` column reflects whatever
+    the model usage indicates, with ``0.0`` when unknown.
+
+    On poll timeout or terminal-but-failed status, raises so the
+    caller can surface a placeholder brief instead of crashing.
+    """
+    import asyncio
+
+    create_kwargs: dict = {
+        "model": model,
+        "instructions": system_msg,
+        "input": user_msg,
+        "background": background,
+        "reasoning": {"effort": reasoning_effort},
+        "max_tool_calls": max_tool_calls,
+    }
+    if call_metadata:
+        create_kwargs["metadata"] = {
+            str(k): str(v) for k, v in call_metadata.items()
+        }
+
+    submitted = await client.responses.create(**create_kwargs)
+    response_id = getattr(submitted, "id", None)
+    if response_id is None:
+        raise RuntimeError("DR submission did not return a response id")
+
+    elapsed = 0.0
+    last_status: str = getattr(submitted, "status", "unknown") or "unknown"
+    response: Any = submitted
+    terminal = {"completed", "failed", "incomplete", "cancelled", "expired"}
+    while last_status not in terminal:
+        if elapsed > poll_timeout_sec:
+            raise TimeoutError(
+                f"DR response {response_id} did not finish: "
+                f"last status={last_status!r} after {elapsed:.1f}s"
+            )
+        await asyncio.sleep(poll_interval_sec)
+        elapsed += poll_interval_sec
+        response = await client.responses.retrieve(response_id)
+        last_status = getattr(response, "status", "unknown") or "unknown"
+
+    if last_status != "completed":
+        # DR finished but not with usable output. Caller decides
+        # whether to fall back to a placeholder.
+        raise RuntimeError(
+            f"DR response {response_id} terminal status={last_status!r}"
+        )
+
+    # Extract the model's final text output. Different SDK versions
+    # expose this on different attributes; try the canonical ones.
+    text = getattr(response, "output_text", None)
+    if not text:
+        output_items = getattr(response, "output", None) or []
+        for item in output_items:
+            content = getattr(item, "content", None) or []
+            for c in content:
+                t = getattr(c, "text", None)
+                if t:
+                    text = t
+                    break
+            if text:
+                break
+    if not text:
+        text = ""
+
+    cost = 0.0
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        # Best-effort cost estimate — actual DR pricing lives outside
+        # this module and is captured by the Azure dashboard.
+        cost = 0.0
+    return text, cost
+
+
 class DeepResearchModel(BackgroundOpenAIResponsesModel):
     """``BackgroundOpenAIResponsesModel`` configured for DR cadence.
 

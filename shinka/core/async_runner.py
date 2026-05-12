@@ -59,6 +59,10 @@ from shinka.edit import summarize_diff
 from shinka.core.sampler import PromptSampler
 from shinka.core.summarizer import MetaSummarizer
 from shinka.core.async_summarizer import AsyncMetaSummarizer
+from shinka.core.deep_research_summarizer import (
+    BriefItem,
+    DeepResearchSummarizer,
+)
 from shinka.core.async_novelty_judge import AsyncNoveltyJudge
 from shinka.core.novelty_judge import NoveltyJudge
 from shinka.core.config import EvolutionConfig, FOLDER_PREFIX
@@ -581,6 +585,23 @@ class ShinkaEvolveRunner:
             )
         else:
             self.meta_summarizer = None
+
+        # Deep-research meta cycle (phase 2 of research-grounding). Built
+        # only when ``enable_deep_research`` is True AND a meta_summarizer
+        # exists (DR depends on the per-island accumulator that lives on
+        # MetaSummarizer). The orchestrator branches between freeform and
+        # DR at the meta callsite based on programs_evaluated cadence.
+        self.dr_summarizer: Optional[DeepResearchSummarizer] = None
+        self._latest_island_briefs: Dict[Optional[int], str] = {}
+        # Programs added to the meta accumulator since the last DR cycle.
+        # Decoupled from the freeform meta interval so DR can run at a
+        # slower cadence (default 20 vs freeform's 10).
+        self._dr_programs_since_last: int = 0
+        if (
+            getattr(evo_config, "enable_deep_research", False)
+            and self.meta_summarizer is not None
+        ):
+            self.dr_summarizer = self._build_dr_summarizer()
 
         # Novelty judge
         if evo_config.novelty_llm_models:
@@ -1387,6 +1408,240 @@ class ShinkaEvolveRunner:
         logger.info(
             f"Prompt evolution initialized with archive size "
             f"{self.evo_config.prompt_archive_size}"
+        )
+
+    def _build_dr_summarizer(self) -> DeepResearchSummarizer:
+        """Construct the DR summarizer with Stage A/C/D callables wired
+        to the runner's existing infrastructure.
+
+        Stage A reuses the meta_summarizer's underlying AgentLLMClient
+        (cheap drift judge). Stage C calls the dedicated DR Azure
+        endpoint via ``run_dr_call``. Stage D spawns short
+        ``self.llm.run_agent`` runs with ``web_search`` for code
+        grounding. Embedding lookup reuses the DB's embedding_client
+        when present, else returns empty (Stage B becomes a no-op).
+        """
+        from shinka.llm.agent.dr_client import (
+            DR_API_KEY_ENV,
+            DR_API_VERSION_ENV,
+            DR_ENDPOINT_ENV,
+            get_dr_async_client,
+            run_dr_call,
+        )
+
+        evo = self.evo_config
+        stage_a_judge_model = getattr(
+            evo, "dr_stage_a_llm_model", "azure-gpt-5.4-mini"
+        )
+        dr_model = getattr(evo, "dr_model", "o3-deep-research")
+        dr_reasoning_effort = getattr(evo, "dr_reasoning_effort", "medium")
+        dr_max_tool_calls = getattr(evo, "dr_max_tool_calls", 20)
+        dr_grounding_domains: List[str] = list(
+            getattr(evo, "dr_code_grounding_domains", []) or []
+        )
+
+        # Stage A judge — cheap one-shot via AgentLLMClient. Built fresh
+        # rather than reusing meta_llm_client so this call always uses
+        # the cheap drift model regardless of meta config.
+        stage_a_client = AgentLLMClient(
+            model_names=[stage_a_judge_model],
+            temperatures=0.1,
+            max_tokens=512,
+            reasoning_efforts="low",
+            verbose=self.verbose,
+        )
+
+        async def _stage_a_judge(*, system_msg: str, user_msg: str) -> Tuple[str, float]:
+            response = await stage_a_client.query(
+                msg=user_msg,
+                system_msg=system_msg,
+                call_metadata=self._build_call_metadata(purpose="dr_stage_a"),
+                store=(
+                    False
+                    if not getattr(self.evo_config, "store_llm_responses", False)
+                    else None
+                ),
+                safety_identifier=self.run_id,
+                cache_static_prompt=getattr(
+                    self.evo_config, "cache_static_system_prompt", True
+                ),
+            )
+            if response is None or response.content is None:
+                return "", 0.0
+            return response.content, float(response.cost or 0.0)
+
+        async def _embedder(text: str) -> Tuple[List[float], float]:
+            embedding_client = getattr(self.db, "_ensure_embedding_client", None)
+            if embedding_client is None:
+                return [], 0.0
+            client = embedding_client()
+            if client is None:
+                return [], 0.0
+            try:
+                from shinka.embed import AsyncEmbeddingClient
+
+                async_client = AsyncEmbeddingClient(
+                    model_name=getattr(self.evo_config, "embedding_model", None)
+                )
+                emb, cost = await async_client.embed_async(text)
+                if isinstance(emb, list) and emb and isinstance(emb[0], list):
+                    emb = emb[0]  # type: ignore[assignment]
+                return list(emb), float(cost or 0.0)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("DR embedder failed: %s", exc)
+                return [], 0.0
+
+        async def _stage_c_fn(
+            *, candidate_question: str, programs: List[Program]
+        ) -> Tuple[List[BriefItem], float, str]:
+            from shinka.prompts import (
+                DR_STAGE_C_SYS_MSG,
+                DR_STAGE_C_USER_MSG,
+            )
+
+            # Compact program context for the DR model — best program +
+            # a short note about island activity. We avoid pasting full
+            # code blobs into a DR call to keep token cost predictable.
+            best = await self.async_db.get_best_program_async()
+            best_code = (best.code if best else "(no best program yet)")
+            program_context = (
+                f"Best program ({best.id if best else 'n/a'}) score="
+                f"{best.combined_score if best else 0.0}:\n```\n{best_code[:4000]}\n```"
+            )
+            user_msg = DR_STAGE_C_USER_MSG.format(
+                candidate_question=candidate_question,
+                program_context=program_context,
+            )
+            try:
+                client, _base_url = get_dr_async_client(
+                    endpoint_env=getattr(self.evo_config, "dr_endpoint_env", DR_ENDPOINT_ENV),
+                    api_key_env=getattr(self.evo_config, "dr_api_key_env", DR_API_KEY_ENV),
+                    api_version_env=getattr(
+                        self.evo_config, "dr_api_version_env", DR_API_VERSION_ENV
+                    ),
+                )
+            except RuntimeError as exc:
+                logger.warning("DR client unavailable: %s", exc)
+                return [], 0.0, "dr_placeholder"
+            try:
+                text, cost = await run_dr_call(
+                    client,
+                    model=dr_model,
+                    system_msg=DR_STAGE_C_SYS_MSG,
+                    user_msg=user_msg,
+                    reasoning_effort=dr_reasoning_effort,
+                    max_tool_calls=dr_max_tool_calls,
+                    background=getattr(self.evo_config, "dr_background", True),
+                    call_metadata=self._build_call_metadata(purpose="dr_stage_c"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("DR Stage C call failed: %s", exc)
+                return [], 0.0, "dr_placeholder"
+            items = BriefItem.parse_list(text)
+            return items, cost, dr_model
+
+        async def _stage_d_fn(items: List[BriefItem]) -> Tuple[List[BriefItem], float]:
+            from shinka.prompts import (
+                DR_STAGE_D_SYS_MSG,
+                DR_STAGE_D_USER_MSG,
+            )
+
+            allowed = (
+                ", ".join(dr_grounding_domains)
+                if dr_grounding_domains
+                else "(no domain restriction configured)"
+            )
+            grounded: List[BriefItem] = []
+            total_cost = 0.0
+            # Per-item agent run; if web_search isn't available or the
+            # call fails, fall back to the original item. Stage D
+            # confirms — it does not REPLACE the proposed idea.
+            for item in items:
+                user_msg = DR_STAGE_D_USER_MSG.format(
+                    idea=item.idea,
+                    reference_source=item.reference_source or "(none provided)",
+                    reference_snippet=item.reference_snippet or "(none provided)",
+                )
+                sys_msg = DR_STAGE_D_SYS_MSG.format(allowed_domains=allowed)
+                try:
+                    from shinka.llm.agent.tools import (
+                        ShinkaToolContext,
+                        select_shinka_tools,
+                    )
+
+                    # Stage D uses a throwaway tool context — no patch
+                    # state needed, just the web_search tool. We point
+                    # at a temp patch_dir to keep the context valid.
+                    tmp_ctx = ShinkaToolContext(
+                        patch_dir=str(self.results_dir),
+                        parent_code="",
+                        web_search_context_size="high",
+                    )
+                    tools = select_shinka_tools(["web_search"], tmp_ctx)
+                    response = await self.llm.run_agent(
+                        msg=user_msg,
+                        system_msg=sys_msg,
+                        tool_context=tmp_ctx,
+                        tools=tools,
+                        max_turns=4,
+                        call_metadata=self._build_call_metadata(
+                            purpose="dr_stage_d"
+                        ),
+                        store=(
+                            False
+                            if not getattr(
+                                self.evo_config, "store_llm_responses", False
+                            )
+                            else None
+                        ),
+                        safety_identifier=self.run_id,
+                        cache_static_prompt=False,  # per-item prompt varies
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("DR Stage D agent run failed: %s", exc)
+                    grounded.append(item)
+                    continue
+
+                if response is None or not response.content:
+                    grounded.append(item)
+                    continue
+                total_cost += float(response.cost or 0.0)
+                from shinka.core.deep_research_summarizer import _strip_to_json
+
+                parsed = _strip_to_json(response.content)
+                if not parsed or not parsed.get("confirmed"):
+                    # Confirmation failed; keep the original item so
+                    # the brief still surfaces it, with notes carried
+                    # forward.
+                    grounded.append(item)
+                    continue
+                grounded.append(
+                    BriefItem(
+                        idea=item.idea,
+                        rationale=item.rationale,
+                        reference_source=str(parsed.get("source") or item.reference_source),
+                        reference_snippet=str(
+                            parsed.get("reference_snippet") or item.reference_snippet
+                        ),
+                        gotchas=item.gotchas
+                        or str(parsed.get("notes") or ""),
+                    )
+                )
+            return grounded, total_cost
+
+        return DeepResearchSummarizer(
+            meta_summarizer=self.meta_summarizer.sync_summarizer,
+            stage_a_judge=_stage_a_judge,
+            embedder=_embedder,
+            stage_c_fn=_stage_c_fn,
+            stage_d_fn=_stage_d_fn,
+            db_conn=getattr(self.db, "conn", None),
+            drift_threshold=getattr(evo, "dr_drift_threshold", 0.5),
+            brief_cache_threshold=getattr(evo, "dr_brief_cache_threshold", 0.95),
+            dr_max_calls_per_run=getattr(evo, "dr_max_calls_per_run", 30),
+            dr_max_tool_calls=dr_max_tool_calls,
+            dr_reasoning_effort=dr_reasoning_effort,
+            dr_code_grounding_domains=dr_grounding_domains,
         )
 
     def _build_call_metadata(
@@ -3821,11 +4076,19 @@ class ShinkaEvolveRunner:
             if current_sys_prompt:
                 self.prompt_sampler.task_sys_msg = current_sys_prompt
 
+            # Phase 2 of research-grounding: when a fresh DR brief
+            # exists for this parent's island, it takes priority over
+            # the freeform meta_recommendations. Islands without a
+            # brief still see the freeform string as-is.
+            island_brief = self._latest_island_briefs.get(
+                getattr(parent_program, "island_idx", None)
+            )
             patch_sys, patch_msg, patch_type = self.prompt_sampler.sample(
                 parent=parent_program,
                 archive_inspirations=archive_programs,
                 top_k_inspirations=top_k_programs,
                 meta_recommendations=meta_recs,
+                island_brief=island_brief,
             )
             self.prompt_sampler.task_sys_msg = original_task_sys_msg
             patch_type = str(patch_type)
@@ -4947,6 +5210,47 @@ class ShinkaEvolveRunner:
                         self._meta_side_effect_lock = meta_lock
                     async with meta_lock:
                         self.meta_summarizer.add_evaluated_program(program)
+                        self._dr_programs_since_last += 1
+
+                        # DR cadence — phase 2 of research-grounding.
+                        # Runs *in addition to* the freeform meta cycle
+                        # below; the brief takes priority for islands
+                        # it touched (sampler reads
+                        # ``_latest_island_briefs`` first, falls back to
+                        # the freeform string).
+                        dr_interval = getattr(
+                            self.evo_config, "dr_meta_interval", 0
+                        ) or 0
+                        if (
+                            self.dr_summarizer is not None
+                            and dr_interval > 0
+                            and self._dr_programs_since_last >= dr_interval
+                        ):
+                            self._dr_programs_since_last = 0
+                            try:
+                                sync_sum = self.meta_summarizer.sync_summarizer
+                                island_indices = list(
+                                    sync_sum.evaluated_since_last_meta_by_island.keys()
+                                )
+                                briefs = await self.dr_summarizer.update_async(
+                                    generation=program.generation,
+                                    island_indices=island_indices,
+                                )
+                                for island_idx, brief in briefs.items():
+                                    if brief.rendered_markdown:
+                                        self._latest_island_briefs[island_idx] = (
+                                            brief.rendered_markdown
+                                        )
+                                if briefs:
+                                    logger.info(
+                                        "DR cycle produced %d island brief(s) at gen %s",
+                                        len(briefs),
+                                        program.generation,
+                                    )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "DR meta cycle failed: %s", exc
+                                )
 
                         if self.meta_summarizer.should_update_meta(
                             self.evo_config.meta_rec_interval

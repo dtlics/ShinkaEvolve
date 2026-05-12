@@ -935,6 +935,202 @@ def test_run_pipeline_runs_full_stages_when_novel_drift(tmp_path: Path):
     assert cached.summary == "sum"
 
 
+# ---------------------------------------------------------------------------
+# Phase 5d: sampler integration (island_brief) + runner glue
+# ---------------------------------------------------------------------------
+
+
+from shinka.core.sampler import PromptSampler, _render_island_brief  # noqa: E402
+from shinka.database import Program  # noqa: E402
+
+
+def test_render_island_brief_returns_none_for_empty_or_missing():
+    assert _render_island_brief(None) is None
+    empty = IslandBrief(island_idx=0, summary="", items=[])
+    assert _render_island_brief(empty) is None
+
+
+def test_render_island_brief_emits_numbered_blocks_with_fields():
+    brief = IslandBrief(
+        island_idx=0,
+        summary="LR scheduling family",
+        items=[
+            BriefItem(
+                idea="cosine schedule",
+                rationale="smooth decay across epochs",
+                reference_snippet="for step in range(...): lr = ...",
+                source="https://arxiv.org/abs/x",
+                gotchas="reset on warm restart",
+            ),
+            BriefItem(
+                idea="linear warmup",
+                rationale="anneal in to stable lr",
+            ),
+        ],
+    )
+    rendered = _render_island_brief(brief)
+    assert rendered is not None
+    assert "LR scheduling family" in rendered
+    assert "1. cosine schedule" in rendered
+    assert "Rationale: smooth decay across epochs" in rendered
+    assert "Reference: for step in range(...)" in rendered
+    assert "Source: https://arxiv.org/abs/x" in rendered
+    assert "Gotchas: reset on warm restart" in rendered
+    assert "2. linear warmup" in rendered
+    # No empty rows for fields the second item didn't provide.
+    assert "Source: \n" not in rendered
+
+
+def test_sampler_uses_island_brief_when_provided():
+    """When an island_brief is passed, the sampler renders its items into
+    the recommendation slot instead of using the freeform string."""
+    sampler = PromptSampler(language="python")
+    parent = Program(id="p", code="x = 1\n", generation=0)
+    brief = IslandBrief(
+        island_idx=0,
+        summary="LR family",
+        items=[
+            BriefItem(
+                idea="cosine",
+                rationale="smooth decay",
+                reference_snippet="snippet text",
+            )
+        ],
+    )
+    sys_msg, _, patch_type = sampler.sample(
+        parent=parent,
+        archive_inspirations=[parent],  # avoid cross suppression
+        top_k_inspirations=[],
+        meta_recommendations="freeform recommendations",
+        island_brief=brief,
+    )
+    # Brief wins over the freeform string in the "# Potential Recommendations"
+    # slot. cross/full/diff dispatch is unchanged.
+    if patch_type != "cross":
+        assert "# Potential Recommendations" in sys_msg
+        assert "cosine" in sys_msg
+        assert "smooth decay" in sys_msg
+        assert "freeform recommendations" not in sys_msg
+
+
+def test_sampler_falls_back_to_freeform_when_brief_empty():
+    sampler = PromptSampler(language="python")
+    parent = Program(id="p", code="x = 1\n", generation=0)
+    empty_brief = IslandBrief(island_idx=0, summary="", items=[])
+    sys_msg, _, patch_type = sampler.sample(
+        parent=parent,
+        archive_inspirations=[parent],
+        top_k_inspirations=[],
+        meta_recommendations="fallback meta string",
+        island_brief=empty_brief,
+    )
+    if patch_type != "cross":
+        assert "fallback meta string" in sys_msg
+
+
+# --- runner glue (smoke tests of the per-island accumulator) ---------------
+
+
+def test_runner_record_dr_program_skipped_when_disabled():
+    """When enable_deep_research=False, _record_dr_program is a no-op."""
+    from types import SimpleNamespace
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    class _Cfg:
+        enable_deep_research = False
+        dr_meta_interval = 20
+
+    class _Runner:
+        evo_config = _Cfg()
+        dr_evaluated_since_last_cycle = {}
+        _dr_programs_seen = 0
+
+    runner = _Runner()
+    ShinkaEvolveRunner._record_dr_program(
+        runner,
+        program=SimpleNamespace(island_idx=0),
+    )
+    assert runner.dr_evaluated_since_last_cycle == {}
+    assert runner._dr_programs_seen == 0
+
+
+def test_runner_record_dr_program_buckets_by_island():
+    from types import SimpleNamespace
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    class _Cfg:
+        enable_deep_research = True
+        dr_meta_interval = 20
+
+    class _Runner:
+        evo_config = _Cfg()
+        dr_evaluated_since_last_cycle = {}
+        _dr_programs_seen = 0
+
+    runner = _Runner()
+    for island in (0, 1, 0, 1, 2):
+        ShinkaEvolveRunner._record_dr_program(
+            runner,
+            program=SimpleNamespace(island_idx=island),
+        )
+    assert len(runner.dr_evaluated_since_last_cycle[0]) == 2
+    assert len(runner.dr_evaluated_since_last_cycle[1]) == 2
+    assert len(runner.dr_evaluated_since_last_cycle[2]) == 1
+    assert runner._dr_programs_seen == 5
+
+
+def test_runner_maybe_run_dr_cycle_skips_when_below_cadence():
+    """Below ``dr_meta_interval`` programs, the cycle doesn't fire."""
+    import asyncio as _asyncio
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    class _Cfg:
+        enable_deep_research = True
+        dr_meta_interval = 20
+
+    class _Runner:
+        evo_config = _Cfg()
+        dr_summarizer = None
+        dr_evaluated_since_last_cycle: Dict[Optional[int], list] = {0: []}
+        dr_briefs_by_island: Dict[Optional[int], IslandBrief] = {}
+        _dr_programs_seen = 5
+        ensure_called = False
+
+        def _ensure_dr_summarizer(self):
+            self.ensure_called = True
+
+    runner = _Runner()
+    _asyncio.run(ShinkaEvolveRunner._maybe_run_dr_cycle_async(runner))
+    # Programs accumulator should be untouched, cycle never entered the body.
+    assert runner.ensure_called is False
+    assert runner.dr_briefs_by_island == {}
+
+
+def test_runner_maybe_run_dr_cycle_skips_when_disabled():
+    import asyncio as _asyncio
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    class _Cfg:
+        enable_deep_research = False
+        dr_meta_interval = 1
+
+    class _Runner:
+        evo_config = _Cfg()
+        dr_summarizer = None
+        dr_evaluated_since_last_cycle = {0: ["fake program"]}
+        dr_briefs_by_island: Dict[Optional[int], IslandBrief] = {}
+        _dr_programs_seen = 100
+        ensure_called = False
+
+        def _ensure_dr_summarizer(self):
+            self.ensure_called = True
+
+    runner = _Runner()
+    _asyncio.run(ShinkaEvolveRunner._maybe_run_dr_cycle_async(runner))
+    # Disabled flag short-circuits BEFORE the summarizer construction.
+    assert runner.ensure_called is False
+
+
 def test_db_migration_creates_dr_tables_on_legacy_open(monkeypatch):
     """An on-disk DB created without the DR tables should grow them on
     next open without crashing or duplicating."""

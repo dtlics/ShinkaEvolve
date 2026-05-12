@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Literal
+from typing import Any, List, Optional, Tuple, Literal
 import numpy as np
 from shinka.database import Program
 from shinka.database.inspirations import InspirationContextBuilder
@@ -29,6 +29,45 @@ from shinka.defaults import default_patch_type_probs, default_patch_types
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _render_island_brief(island_brief: Optional[Any]) -> Optional[str]:
+    """Render a deep-research IslandBrief into the recommendation slot text.
+
+    Returns ``None`` if the brief is missing or empty. The output is
+    plain Markdown so it splices into existing system-message rendering
+    without escaping. Each item gets a numbered block with idea +
+    rationale + reference + gotchas; empty fields are omitted entirely.
+    """
+    if island_brief is None:
+        return None
+    items = getattr(island_brief, "items", None) or []
+    summary = getattr(island_brief, "summary", "") or ""
+    if not items and not summary.strip():
+        return None
+    rows: List[str] = []
+    if summary.strip():
+        rows.append(summary.strip())
+    for idx, item in enumerate(items, start=1):
+        idea = (getattr(item, "idea", "") or "").strip()
+        rationale = (getattr(item, "rationale", "") or "").strip()
+        reference = (getattr(item, "reference_snippet", "") or "").strip()
+        source = (getattr(item, "source", "") or "").strip()
+        gotchas = (getattr(item, "gotchas", "") or "").strip()
+        if not idea:
+            continue
+        block = [f"{idx}. {idea}"]
+        if rationale:
+            block.append(f"   Rationale: {rationale}")
+        if reference:
+            block.append(f"   Reference: {reference}")
+        if source:
+            block.append(f"   Source: {source}")
+        if gotchas:
+            block.append(f"   Gotchas: {gotchas}")
+        rows.append("\n".join(block))
+    rendered = "\n\n".join(rows).strip()
+    return rendered or None
 
 
 class PromptSampler:
@@ -86,6 +125,7 @@ class PromptSampler:
         archive_inspirations: List[Program],
         top_k_inspirations: List[Program],
         meta_recommendations: Optional[str] = None,
+        island_brief: Optional[Any] = None,
     ) -> Tuple[str, str, str]:
         if self.task_sys_msg is None:
             sys_msg = BASE_SYSTEM_MSG
@@ -120,17 +160,29 @@ class PromptSampler:
                 p=self.patch_type_probs,
             )
 
-        # Add meta-recommendations BEFORE format instructions (if provided)
-        if meta_recommendations not in [None, "none"] and patch_type != "cross":
+        # Add meta-recommendations BEFORE format instructions (if provided).
+        # Phase 5d of research-grounding: when an ``island_brief`` is
+        # supplied, render its structured items into the SAME slot the
+        # freeform meta_recommendations use (so downstream prompt formatting
+        # stays bit-identical). Brief items take precedence over the
+        # freeform string when both are available -- they're the more
+        # researched, structured input.
+        rendered_recommendations = _render_island_brief(island_brief)
+        if rendered_recommendations is None and meta_recommendations not in (
+            None,
+            "none",
+        ):
+            rendered_recommendations = meta_recommendations
+        if rendered_recommendations is not None and patch_type != "cross":
             sys_msg += "\n\n# Potential Recommendations"
             sys_msg += (
                 "\nThe following are potential recommendations for the "
                 "next program generation:\n"
             )
-            sys_msg += f"\n{meta_recommendations}"
+            sys_msg += f"\n{rendered_recommendations}"
             logger.info(
                 f"Added meta recommendation to system prompt: "
-                f"{meta_recommendations[:80]}..."
+                f"{rendered_recommendations[:80]}..."
             )
         else:
             logger.debug(

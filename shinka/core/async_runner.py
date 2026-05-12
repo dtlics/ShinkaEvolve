@@ -49,6 +49,21 @@ from shinka.core.summarizer import MetaSummarizer
 from shinka.core.async_summarizer import AsyncMetaSummarizer
 from shinka.core.async_novelty_judge import AsyncNoveltyJudge
 from shinka.core.novelty_judge import NoveltyJudge
+from shinka.core.deep_research_summarizer import (
+    BriefCache,
+    DeepResearchSummarizer,
+    IslandBrief,
+)
+
+
+class _NullCtx:
+    """No-op context manager used when no lock is available."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
 from shinka.core.config import EvolutionConfig, FOLDER_PREFIX
 from shinka.core.pipeline_timing import (
     summarize_timing_metadata,
@@ -547,6 +562,19 @@ class ShinkaEvolveRunner:
         )
         self.prompt_api_cost = 0.0  # Track prompt evolution API costs separately
 
+        # Phase 5 of research-grounding: deep-research meta pipeline.
+        # All four pieces are None / empty when ``enable_deep_research`` is
+        # off so the runner is bit-identical to pre-Phase-5 behavior.
+        self.dr_summarizer: Optional[DeepResearchSummarizer] = None
+        self.dr_brief_cache: Optional[BriefCache] = None
+        self.dr_briefs_by_island: Dict[Optional[int], IslandBrief] = {}
+        self.dr_evaluated_since_last_cycle: Dict[Optional[int], List[Program]] = {}
+        self.dr_calls_used: int = 0
+        self._dr_client = None  # Lazily constructed -- env vars may not be set yet
+        # Cadence counter for DR runs: separate from the freeform meta
+        # cadence so the two pipelines can run at different intervals.
+        self._dr_programs_seen: int = 0
+
         # Initialize prompt evolution LLM client if enabled
         if evo_config.evolve_prompts:
             prompt_llm_models = evo_config.prompt_llm_models or evo_config.llm_models
@@ -633,6 +661,301 @@ class ShinkaEvolveRunner:
         # Meta task logging state (to reduce verbosity)
         self._last_meta_log_state: dict | None = None
         self._last_meta_log_info_time: float | None = None
+
+    def _ensure_dr_summarizer(self) -> None:
+        """Phase 5 of research-grounding: lazily construct the DR pipeline.
+
+        Wires four hooks over the runner's existing clients:
+
+        - ``drift_llm``: Stage A's cheap LLM call goes through the meta
+          summarizer's client (or falls back to the proposer client).
+        - ``embed``: Stage B's direction-summary embedding uses the
+          existing async embedding client.
+        - ``dr_call``: Stage C drives ``o3-deep-research`` via a dedicated
+          Azure client (``get_async_dr_client``) and the Phase 2
+          ``create_and_poll_async`` helper with ``POLL_TIMEOUT_DR``.
+        - ``ground_call``: Stage D reuses the proposer LLM with the
+          Phase 3 ``WebSearchTool`` + ``WebFetchTool`` under a bounded
+          ``ToolBudget``.
+
+        Construction is lazy + idempotent so misconfigured DR credentials
+        only surface as an error when the cycle actually fires, not at
+        runner init. When ``enable_deep_research`` is off this is a
+        no-op.
+        """
+        if not self.evo_config.enable_deep_research:
+            return
+        if self.dr_summarizer is not None:
+            return
+        try:
+            from shinka.llm.dr_client import (
+                DRConfigurationError,
+                get_async_dr_client,
+            )
+            from shinka.llm.poll import create_and_poll_async
+            from shinka.llm.constants import POLL_TIMEOUT_DR
+            from shinka.llm.tools import (
+                URLFetchCache,
+                WebFetchTool,
+                WebSearchTool,
+                ToolBudget,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("DR pipeline imports failed: %s", exc)
+            return
+
+        try:
+            db_path = getattr(self.db.config, "db_path", None) if self.db else None
+        except Exception:
+            db_path = None
+        self.dr_brief_cache = BriefCache(
+            db_path=db_path,
+            similarity_threshold=self.evo_config.dr_brief_cache_threshold,
+        )
+
+        meta_client = (
+            self.meta_summarizer._async_meta_llm
+            if self.meta_summarizer is not None
+            and hasattr(self.meta_summarizer, "_async_meta_llm")
+            else self.llm
+        )
+        proposer_client = self.llm
+        embedding_client = self.embedding_client
+
+        async def _drift_llm(sys_msg: str, user_msg: str):
+            try:
+                response = await meta_client.query(
+                    msg=user_msg,
+                    system_msg=sys_msg,
+                    call_metadata={"purpose": "dr_stage_a"},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Stage A LLM call failed: %s", exc)
+                return None, 0.0
+            if response is None:
+                return None, 0.0
+            return (
+                getattr(response, "content", None),
+                float(getattr(response, "cost", 0.0) or 0.0),
+            )
+
+        async def _embed(text: str):
+            if embedding_client is None:
+                return [], 0.0
+            try:
+                emb, cost = await embedding_client.embed_async(text)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Stage B embedding failed: %s", exc)
+                return [], 0.0
+            return (emb or []), float(cost or 0.0)
+
+        async def _dr_call(sys_msg: str, user_msg: str):
+            if self.dr_calls_used >= int(self.evo_config.dr_max_calls_per_run):
+                logger.info(
+                    "DR call budget exhausted (%d/%d); skipping Stage C",
+                    self.dr_calls_used,
+                    self.evo_config.dr_max_calls_per_run,
+                )
+                return None, 0.0, None
+            try:
+                if self._dr_client is None:
+                    self._dr_client = get_async_dr_client(
+                        endpoint_env=self.evo_config.dr_endpoint_env,
+                        api_key_env=self.evo_config.dr_api_key_env,
+                        timeout=POLL_TIMEOUT_DR,
+                    )
+            except DRConfigurationError as exc:
+                logger.warning("DR client unavailable: %s", exc)
+                return None, 0.0, None
+            self.dr_calls_used += 1
+            response = await create_and_poll_async(
+                self._dr_client,
+                poll_timeout=POLL_TIMEOUT_DR,
+                delete_after=self.evo_config.delete_llm_responses_after_retrieval,
+                model=self.evo_config.dr_model,
+                input=[
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": user_msg},
+                ],
+                reasoning={
+                    "effort": self.evo_config.dr_reasoning_effort,
+                    "summary": "auto",
+                },
+                metadata={
+                    "run_id": getattr(self, "run_id", ""),
+                    "purpose": "dr_stage_c",
+                },
+            )
+            content = ""
+            for item in getattr(response, "output", None) or []:
+                for piece in getattr(item, "content", None) or []:
+                    text = getattr(piece, "text", None)
+                    if text:
+                        content = text
+                        break
+                if content:
+                    break
+            return content, 0.0, self.evo_config.dr_model
+
+        async def _ground_call(
+            sys_msg: str, user_msg: str, items: List[Dict[str, Any]]
+        ):
+            try:
+                cache = URLFetchCache(db_path=db_path) if db_path else URLFetchCache()
+                tools = [WebSearchTool(), WebFetchTool()]
+                budget = ToolBudget(
+                    max_searches=3, max_fetches=3, max_shell=0, max_turns=6
+                )
+                response = await proposer_client.query(
+                    msg=user_msg,
+                    system_msg=sys_msg,
+                    tools=tools,
+                    tool_budget=budget,
+                    tool_context={"url_fetch_cache": cache},
+                    call_metadata={"purpose": "dr_stage_d"},
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Stage D grounding call failed: %s", exc)
+                return None, 0.0, None
+            if response is None:
+                return None, 0.0, None
+            return (
+                getattr(response, "content", None),
+                float(getattr(response, "cost", 0.0) or 0.0),
+                getattr(response, "model_name", None),
+            )
+
+        self.dr_summarizer = DeepResearchSummarizer(
+            drift_llm=_drift_llm,
+            embed=_embed,
+            cache=self.dr_brief_cache,
+            dr_call=_dr_call,
+            ground_call=_ground_call,
+            drift_threshold=self.evo_config.dr_drift_threshold,
+            cache_threshold=self.evo_config.dr_brief_cache_threshold,
+            allowed_domains=list(self.evo_config.dr_code_grounding_domains or []),
+        )
+        logger.info(
+            "DR summarizer initialized (drift_thresh=%.2f cache_thresh=%.2f domains=%s)",
+            self.evo_config.dr_drift_threshold,
+            self.evo_config.dr_brief_cache_threshold,
+            self.evo_config.dr_code_grounding_domains,
+        )
+
+    def _record_dr_program(self, program: Program) -> None:
+        """Phase 5d: bucket evaluated programs by island for the DR cycle.
+
+        Cadence is decoupled from the freeform meta loop so DR can fire at
+        ``dr_meta_interval`` (default 20) while freeform meta keeps its
+        own faster cadence (default 10). The accumulator drains in
+        ``_maybe_run_dr_cycle_async``.
+        """
+        if not self.evo_config.enable_deep_research:
+            return
+        island_key = getattr(program, "island_idx", None)
+        self.dr_evaluated_since_last_cycle.setdefault(island_key, []).append(
+            program
+        )
+        self._dr_programs_seen += 1
+
+    async def _maybe_run_dr_cycle_async(self) -> None:
+        """Fire the DR pipeline when ``dr_meta_interval`` programs have
+        accumulated since the last cycle.
+
+        Iterates per island, runs ``DeepResearchSummarizer.run_pipeline``
+        for each that has new programs, caches the resulting brief in
+        ``self.dr_briefs_by_island``, and best-effort persists each
+        stage's output into the ``meta_briefs`` table for audit. Per-call
+        budget ``dr_max_calls_per_run`` is checked inside the Stage C
+        hook above; reaching it disables further Stage C while leaving
+        Stage A / Stage B running (they re-use cached briefs).
+        """
+        if (
+            not self.evo_config.enable_deep_research
+            or self._dr_programs_seen < int(self.evo_config.dr_meta_interval or 1)
+        ):
+            return
+        self._ensure_dr_summarizer()
+        if self.dr_summarizer is None:
+            self._dr_programs_seen = 0
+            return
+
+        # Drain the per-island accumulator atomically so concurrent
+        # post-eval calls don't double-count programs into one DR cycle.
+        per_island = self.dr_evaluated_since_last_cycle
+        self.dr_evaluated_since_last_cycle = {}
+        self._dr_programs_seen = 0
+
+        task_description = self.evo_config.task_sys_msg or ""
+        generation = self.completed_generations
+
+        for island_idx, programs in per_island.items():
+            if not programs:
+                continue
+            previous = self.dr_briefs_by_island.get(island_idx)
+            try:
+                brief, costs = await self.dr_summarizer.run_pipeline(
+                    island_idx=island_idx,
+                    recent_programs=programs,
+                    previous_brief=previous,
+                    task_description=task_description,
+                    generation=generation,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "DR pipeline failed for island %s: %s", island_idx, exc
+                )
+                continue
+            self.dr_briefs_by_island[island_idx] = brief
+            total_cost = sum(costs.values()) if isinstance(costs, dict) else 0.0
+            self.total_api_cost += total_cost
+            await self._persist_dr_brief_async(brief, costs, generation)
+
+    async def _persist_dr_brief_async(
+        self,
+        brief: "IslandBrief",
+        costs: Dict[str, float],
+        generation: int,
+    ) -> None:
+        """Best-effort write of one brief into the ``meta_briefs`` table."""
+        if self.async_db is None:
+            return
+        try:
+            import json as _json
+            payload = brief.to_dict()
+            payload["costs"] = costs
+            row = (
+                brief.island_idx,
+                int(generation or 0),
+                "ABCD",  # combined stage label for the run_pipeline output
+                brief.summary or "",
+                _json.dumps(payload),
+                brief.model_used,
+                float(brief.cost or 0.0),
+                time.time(),
+            )
+
+            def _write() -> None:
+                with self.async_db._sync_db_writer_lock:  # type: ignore[attr-defined]
+                    pass  # no-op if helper exists; harmless if not
+
+            # Use the sync DB directly through the async writer executor.
+            def _insert() -> None:
+                if self.db is None:
+                    return
+                with self.db._lock if hasattr(self.db, "_lock") else _NullCtx():
+                    self.db.cursor.execute(
+                        "INSERT INTO meta_briefs (island_idx, generation, stage, "
+                        "content, structured_json, model_used, cost, created_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        row,
+                    )
+                    self.db.conn.commit()
+
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _insert)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("DR brief persist (best-effort) failed: %s", exc)
 
     def _build_error_fix_shell_tools(
         self, picked_model: Optional[str]

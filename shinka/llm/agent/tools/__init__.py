@@ -44,6 +44,7 @@ from .registry import (
 from . import apply_patch as _apply_patch  # noqa: F401
 from . import evaluate as _evaluate  # noqa: F401
 from . import query_db as _query_db  # noqa: F401
+from . import read_file as _read_file  # noqa: F401
 
 __all__ = [
     "DEFAULT_EVAL_TIMEOUT_SEC",

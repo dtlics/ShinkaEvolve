@@ -1,23 +1,9 @@
-import backoff
 import openai
-from shinka.llm.constants import BACKOFF_MAX_TIME, BACKOFF_MAX_TRIES, BACKOFF_MAX_VALUE
 from .pricing import calculate_cost, model_exists
 from .result import QueryResult
 import logging
 
 logger = logging.getLogger(__name__)
-
-MAX_TRIES = BACKOFF_MAX_TRIES
-MAX_VALUE = BACKOFF_MAX_VALUE
-MAX_TIME = BACKOFF_MAX_TIME
-
-
-def backoff_handler(details):
-    exc = details.get("exception")
-    if exc:
-        logger.warning(
-            f"OpenAI - Retry {details['tries']} due to error: {exc}. Waiting {details['wait']:0.1f}s..."
-        )
 
 
 def _extract_message_text(response) -> str:
@@ -106,19 +92,6 @@ def get_openai_costs(response, model):
     }
 
 
-@backoff.on_exception(
-    backoff.expo,
-    (
-        openai.APIConnectionError,
-        openai.APIStatusError,
-        openai.RateLimitError,
-        openai.APITimeoutError,
-    ),
-    max_tries=MAX_TRIES,
-    max_value=MAX_VALUE,
-    max_time=MAX_TIME,
-    on_backoff=backoff_handler,
-)
 def query_openai(
     client,
     model,
@@ -178,19 +151,6 @@ def query_openai(
     return result
 
 
-@backoff.on_exception(
-    backoff.expo,
-    (
-        openai.APIConnectionError,
-        openai.APIStatusError,
-        openai.RateLimitError,
-        openai.APITimeoutError,
-    ),
-    max_tries=MAX_TRIES,
-    max_value=MAX_VALUE,
-    max_time=MAX_TIME,
-    on_backoff=backoff_handler,
-)
 async def query_openai_async(
     client,
     model,

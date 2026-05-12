@@ -1,16 +1,9 @@
-import backoff
 import anthropic
-from shinka.llm.constants import BACKOFF_MAX_TIME, BACKOFF_MAX_TRIES, BACKOFF_MAX_VALUE
 from .pricing import calculate_cost
 from .result import QueryResult
 import logging
 
 logger = logging.getLogger(__name__)
-
-
-MAX_TRIES = BACKOFF_MAX_TRIES
-MAX_VALUE = BACKOFF_MAX_VALUE
-MAX_TIME = BACKOFF_MAX_TIME
 
 
 def get_anthropic_costs(response, model):
@@ -31,27 +24,6 @@ def get_anthropic_costs(response, model):
     }
 
 
-def backoff_handler(details):
-    exc = details.get("exception")
-    if exc:
-        logger.info(
-            f"Anthropic - Retry {details['tries']} due to error: {exc}. Waiting {details['wait']:0.1f}s..."
-        )
-
-
-@backoff.on_exception(
-    backoff.expo,
-    (
-        anthropic.APIConnectionError,
-        anthropic.APIStatusError,
-        anthropic.RateLimitError,
-        anthropic.APITimeoutError,
-    ),
-    max_tries=MAX_TRIES,
-    max_value=MAX_VALUE,
-    max_time=MAX_TIME,
-    on_backoff=backoff_handler,
-)
 def query_anthropic(
     client,
     model,
@@ -117,19 +89,6 @@ def query_anthropic(
     return result
 
 
-@backoff.on_exception(
-    backoff.expo,
-    (
-        anthropic.APIConnectionError,
-        anthropic.APIStatusError,
-        anthropic.RateLimitError,
-        anthropic.APITimeoutError,
-    ),
-    max_tries=MAX_TRIES,
-    max_value=MAX_VALUE,
-    max_time=MAX_TIME,
-    on_backoff=backoff_handler,
-)
 async def query_anthropic_async(
     client,
     model,

@@ -1,17 +1,10 @@
-import backoff
 import logging
 from typing import Any, cast
 from google.genai import types
-from shinka.llm.constants import BACKOFF_MAX_TIME, BACKOFF_MAX_TRIES, BACKOFF_MAX_VALUE
 from .pricing import calculate_cost
 from .result import QueryResult
 
 logger = logging.getLogger(__name__)
-
-
-MAX_TRIES = BACKOFF_MAX_TRIES
-MAX_VALUE = BACKOFF_MAX_VALUE
-MAX_TIME = BACKOFF_MAX_TIME
 
 
 def build_gemini_thinking_config(thinking_budget: int):
@@ -75,15 +68,6 @@ def get_gemini_costs(response, model):
     }
 
 
-def backoff_handler(details):
-    exc = details.get("exception")
-    if exc:
-        logger.info(
-            f"Gemini - Retry {details['tries']} due to error: {exc}. "
-            f"Waiting {details['wait']:0.1f}s..."
-        )
-
-
 def gemini_build_contents(msg_history, msg):
     """Build structured contents from message history and current message.
 
@@ -141,14 +125,6 @@ def gemini_extract_thoughts_and_content(response):
     return thought, content
 
 
-@backoff.on_exception(
-    backoff.expo,
-    (Exception,),  # Catch all exceptions for Gemini API errors
-    max_tries=MAX_TRIES,
-    max_value=MAX_VALUE,
-    max_time=MAX_TIME,
-    on_backoff=backoff_handler,
-)
 def query_gemini(
     client,
     model,
@@ -217,14 +193,6 @@ def query_gemini(
     return result
 
 
-@backoff.on_exception(
-    backoff.expo,
-    (Exception,),  # Catch all exceptions for Gemini API errors
-    max_tries=MAX_TRIES,
-    max_value=MAX_VALUE,
-    max_time=MAX_TIME,
-    on_backoff=backoff_handler,
-)
 async def query_gemini_async(
     client,
     model,

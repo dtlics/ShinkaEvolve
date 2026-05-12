@@ -232,4 +232,5 @@ Pass criteria:
 | 2026-05-12 | Phase A.1 — `BackgroundOpenAIResponsesModel` + 8 tests | done | `a9eb325` |
 | 2026-05-12 | Phase A.2 — `RobustRunner` + 9 tests | done | `6cf6a79` |
 | 2026-05-12 | Phase B.1 — `AgentLLMClient` + 13 tests | done | `297f5ea` |
-| 2026-05-12 | Phase B.3 — `pyproject.toml`: add `openai-agents>=0.17.2`, relax `httpx>=0.28` | done | (this commit) |
+| 2026-05-12 | Phase B.3 — `pyproject.toml`: add `openai-agents>=0.17.2`, relax `httpx>=0.28` | done | `6a96591` |
+| 2026-05-12 | Phase B.2 — `async_runner` migrates 4 LLM client sites to `AgentLLMClient` | done | `7d42997` |

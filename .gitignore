@@ -9,6 +9,25 @@ shinka_scale*
 !examples/circle_packing/shinka_scale*.yaml
 examples/mnist_train/
 
+# Secrets — never commit (collapsed-agent: .env now lives at repo root,
+# loaded by shinka.env.load_shinka_dotenv as the canonical credentials
+# file. The .env.example template stays committed; the live .env stays
+# local.)
+.env
+.env.*
+!.env.example
+
+# User task working dirs (collapsed-agent: tasks/ lives in this repo,
+# but each task's evolution_db.sqlite + run artifacts stay local).
+tasks/*/results/
+tasks/*/evolution_db.sqlite
+tasks/*/wandb/
+tasks/*/_baseline_cache.json
+tasks/*/evolution_run.log
+
+# Claude Code per-task worktrees (machine-local; not part of repo)
+.claude/worktrees/
+
 # C extensions
 *.so
 

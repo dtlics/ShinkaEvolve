@@ -98,6 +98,11 @@ docs = [
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers"
+# Restrict discovery to the framework's pytest suite. ``scripts/`` holds
+# live-Azure smoke tests (test_azure.py, test_agentic.py) that aren't
+# meant for pytest — they're standalone runners. ``tasks/`` may contain
+# user-supplied ``evaluate.py`` files that aren't pytest targets either.
+testpaths = ["tests"]
 markers = [
     "integration: live external/provider integration coverage",
     "requires_secrets: tests that need CI secrets or private credentials",

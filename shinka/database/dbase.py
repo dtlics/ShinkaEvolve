@@ -191,6 +191,27 @@ class Program:
     # Meta-prompt evolution: track which system prompt generated this program
     system_prompt_id: Optional[str] = None
 
+    # Research-grounding additions (Phase 1):
+    # - error_traceback: traceback text from the failing evaluator run,
+    #   read by the error-fix retry loop in Phase 4. ``None`` means either
+    #   the program evaluated successfully or no traceback was captured.
+    # - attempt_round: 0 for original proposals; N for the N-th retry of a
+    #   failed parent in the error-fix loop.
+    # - mutation_type: canonical arm name ("diff" / "full" / "cross" /
+    #   "error_fix" / "literature_grounded"). Display strings stay in
+    #   metadata["patch_name"].
+    # - mutation_intent: validated one-line summary produced via the
+    #   ``MutationIntent`` contract; downstream prompts read this field
+    #   instead of the original mutation prompt. ``None`` until the
+    #   sampler captures it; on parse failure callers store
+    #   ``"no intent recorded"``.
+    # - model_used: API model name actually used to produce this program.
+    error_traceback: Optional[str] = None
+    attempt_round: int = 0
+    mutation_type: Optional[str] = None
+    mutation_intent: Optional[str] = None
+    model_used: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dict representation, cleaning NaN values for JSON."""
         data = asdict(self)
@@ -441,7 +462,12 @@ class ProgramDatabase:
                 metadata TEXT,      -- JSON serialized Dict[str, Any]
                 migration_history TEXT, -- JSON of migration events
                 island_idx INTEGER,  -- Add island_idx to the schema
-                system_prompt_id TEXT  -- ID of system prompt that generated this program
+                system_prompt_id TEXT, -- ID of system prompt that generated this program
+                error_traceback TEXT,  -- Traceback from failing evaluator (Phase 1)
+                attempt_round INTEGER NOT NULL DEFAULT 0,  -- 0 = original, N = retry round (Phase 1)
+                mutation_type TEXT,    -- Canonical mutation arm name (Phase 1)
+                mutation_intent TEXT,  -- Validated one-line intent summary (Phase 1)
+                model_used TEXT        -- API model name that produced this program (Phase 1)
             )
             """
         )
@@ -609,6 +635,33 @@ class ProgramDatabase:
             self.conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Error during attempt_log migration: {e}")
+
+        # Migration 5: Research-grounding fields on the programs table.
+        # Adds columns consumed by the error-fix retry loop (Phase 4) and the
+        # mutation_intent contract. All nullable / default-zero so existing
+        # rows continue to read back cleanly.
+        research_grounding_columns = (
+            ("error_traceback", "ALTER TABLE programs ADD COLUMN error_traceback TEXT"),
+            (
+                "attempt_round",
+                "ALTER TABLE programs ADD COLUMN attempt_round INTEGER NOT NULL "
+                "DEFAULT 0",
+            ),
+            ("mutation_type", "ALTER TABLE programs ADD COLUMN mutation_type TEXT"),
+            ("mutation_intent", "ALTER TABLE programs ADD COLUMN mutation_intent TEXT"),
+            ("model_used", "ALTER TABLE programs ADD COLUMN model_used TEXT"),
+        )
+        for column_name, alter_sql in research_grounding_columns:
+            try:
+                if column_name not in columns:
+                    logger.info("Adding %s column to programs table", column_name)
+                    self.cursor.execute(alter_sql)
+                    self.conn.commit()
+                    logger.info("Successfully added %s column", column_name)
+            except sqlite3.Error as e:
+                logger.error(
+                    "Error during %s migration: %s", column_name, e
+                )
 
     @db_retry()
     def _load_metadata_from_db(self):
@@ -867,9 +920,10 @@ class ProgramDatabase:
                     text_feedback, complexity, embedding, embedding_pca_2d,
                     embedding_pca_3d, embedding_cluster_id, correct,
                     children_count, metadata, island_idx, migration_history,
-                    system_prompt_id)
+                    system_prompt_id, error_traceback, attempt_round,
+                    mutation_type, mutation_intent, model_used)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?)
+                           ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     program.id,
@@ -896,6 +950,11 @@ class ProgramDatabase:
                     program.island_idx,
                     migration_history_json,
                     program.system_prompt_id,
+                    program.error_traceback,
+                    program.attempt_round,
+                    program.mutation_type,
+                    program.mutation_intent,
+                    program.model_used,
                 ),
             )
 

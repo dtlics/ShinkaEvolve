@@ -10,6 +10,11 @@ from .prompt_evolver import (
     SystemPromptSampler,
     AsyncSystemPromptEvolver,
 )
+from .mutation_intent import (
+    MutationIntent,
+    NO_INTENT_RECORDED,
+    validate_mutation_intent,
+)
 
 __all__ = [
     "PromptSampler",
@@ -22,4 +27,7 @@ __all__ = [
     "SystemPromptEvolver",
     "SystemPromptSampler",
     "AsyncSystemPromptEvolver",
+    "MutationIntent",
+    "NO_INTENT_RECORDED",
+    "validate_mutation_intent",
 ]

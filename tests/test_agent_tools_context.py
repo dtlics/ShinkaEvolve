@@ -82,13 +82,10 @@ def test_registry_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
     """Register a fake tool, then select it back out. Use monkeypatch
     to keep test isolation — clearing the module-level registry
     would leak across tests if not restored."""
-    from shinka.llm.agent.tools import __init__ as tools_mod  # type: ignore[attr-defined]
+    import shinka.llm.agent.tools.registry as tools_reg
 
-    # Snapshot the original registry; restore at end.
-    import shinka.llm.agent.tools as tools_pkg
-
-    original = dict(tools_pkg._TOOL_REGISTRY)
-    monkeypatch.setattr(tools_pkg, "_TOOL_REGISTRY", dict(original))
+    original = dict(tools_reg._TOOL_REGISTRY)
+    monkeypatch.setattr(tools_reg, "_TOOL_REGISTRY", dict(original))
 
     def make_fake_tool(ctx: ShinkaToolContext) -> str:
         return f"fake-tool-using-{ctx.patch_dir}"
@@ -105,10 +102,10 @@ def test_registry_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_select_unknown_tool_raises_with_helpful_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import shinka.llm.agent.tools as tools_pkg
+    import shinka.llm.agent.tools.registry as tools_reg
 
-    original = dict(tools_pkg._TOOL_REGISTRY)
-    monkeypatch.setattr(tools_pkg, "_TOOL_REGISTRY", dict(original))
+    original = dict(tools_reg._TOOL_REGISTRY)
+    monkeypatch.setattr(tools_reg, "_TOOL_REGISTRY", dict(original))
 
     register_tool("known_tool", lambda ctx: "tool-instance")
 
@@ -120,9 +117,9 @@ def test_select_unknown_tool_raises_with_helpful_message(
 def test_default_shinka_tools_returns_all_registered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import shinka.llm.agent.tools as tools_pkg
+    import shinka.llm.agent.tools.registry as tools_reg
 
-    monkeypatch.setattr(tools_pkg, "_TOOL_REGISTRY", {})
+    monkeypatch.setattr(tools_reg, "_TOOL_REGISTRY", {})
     register_tool("a", lambda ctx: "tool-a")
     register_tool("b", lambda ctx: "tool-b")
 
@@ -137,9 +134,9 @@ def test_register_tool_is_idempotent_under_same_name(
     """If the same name is registered twice, the last one wins.
     Useful for monkey-replacement in tests; harmless in production
     because tool modules import-once."""
-    import shinka.llm.agent.tools as tools_pkg
+    import shinka.llm.agent.tools.registry as tools_reg
 
-    monkeypatch.setattr(tools_pkg, "_TOOL_REGISTRY", {})
+    monkeypatch.setattr(tools_reg, "_TOOL_REGISTRY", {})
     register_tool("a", lambda ctx: "v1")
     register_tool("a", lambda ctx: "v2")
 

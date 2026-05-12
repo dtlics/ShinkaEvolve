@@ -13,13 +13,16 @@ Public API
 * ``select_shinka_tools(names, ctx)`` — return a filtered subset.
 
 Tools land incrementally; each phase commit adds one entry to
-``_TOOL_REGISTRY`` below. See ``AGENTIC_REWRITE.md`` for the planned
-sequence.
+``registry._TOOL_REGISTRY`` by importing the tool module here. See
+``AGENTIC_REWRITE.md`` for the planned sequence.
+
+Why the indirection (registry.py + this module): tool modules need
+to call ``register_tool`` at import time, and they would otherwise
+have to import from ``tools/__init__.py`` — which in turn imports
+the tool modules. Splitting the registry out breaks that cycle.
 """
 
 from __future__ import annotations
-
-from typing import Any, Callable, Dict, List, Optional
 
 from .context import (
     DEFAULT_EVAL_TIMEOUT_SEC,
@@ -27,55 +30,18 @@ from .context import (
     DEFAULT_READ_FILE_MAX_BYTES,
     ShinkaToolContext,
 )
+from .registry import (
+    _TOOL_REGISTRY,  # exposed for tests; not part of stable API
+    available_tool_names,
+    default_shinka_tools,
+    register_tool,
+    select_shinka_tools,
+)
 
-
-# Mapping of tool name -> factory(ctx) -> Tool. Factories rather than
-# tool instances let each tool decide whether it needs the context at
-# construction time (e.g. to capture sandbox roots) or only at call
-# time (most tools, via the RunContextWrapper).
-_TOOL_REGISTRY: Dict[str, Callable[[ShinkaToolContext], Any]] = {}
-
-
-def register_tool(
-    name: str, factory: Callable[[ShinkaToolContext], Any]
-) -> Callable[[ShinkaToolContext], Any]:
-    """Register a tool factory under ``name``. Returns the factory so
-    it can be used as a decorator if convenient. Idempotent on
-    re-registration with the same name (last wins)."""
-    _TOOL_REGISTRY[name] = factory
-    return factory
-
-
-def available_tool_names() -> List[str]:
-    """Names of tools currently registered. Useful for diagnostics."""
-    return sorted(_TOOL_REGISTRY.keys())
-
-
-def select_shinka_tools(
-    names: List[str], ctx: ShinkaToolContext
-) -> List[Any]:
-    """Return the tools matching ``names``. Unknown names raise
-    ``KeyError`` rather than silently skip so misconfiguration is
-    loud."""
-    tools: List[Any] = []
-    for name in names:
-        try:
-            factory = _TOOL_REGISTRY[name]
-        except KeyError as exc:
-            available = ", ".join(available_tool_names()) or "(none)"
-            raise KeyError(
-                f"Unknown shinka tool {name!r}. Available: {available}"
-            ) from exc
-        tools.append(factory(ctx))
-    return tools
-
-
-def default_shinka_tools(ctx: ShinkaToolContext) -> List[Any]:
-    """All currently-registered tools. The orchestrator passes this
-    to ``Agent(tools=...)`` unless a task config narrows the set via
-    ``select_shinka_tools``."""
-    return [factory(ctx) for factory in _TOOL_REGISTRY.values()]
-
+# Eager-import tool modules so they register themselves. Order
+# doesn't matter — each module is independent. Add new tools here as
+# they land.
+from . import apply_patch as _apply_patch  # noqa: F401
 
 __all__ = [
     "DEFAULT_EVAL_TIMEOUT_SEC",

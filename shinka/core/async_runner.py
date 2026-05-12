@@ -15,7 +15,18 @@ import psutil
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Set, Tuple, Union, Iterable
+from typing import (
+    Awaitable,
+    Callable,
+    Iterable,
+    List,
+    Optional,
+    Dict,
+    Any,
+    Set,
+    Tuple,
+    Union,
+)
 from dataclasses import dataclass, field
 from rich.console import Console
 from rich.table import Table
@@ -155,6 +166,13 @@ class AsyncRunningJob:
     completion_detected_at: Optional[float] = None
     discard_if_completed: bool = False
     evaluation_slot_released: bool = False
+    # When the agent's evaluate_tool produced the eval result inline
+    # (Phase E), the orchestrator stashes it here instead of submitting
+    # a scheduler job. The monitor task treats jobs with
+    # ``cached_results is not None`` as already complete; the
+    # post-completion processing path reads from this field rather than
+    # calling ``scheduler.get_job_results_async``.
+    cached_results: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -208,6 +226,74 @@ def _validate_evo_config_model_env_access(evo_config: EvolutionConfig) -> None:
         llm_models=_dedupe_model_names(llm_models),
         embedding_models=_dedupe_model_names(embedding_models),
     )
+
+
+def _make_agent_evaluator(
+    scheduler: Any,
+    exec_fname: str,
+    results_dir: str,
+    ctx: ShinkaToolContext,
+    eval_timeout_sec: Optional[int] = None,
+) -> Callable[[], Awaitable[Tuple[Dict[str, Any], bool, Optional[str]]]]:
+    """Build the closure the agentic ``evaluate_tool`` calls.
+
+    The closure invokes the same ``scheduler.run`` path the legacy
+    proposer's downstream eval-job submission uses (so behavior is
+    consistent across paths), then caches the full result dict on
+    ``ctx.last_eval_result`` so the orchestrator can short-circuit
+    re-evaluation after the agent loop returns.
+
+    The agent's ``evaluate_tool`` expects ``(metrics, correct, first_error)``
+    — the triple is parsed from the scheduler's result dict here so the
+    tool body doesn't need to know the scheduler's shape.
+    """
+
+    async def _evaluate() -> Tuple[Dict[str, Any], bool, Optional[str]]:
+        Path(results_dir).mkdir(parents=True, exist_ok=True)
+        loop = asyncio.get_event_loop()
+        try:
+            if eval_timeout_sec and eval_timeout_sec > 0:
+                results, rtime = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None, scheduler.run, exec_fname, results_dir
+                    ),
+                    timeout=eval_timeout_sec,
+                )
+            else:
+                results, rtime = await loop.run_in_executor(
+                    None, scheduler.run, exec_fname, results_dir
+                )
+        except asyncio.TimeoutError:
+            ctx.last_eval_result = None
+            ctx.last_eval_rtime = None
+            return (
+                {},
+                False,
+                f"Evaluation timed out after {eval_timeout_sec}s",
+            )
+        except Exception as exc:
+            ctx.last_eval_result = None
+            ctx.last_eval_rtime = None
+            return {}, False, f"Evaluation raised: {exc}"
+
+        ctx.last_eval_result = results
+        ctx.last_eval_rtime = rtime
+
+        correct_val = bool(results.get("correct", {}).get("correct", False))
+        metrics = dict(results.get("metrics", {}))
+        first_error: Optional[str] = None
+        if not correct_val:
+            first_error = (
+                metrics.get("text_feedback")
+                or results.get("stderr_log", "")
+                or "Evaluation reported correct=False"
+            )
+            # Strip surrounding whitespace; long stderr_log can have
+            # trailing newlines that confuse the LLM's parsing.
+            first_error = first_error.strip() or "Evaluation reported correct=False"
+        return metrics, correct_val, first_error
+
+    return _evaluate
 
 
 class ShinkaEvolveRunner:
@@ -1964,10 +2050,30 @@ class ShinkaEvolveRunner:
                     )
                 else:
                     monitored_jobs = list(self.running_jobs)
-                    # Check job statuses concurrently
-                    status_results = await self.scheduler.batch_check_status_async(
-                        monitored_jobs
-                    )
+                    # Cached-eval jobs (Phase E agentic path: the agent
+                    # already ran the evaluator) are immediately done —
+                    # don't pass them to the scheduler, which only knows
+                    # how to poll real subprocess / SLURM job IDs.
+                    scheduler_jobs = [
+                        j for j in monitored_jobs if j.cached_results is None
+                    ]
+                    if scheduler_jobs:
+                        scheduler_status_results = (
+                            await self.scheduler.batch_check_status_async(
+                                scheduler_jobs
+                            )
+                        )
+                    else:
+                        scheduler_status_results = []
+                    # Recombine into a list aligned with monitored_jobs.
+                    # Cached jobs are reported as not-running (i.e. done).
+                    status_results = []
+                    scheduler_iter = iter(scheduler_status_results)
+                    for job in monitored_jobs:
+                        if job.cached_results is not None:
+                            status_results.append(False)
+                        else:
+                            status_results.append(next(scheduler_iter))
                     if self.verbose:
                         # Create safe status display to avoid race conditions
                         try:
@@ -2852,18 +2958,52 @@ class ShinkaEvolveRunner:
                 )
                 meta_patch_data["novelty_explanation"] = novelty_explanation
 
+            # If the agent (Phase E agentic path with evaluate_tool wired
+            # in) already ran the evaluator inline, the result was
+            # surfaced via these internal keys. Pop them so they don't
+            # leak into the persisted metadata, and short-circuit the
+            # scheduler-submit step — the monitor will see the cached
+            # result and process it immediately.
+            cached_eval_results = meta_patch_data.pop(
+                "_cached_eval_results", None
+            )
+            cached_eval_rtime = meta_patch_data.pop(
+                "_cached_eval_rtime", None
+            )
+
             try:
-                (
-                    job_id,
-                    evaluation_worker_id,
-                    evaluation_submitted_at,
-                    evaluation_started_at,
-                    running_eval_jobs_at_submit,
-                ) = await self._submit_evaluation_job_with_slot(
-                    exec_fname=exec_fname,
-                    results_dir=results_dir,
-                    sampling_worker_id=sampling_worker_id,
-                )
+                if cached_eval_results is not None:
+                    (
+                        job_id,
+                        evaluation_worker_id,
+                        evaluation_submitted_at,
+                        evaluation_started_at,
+                        running_eval_jobs_at_submit,
+                    ) = await self._inject_cached_evaluation_with_slot(
+                        sampling_worker_id=sampling_worker_id,
+                    )
+                    # The cached result reflects the agent-bound eval
+                    # closure's own runtime; record it for telemetry
+                    # parity with non-cached jobs.
+                    if (
+                        cached_eval_rtime is not None
+                        and evaluation_started_at is not None
+                    ):
+                        evaluation_started_at = (
+                            evaluation_submitted_at - cached_eval_rtime
+                        )
+                else:
+                    (
+                        job_id,
+                        evaluation_worker_id,
+                        evaluation_submitted_at,
+                        evaluation_started_at,
+                        running_eval_jobs_at_submit,
+                    ) = await self._submit_evaluation_job_with_slot(
+                        exec_fname=exec_fname,
+                        results_dir=results_dir,
+                        sampling_worker_id=sampling_worker_id,
+                    )
 
                 # Create running job
                 running_job = AsyncRunningJob(
@@ -2888,6 +3028,7 @@ class ShinkaEvolveRunner:
                     embed_cost=embed_cost,
                     novelty_cost=novelty_total_cost,  # Store novelty cost in running job
                     proposal_task_id=task_id,
+                    cached_results=cached_eval_results,
                 )
 
                 # Update costs
@@ -3599,29 +3740,60 @@ class ShinkaEvolveRunner:
                 db_path=db_path,
             )
 
+            # Wire the evaluator into the agent loop (Phase E). The agent
+            # calls evaluate_tool after apply_patch_tool to get feedback
+            # (score, correct, error message) and decide whether more
+            # iteration is warranted. The closure caches the full
+            # scheduler.run result on ``tool_ctx.last_eval_result`` so the
+            # orchestrator's post-loop pipeline skips re-evaluation (see
+            # the cached-results path around the submit-eval-job site).
+            exec_fname_for_agent_eval = (
+                f"{patch_dir}/main.{self.lang_ext}"
+            )
+            results_dir_for_agent_eval = f"{patch_dir}/results"
+            tool_ctx.evaluator = _make_agent_evaluator(
+                scheduler=self.scheduler,
+                exec_fname=exec_fname_for_agent_eval,
+                results_dir=results_dir_for_agent_eval,
+                ctx=tool_ctx,
+                eval_timeout_sec=tool_ctx.eval_timeout_sec,
+            )
+
             # Pick the agentic tool subset from the config. Default
-            # is just apply_patch; tasks can widen via the YAML's
+            # is apply_patch + evaluate; tasks can widen via the YAML's
             # agentic_tools list. We tolerate unknown names by
             # logging-and-skipping rather than crashing the run.
             requested_tools = list(
-                getattr(self.evo_config, "agentic_tools", ["apply_patch"])
-            ) or ["apply_patch"]
+                getattr(
+                    self.evo_config,
+                    "agentic_tools",
+                    ["apply_patch", "evaluate"],
+                )
+            ) or ["apply_patch", "evaluate"]
             try:
                 tools = select_shinka_tools(requested_tools, tool_ctx)
             except KeyError as tool_err:
                 logger.warning(
                     "[agent] requested tool not registered (%s); "
-                    "falling back to apply_patch only.",
+                    "falling back to apply_patch + evaluate.",
                     tool_err,
                 )
-                tools = select_shinka_tools(["apply_patch"], tool_ctx)
+                tools = select_shinka_tools(
+                    ["apply_patch", "evaluate"], tool_ctx
+                )
 
+            # Budget covers (apply_patch → evaluate → reflect) cycles.
+            # Each loop iteration consumes ~3 turns; max_patch_attempts
+            # is the number of apply attempts the legacy path allows.
+            agent_max_turns = max(
+                1, int(self.evo_config.max_patch_attempts) * 3
+            )
             response = await self.llm.run_agent(
                 msg=patch_msg,
                 system_msg=patch_sys,
                 tool_context=tool_ctx,
                 tools=tools,
-                max_turns=max(1, self.evo_config.max_patch_attempts),
+                max_turns=agent_max_turns,
                 llm_kwargs=llm_kwargs,
                 model_sample_probs=model_sample_probs,
                 model_posterior=model_posterior,
@@ -3719,6 +3891,19 @@ class ShinkaEvolveRunner:
                 **llm_kwargs,
                 "llm_result": response.to_dict() if response else None,
             }
+
+            # Surface the cached eval result so the downstream pipeline
+            # (around _submit_evaluation_job_with_slot) can skip submitting
+            # a redundant eval job. The keys are leading-underscore to mark
+            # them as orchestrator-internal — they're popped before the
+            # row lands in the DB metadata.
+            if tool_ctx.last_eval_result is not None:
+                meta_patch_data["_cached_eval_results"] = (
+                    tool_ctx.last_eval_result
+                )
+                meta_patch_data["_cached_eval_rtime"] = (
+                    tool_ctx.last_eval_rtime
+                )
 
             if self.verbose and success:
                 self._print_metadata_table(meta_patch_data, generation)
@@ -4208,12 +4393,10 @@ class ShinkaEvolveRunner:
                 )
                 return CompletedJobPersistResult(job=job, success=True)
 
-            # Get job results with timeout to prevent hanging
-            try:
-                results = await asyncio.wait_for(
-                    self.scheduler.get_job_results_async(job.job_id, job.results_dir),
-                    timeout=30.0,  # 30 second timeout
-                )
+            # Get job results. Cached-eval jobs (Phase E agentic path)
+            # carry their result on the job itself — no scheduler call.
+            if job.cached_results is not None:
+                results = job.cached_results
                 results_retrieved_at = time.time()
                 if job.results_retrieved_at is None:
                     job.results_retrieved_at = results_retrieved_at
@@ -4221,16 +4404,36 @@ class ShinkaEvolveRunner:
                     job.completion_detected_at or job.results_retrieved_at
                 )
                 logger.info(
-                    f"📂 RESULTS: Got results for {job.job_id}: {results is not None}"
+                    f"📂 CACHED RESULTS: Using inline agent eval for "
+                    f"{job.job_id} (gen {job.generation})"
                 )
-            except asyncio.TimeoutError:
-                logger.error(f"❌ TIMEOUT: Getting results for {job.job_id} timed out")
-                await self._record_generation_event(
-                    generation=job.generation,
-                    status="results_timeout",
-                    source_job_id=job.job_id,
-                )
-                return CompletedJobPersistResult(job=job, success=False)
+            else:
+                try:
+                    results = await asyncio.wait_for(
+                        self.scheduler.get_job_results_async(
+                            job.job_id, job.results_dir
+                        ),
+                        timeout=30.0,  # 30 second timeout
+                    )
+                    results_retrieved_at = time.time()
+                    if job.results_retrieved_at is None:
+                        job.results_retrieved_at = results_retrieved_at
+                    evaluation_finished_at = (
+                        job.completion_detected_at or job.results_retrieved_at
+                    )
+                    logger.info(
+                        f"📂 RESULTS: Got results for {job.job_id}: {results is not None}"
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        f"❌ TIMEOUT: Getting results for {job.job_id} timed out"
+                    )
+                    await self._record_generation_event(
+                        generation=job.generation,
+                        status="results_timeout",
+                        source_job_id=job.job_id,
+                    )
+                    return CompletedJobPersistResult(job=job, success=False)
             await self._release_evaluation_slot_once(job)
             postprocess_worker_id = await self.postprocess_slot_pool.acquire()
             db_workers_in_use_at_postprocess_start = self.postprocess_slot_pool.in_use
@@ -5236,6 +5439,33 @@ class ShinkaEvolveRunner:
             evaluation_worker_id,
             evaluation_submitted_at,
             evaluation_started_at,
+            running_eval_jobs_at_submit,
+        )
+
+    async def _inject_cached_evaluation_with_slot(
+        self,
+        sampling_worker_id: Optional[int],
+    ) -> tuple[str, int, float, float, int]:
+        """Reserve an eval slot for a cached-result job (no scheduler submit).
+
+        Used when the agentic proposer ran the evaluator inline. We still
+        acquire an evaluation worker slot so back-pressure on parallel
+        proposals stays consistent with the legacy path; the returned
+        ``job_id`` is a synthetic ``"cached:<uuid>"`` token the monitor
+        task recognizes as immediately-done (see ``_job_monitor_task``).
+        """
+        if sampling_worker_id is not None:
+            await self.sampling_slot_pool.release(sampling_worker_id)
+
+        evaluation_worker_id = await self.evaluation_slot_pool.acquire()
+        job_id = f"cached:{uuid.uuid4()}"
+        now = time.time()
+        running_eval_jobs_at_submit = self.evaluation_slot_pool.in_use
+        return (
+            job_id,
+            evaluation_worker_id,
+            now,
+            now,
             running_eval_jobs_at_submit,
         )
 

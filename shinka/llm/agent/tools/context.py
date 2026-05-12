@@ -151,6 +151,18 @@ class ShinkaToolContext:
     # visualization renders.
     last_successful_patch_path: Optional[str] = None
 
+    # Cached eval output: the raw scheduler.run result dict (same shape
+    # ``monitor_local`` returns: ``{"correct": {...}, "metrics": {...},
+    # "stdout_log": ..., "stderr_log": ...}``) plus runtime in seconds.
+    # The agent-bound ``evaluator`` closure writes these after a
+    # successful evaluation so the orchestrator's post-loop pipeline can
+    # short-circuit the standard scheduler-submit / monitor-poll path.
+    # ``None`` means the agent didn't call evaluate_tool (or eval errored
+    # in a way that doesn't yield a usable result), and the orchestrator
+    # falls back to the legacy "submit eval job" flow.
+    last_eval_result: Optional[Dict[str, Any]] = None
+    last_eval_rtime: Optional[float] = None
+
     def __post_init__(self) -> None:
         # Seed current_code from parent_code if the caller didn't
         # provide it explicitly. Avoids the common bug where a tool

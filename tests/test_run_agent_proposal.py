@@ -46,11 +46,25 @@ def _build_stub_runner(tmp_path: Path) -> SimpleNamespace:
     evo_config.max_patch_attempts = 3
     evo_config.language = "python"
 
+    # Stub scheduler — _run_agent_proposal binds an evaluator closure
+    # over scheduler.run so the agent's evaluate_tool can call it. Tests
+    # that don't exercise evaluate_tool never invoke this; the attribute
+    # just has to exist.
+    scheduler = MagicMock()
+    scheduler.run = MagicMock(
+        return_value=(
+            {"correct": {"correct": True}, "metrics": {"combined_score": 1.0}},
+            0.0,
+        )
+    )
+
     runner = SimpleNamespace(
         prompt_sampler=prompt_sampler,
         llm=llm,
         evo_config=evo_config,
         results_dir=str(tmp_path),
+        lang_ext="py",
+        scheduler=scheduler,
         verbose=False,
         db=None,
         llm_selection=None,
@@ -228,9 +242,10 @@ def test_exception_inside_run_caught(tmp_path: Path) -> None:
 
 
 def test_max_turns_uses_evo_config_max_patch_attempts(tmp_path: Path) -> None:
-    """The agent's max_turns should be wired from
+    """The agent's max_turns budget should be derived from
     evo_config.max_patch_attempts so existing per-task tuning carries
-    over."""
+    over. Phase E gives each apply iteration a 3-turn budget
+    (apply → evaluate → reflect)."""
     runner = _build_stub_runner(tmp_path)
     runner.evo_config.max_patch_attempts = 7
 
@@ -251,7 +266,7 @@ def test_max_turns_uses_evo_config_max_patch_attempts(tmp_path: Path) -> None:
             generation=7,
         )
     )
-    assert captured["max_turns"] == 7
+    assert captured["max_turns"] == 7 * 3
 
 
 def test_tools_list_contains_apply_patch(tmp_path: Path) -> None:
@@ -321,11 +336,12 @@ def test_agentic_tools_config_widens_tool_set(tmp_path: Path) -> None:
     assert _query_evolution_db_tool in tools
 
 
-def test_unknown_agentic_tool_falls_back_to_apply_patch_only(
+def test_unknown_agentic_tool_falls_back_to_apply_patch_and_evaluate(
     tmp_path: Path,
 ) -> None:
     """Misconfiguration (typo in tool name) shouldn't crash a run —
-    we fall back to apply_patch only and warn."""
+    we fall back to apply_patch + evaluate (the Phase E default) and
+    warn."""
     runner = _build_stub_runner(tmp_path)
     runner.evo_config.agentic_tools = ["apply_patch", "no_such_tool"]
 
@@ -350,18 +366,20 @@ def test_unknown_agentic_tool_falls_back_to_apply_patch_only(
     assert result is not None
     tools = captured.get("tools") or []
     from shinka.llm.agent.tools.apply_patch import _apply_patch_tool
+    from shinka.llm.agent.tools.evaluate import _evaluate_tool
 
     assert _apply_patch_tool in tools
-    # The bogus tool was filtered out.
-    assert len(tools) == 1
+    assert _evaluate_tool in tools
+    # The bogus tool was filtered out; only the two fallback tools remain.
+    assert len(tools) == 2
 
 
-def test_agentic_tools_empty_list_falls_back_to_apply_patch(
+def test_agentic_tools_empty_list_falls_back_to_apply_patch_and_evaluate(
     tmp_path: Path,
 ) -> None:
     """A user setting agentic_tools=[] in YAML shouldn't disable the
     agent entirely (it would be a useless run); fall back to
-    apply_patch only."""
+    apply_patch + evaluate (the Phase E default)."""
     runner = _build_stub_runner(tmp_path)
     runner.evo_config.agentic_tools = []
 
@@ -384,18 +402,20 @@ def test_agentic_tools_empty_list_falls_back_to_apply_patch(
     )
     tools = captured.get("tools") or []
     from shinka.llm.agent.tools.apply_patch import _apply_patch_tool
+    from shinka.llm.agent.tools.evaluate import _evaluate_tool
 
     assert _apply_patch_tool in tools
-    assert len(tools) == 1
+    assert _evaluate_tool in tools
+    assert len(tools) == 2
 
 
-def test_agentic_tools_default_is_apply_patch_only() -> None:
-    """The config default must be ``["apply_patch"]`` so the agentic
-    path is opt-in *and* the default tool surface is conservative."""
+def test_agentic_tools_default_is_apply_patch_and_evaluate() -> None:
+    """The config default is ``["apply_patch", "evaluate"]`` (Phase E):
+    the agent can apply patches and call the evaluator inline."""
     from shinka.core.config import EvolutionConfig
 
     config = EvolutionConfig()
-    assert config.agentic_tools == ["apply_patch"]
+    assert config.agentic_tools == ["apply_patch", "evaluate"]
 
 
 def test_config_flag_default_routes_to_legacy() -> None:
@@ -599,3 +619,130 @@ def test_db_path_is_none_when_runner_db_is_none(tmp_path: Path) -> None:
     )
     assert captured_ctx
     assert captured_ctx[0].db_path is None
+
+
+def test_evaluator_is_bound_on_tool_context(tmp_path: Path) -> None:
+    """Phase E: the orchestrator wires an EvaluatorCallable into
+    tool_ctx.evaluator before the agent run. The agent's evaluate_tool
+    relies on this being non-None; without it the tool returns an error
+    string instead of running the evaluator."""
+    runner = _build_stub_runner(tmp_path)
+    captured_ctx: list = []
+
+    async def capture(*args: Any, **kwargs: Any) -> Any:
+        captured_ctx.append(kwargs["tool_context"])
+        return None
+
+    runner.llm.run_agent = AsyncMock(side_effect=capture)
+    asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=11,
+        )
+    )
+    assert captured_ctx
+    assert captured_ctx[0].evaluator is not None
+    assert callable(captured_ctx[0].evaluator)
+
+
+def test_cached_eval_result_surfaces_in_meta_patch_data(tmp_path: Path) -> None:
+    """Phase E: when the agent's evaluate_tool ran and wrote
+    last_eval_result on the context, the proposer surfaces it via
+    meta_patch_data['_cached_eval_results'] so the downstream pipeline
+    short-circuits the scheduler-submit step."""
+    runner = _build_stub_runner(tmp_path)
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        ctx: ShinkaToolContext = kwargs["tool_context"]
+        # Simulate apply_patch + evaluate inside the agent loop.
+        ctx.last_successful_patch_text = "patch"
+        ctx.last_successful_patch_type = "diff"
+        ctx.last_successful_num_applied = 1
+        ctx.last_eval_result = {
+            "correct": {"correct": True},
+            "metrics": {"combined_score": 0.75},
+            "stdout_log": "",
+            "stderr_log": "",
+        }
+        ctx.last_eval_rtime = 1.5
+        ctx.record_tool_call("apply_patch", 0.01, success=True)
+        ctx.record_tool_call(
+            "evaluate", 1.5, success=True, extra={"combined_score": 0.75}
+        )
+        return SimpleNamespace(
+            content="<NAME>x</NAME>",
+            cost=0.01,
+            to_dict=lambda: {},
+        )
+
+    runner.llm.run_agent = AsyncMock(side_effect=fake_run_agent)
+    result = asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=12,
+        )
+    )
+    assert result is not None
+    _patch, meta, success = result
+    assert success is True
+    cached = meta.get("_cached_eval_results")
+    assert cached is not None
+    assert cached["correct"]["correct"] is True
+    assert cached["metrics"]["combined_score"] == 0.75
+    assert meta.get("_cached_eval_rtime") == 1.5
+
+
+def test_no_cached_eval_keys_when_agent_did_not_evaluate(tmp_path: Path) -> None:
+    """If the agent's evaluate_tool wasn't called (or errored without
+    setting last_eval_result), the cached-eval keys are absent from
+    meta_patch_data — the downstream pipeline falls back to the normal
+    scheduler-submit path."""
+    runner = _build_stub_runner(tmp_path)
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        ctx: ShinkaToolContext = kwargs["tool_context"]
+        ctx.last_successful_patch_text = "patch"
+        ctx.last_successful_patch_type = "diff"
+        ctx.last_successful_num_applied = 1
+        # Note: ctx.last_eval_result intentionally left as None.
+        return SimpleNamespace(
+            content="<NAME>x</NAME>", cost=0.01, to_dict=lambda: {}
+        )
+
+    runner.llm.run_agent = AsyncMock(side_effect=fake_run_agent)
+    result = asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=13,
+        )
+    )
+    assert result is not None
+    _patch, meta, _success = result
+    assert "_cached_eval_results" not in meta
+    assert "_cached_eval_rtime" not in meta
+
+
+def test_async_running_job_cached_results_defaults_none() -> None:
+    """The AsyncRunningJob dataclass adds cached_results=None as default
+    so legacy (scheduler-submit) jobs don't need to know about Phase E."""
+    from shinka.core.async_runner import AsyncRunningJob
+
+    job = AsyncRunningJob(
+        job_id="x",
+        exec_fname="/tmp/x.py",
+        results_dir="/tmp/results",
+        start_time=0.0,
+        proposal_started_at=0.0,
+        evaluation_submitted_at=0.0,
+        generation=0,
+    )
+    assert job.cached_results is None

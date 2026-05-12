@@ -45,6 +45,12 @@ def _build_stub_runner(tmp_path: Path) -> SimpleNamespace:
     evo_config = MagicMock()
     evo_config.max_patch_attempts = 3
     evo_config.language = "python"
+    # Phase 1 of research-grounding: Azure-aware call kwargs are read off
+    # evo_config inside _run_agent_proposal. Explicit defaults keep the
+    # MagicMock from auto-generating truthy values.
+    evo_config.store_llm_responses = False
+    evo_config.cache_static_system_prompt = True
+    evo_config.tag_calls_with_metadata = True
 
     # Stub scheduler — _run_agent_proposal binds an evaluator closure
     # over scheduler.run so the agent's evaluate_tool can call it. Tests
@@ -68,10 +74,18 @@ def _build_stub_runner(tmp_path: Path) -> SimpleNamespace:
         verbose=False,
         db=None,
         llm_selection=None,
+        # Phase 1 of research-grounding: the proposer tags every Azure
+        # call with a stable run_id + purpose/generation/island_idx via
+        # _build_call_metadata. Tests don't care about the dict contents;
+        # they just need the helper to exist on the stub.
+        run_id="test-run",
         # Mocked methods on the class — bind them as plain async funcs.
         _get_current_system_prompt=MagicMock(return_value=(None, None)),
         _save_patch_attempt_async=AsyncMock(),
         _print_metadata_table=MagicMock(),
+        _build_call_metadata=MagicMock(
+            return_value={"run_id": "test-run", "purpose": "proposer"}
+        ),
     )
     return runner
 
@@ -850,3 +864,119 @@ def test_async_running_job_cached_results_defaults_none() -> None:
         generation=0,
     )
     assert job.cached_results is None
+
+
+# ----------------------------------------------------------------------
+# Phase 1 of research-grounding: the proposer must tag each agent run
+# with the Azure-aware call kwargs (call_metadata + store +
+# safety_identifier + cache_static_prompt) so cost dashboards can
+# attribute spend per feature and the Responses API hits its cache.
+# ----------------------------------------------------------------------
+
+
+def test_proposer_threads_azure_kwargs_into_run_agent(tmp_path: Path) -> None:
+    """``_run_agent_proposal`` must build a ``call_metadata`` dict via
+    ``_build_call_metadata`` and forward it (plus store=False,
+    safety_identifier=run_id, cache_static_prompt) into
+    ``self.llm.run_agent``."""
+    runner = _build_stub_runner(tmp_path)
+
+    # Capture the kwargs that reach run_agent. The stub's run_agent
+    # mutates the tool_context so the success path is exercised.
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        ctx: ShinkaToolContext = kwargs["tool_context"]
+        ctx.last_successful_patch_text = "diff"
+        ctx.last_successful_patch_type = "diff"
+        ctx.last_successful_num_applied = 1
+        return SimpleNamespace(
+            content="<NAME>x</NAME><DESCRIPTION>y</DESCRIPTION>",
+            cost=0.0,
+            to_dict=lambda: {},
+        )
+
+    runner.llm.run_agent = AsyncMock(side_effect=fake_run_agent)
+
+    # Reset the stub's mock so we can re-assert it was called with the
+    # right kwargs (the default stub returns a fixed dict, which is
+    # fine for the test — we just want to confirm it was invoked).
+    runner._build_call_metadata = MagicMock(
+        return_value={
+            "run_id": "test-run",
+            "purpose": "proposer",
+            "generation": "9",
+            "island_idx": "3",
+        }
+    )
+
+    parent = SimpleNamespace(
+        code="def f(): return 1\n", id="parent-9", island_idx=3
+    )
+
+    asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=parent,
+            archive_programs=[],
+            top_k_programs=[],
+            generation=9,
+        )
+    )
+
+    # _build_call_metadata called with the proposer purpose + the
+    # parent's island_idx + the current generation.
+    runner._build_call_metadata.assert_called_once()
+    kwargs = runner._build_call_metadata.call_args.kwargs
+    assert kwargs.get("purpose") == "proposer"
+    assert kwargs.get("generation") == 9
+    assert kwargs.get("island_idx") == 3
+
+    # And those flow through to run_agent.
+    run_kwargs = runner.llm.run_agent.await_args.kwargs
+    assert run_kwargs["call_metadata"] == {
+        "run_id": "test-run",
+        "purpose": "proposer",
+        "generation": "9",
+        "island_idx": "3",
+    }
+    # store=False because evo_config.store_llm_responses is False by
+    # default — the runner translates that to an explicit ``False``
+    # to override Azure's store-by-default behavior.
+    assert run_kwargs["store"] is False
+    # safety_identifier carries the run's stable id.
+    assert run_kwargs["safety_identifier"] == "test-run"
+    # cache_static_prompt mirrors evo_config.cache_static_system_prompt.
+    assert run_kwargs["cache_static_prompt"] is True
+
+
+def test_proposer_respects_disabled_metadata_tagging(tmp_path: Path) -> None:
+    """When ``evo_config.tag_calls_with_metadata`` is False, the
+    runner's ``_build_call_metadata`` returns None (cheap branch),
+    and ``call_metadata`` arrives at ``run_agent`` as None too."""
+    runner = _build_stub_runner(tmp_path)
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        ctx: ShinkaToolContext = kwargs["tool_context"]
+        ctx.last_successful_patch_text = "diff"
+        ctx.last_successful_patch_type = "diff"
+        ctx.last_successful_num_applied = 1
+        return SimpleNamespace(
+            content="<NAME>x</NAME><DESCRIPTION>y</DESCRIPTION>",
+            cost=0.0,
+            to_dict=lambda: {},
+        )
+
+    runner.llm.run_agent = AsyncMock(side_effect=fake_run_agent)
+    runner._build_call_metadata = MagicMock(return_value=None)
+
+    asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_parent_program(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=1,
+        )
+    )
+
+    run_kwargs = runner.llm.run_agent.await_args.kwargs
+    assert run_kwargs["call_metadata"] is None

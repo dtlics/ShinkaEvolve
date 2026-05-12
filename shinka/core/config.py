@@ -78,6 +78,25 @@ class EvolutionConfig:
         default_factory=lambda: ["apply_patch", "evaluate"]
     )
 
+    # Azure-aware LLM call kwargs (phase 1 of research-grounding).
+    #
+    # ``cache_static_system_prompt``: derive a sha256-based
+    # ``prompt_cache_key`` from each call's system prompt so the
+    # Responses API hits its prompt cache on repeat calls (5-10×
+    # input-cost reduction on identical system msgs across a run).
+    #
+    # ``tag_calls_with_metadata``: surface ``{run_id, generation,
+    # island_idx, purpose}`` on every Azure call so cost dashboards
+    # can break spend down by feature (proposer / meta / dr_stage_*
+    # / lit_grounded).
+    #
+    # ``store_llm_responses``: forwarded as ``store`` on the
+    # responses.create call. Azure defaults to retaining responses
+    # for 31 days; flip to ``False`` (the default here) for privacy.
+    cache_static_system_prompt: bool = True
+    tag_calls_with_metadata: bool = True
+    store_llm_responses: bool = False
+
     # Meta-prompt evolution settings.
     evolve_prompts: bool = False
     prompt_patch_types: List[str] = field(default_factory=default_prompt_patch_types)

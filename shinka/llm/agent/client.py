@@ -51,6 +51,7 @@ For the agents-SDK path, this parameter is intentionally unused.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from typing import Any, Dict, List, Optional, Union
 
@@ -80,6 +81,19 @@ _AGENT_SDK_PROVIDERS = frozenset({"azure_openai", "openai"})
 # agents-SDK path relies on the OpenAI SDK's built-in retry.
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_MAX_TURNS = 10
+
+
+def _derive_prompt_cache_key(system_msg: str) -> str:
+    """Stable 32-hex-char key derived from the system prompt.
+
+    The Responses API caches by ``prompt_cache_key`` — repeated calls
+    with the same system message hit the cache and the input portion
+    is billed at the discounted rate. Hashing the system msg keeps the
+    key stable across runs without requiring the caller to remember
+    one, and 32 hex chars are plenty of entropy to keep keys
+    distinguishable across all shinka system prompts we ship.
+    """
+    return hashlib.sha256(system_msg.encode("utf-8")).hexdigest()[:32]
 
 
 class AgentLLMClient:
@@ -171,10 +185,32 @@ class AgentLLMClient:
         llm_kwargs: Optional[Dict[str, Any]] = None,
         model_sample_probs: Optional[List[float]] = None,
         model_posterior: Optional[List[float]] = None,
+        *,
+        call_metadata: Optional[Dict[str, str]] = None,
+        store: Optional[bool] = None,
+        safety_identifier: Optional[str] = None,
+        cache_static_prompt: bool = True,
     ) -> Optional[QueryResult]:
         """Single query. Routes to agents SDK for OpenAI/Azure, legacy
         path otherwise. Returns ``None`` only after exhausting all
-        retry attempts (matches ``AsyncLLMClient.query``)."""
+        retry attempts (matches ``AsyncLLMClient.query``).
+
+        Azure-aware kwargs (agents-SDK path only; legacy path ignores):
+
+        * ``call_metadata`` — surfaces as ``ModelSettings.metadata``.
+          Use to tag every call with ``run_id``, ``generation``,
+          ``island_idx``, ``purpose`` so Azure dashboards can break
+          down spend by feature.
+        * ``store`` — ``ModelSettings.store``. Defaults to ``None``
+          (Azure's server default, currently store-for-31-days).
+          Pass ``False`` to opt out.
+        * ``safety_identifier`` — forwarded via ``extra_args``;
+          per-call stable user id for Azure's abuse-tagging.
+        * ``cache_static_prompt`` — when ``True`` (default), derives
+          a stable ``prompt_cache_key`` from the system message and
+          forwards it via ``extra_args`` so the Responses API hits
+          the prompt-cache for repeated calls with the same prompt.
+        """
         if msg_history is None:
             msg_history = []
         posterior = (
@@ -226,6 +262,10 @@ class AgentLLMClient:
                 msg_history=msg_history,
                 llm_kwargs=llm_kwargs,
                 model_posteriors=model_posteriors,
+                call_metadata=call_metadata,
+                store=store,
+                safety_identifier=safety_identifier,
+                cache_static_prompt=cache_static_prompt,
             )
         return await self._query_via_legacy(
             msg=msg,
@@ -370,6 +410,10 @@ class AgentLLMClient:
         tool_context: Optional[Any] = None,
         max_turns_override: Optional[int] = None,
         output_type: Optional[type] = None,
+        call_metadata: Optional[Dict[str, str]] = None,
+        store: Optional[bool] = None,
+        safety_identifier: Optional[str] = None,
+        cache_static_prompt: bool = True,
     ) -> Optional[QueryResult]:
         """Internal agents-SDK run.
 
@@ -406,6 +450,29 @@ class AgentLLMClient:
             if "summary" in reasoning_spec:
                 reasoning_payload["summary"] = reasoning_spec["summary"]
             model_settings_kwargs["reasoning"] = Reasoning(**reasoning_payload)
+
+        # Azure-aware observability / cost kwargs.
+        #
+        # ``metadata`` and ``store`` are first-class ModelSettings fields
+        # (openai-agents >=0.17). ``prompt_cache_key`` and
+        # ``safety_identifier`` are accepted by client.responses.create
+        # but not modeled in ModelSettings — pass via ``extra_args``,
+        # which the SDK splats into the create call.
+        extra_args: Dict[str, Any] = {}
+        if cache_static_prompt and system_msg:
+            extra_args["prompt_cache_key"] = _derive_prompt_cache_key(system_msg)
+        if safety_identifier is not None:
+            extra_args["safety_identifier"] = safety_identifier
+        if extra_args:
+            model_settings_kwargs["extra_args"] = extra_args
+        if call_metadata:
+            # ModelSettings.metadata expects ``dict[str, str]``; coerce
+            # any non-string values rather than rejecting the call.
+            model_settings_kwargs["metadata"] = {
+                str(k): str(v) for k, v in call_metadata.items()
+            }
+        if store is not None:
+            model_settings_kwargs["store"] = store
 
         # Per-call tools take precedence over constructor-time defaults.
         effective_tools = (
@@ -506,6 +573,10 @@ class AgentLLMClient:
         output_type: Optional[type] = None,
         model_sample_probs: Optional[List[float]] = None,
         model_posterior: Optional[List[float]] = None,
+        call_metadata: Optional[Dict[str, str]] = None,
+        store: Optional[bool] = None,
+        safety_identifier: Optional[str] = None,
+        cache_static_prompt: bool = True,
     ) -> Optional[QueryResult]:
         """Run the agent with the given tools and a per-call context.
 
@@ -586,6 +657,10 @@ class AgentLLMClient:
                 tool_context=tool_context,
                 max_turns_override=max_turns,
                 output_type=output_type,
+                call_metadata=call_metadata,
+                store=store,
+                safety_identifier=safety_identifier,
+                cache_static_prompt=cache_static_prompt,
             )
 
         # Non-OpenAI: tools/context can't be honored. Fall back to

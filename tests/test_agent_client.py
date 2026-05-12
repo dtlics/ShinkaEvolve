@@ -887,3 +887,197 @@ def test_batch_query_runs_concurrently_and_filters_errors(
     # The failed task returns None from .query() and is filtered out.
     assert len(results) == 1
     assert results[0] is success_qr
+
+
+# ----------------------------------------------------------------------
+# Phase 1 of research-grounding: Azure-aware call kwargs reach the
+# agents-SDK ModelSettings construction site. ``prompt_cache_key`` is
+# derived from the system msg; ``metadata``, ``store``,
+# ``safety_identifier`` are forwarded as provided.
+# ----------------------------------------------------------------------
+
+
+def _capture_agent_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Replace ``agents.Agent`` with a recording stub; replace
+    ``Runner.run`` with one that returns a canned RunResult. Returns
+    a dict that the test can inspect after the call.
+    """
+    import shinka.llm.agent.client as agent_client_mod
+
+    monkeypatch.setattr(
+        agent_client_mod,
+        "resolve_model_backend",
+        lambda name: _make_resolved_model(
+            "azure_openai", api_model_name="gpt-5.4-mini"
+        ),
+    )
+    _stub_async_client(monkeypatch)
+
+    capture: dict = {}
+
+    import agents as agents_mod
+
+    class _RecordingAgent:
+        def __init__(self, **kwargs: Any) -> None:
+            capture["agent_kwargs"] = kwargs
+
+    # The agents SDK's Runner.run takes the agent as first arg. We
+    # only need to swap Agent at the module-level binding — the
+    # client does ``from agents import Agent`` inside the method.
+    monkeypatch.setattr(agents_mod, "Agent", _RecordingAgent)
+
+    fake_run = _make_run_result(
+        raw_responses=[_make_raw_response(input_tokens=10, output_tokens=20)],
+        final_output="agent answer",
+    )
+    monkeypatch.setattr(
+        agents_mod.Runner, "run", AsyncMock(return_value=fake_run)
+    )
+
+    return capture
+
+
+def test_query_threads_azure_aware_kwargs_into_model_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``call_metadata``, ``store``, ``safety_identifier``, and the
+    derived ``prompt_cache_key`` must all reach the Agent's
+    ModelSettings. The cache key is sha256-derived from the system
+    msg so identical system msgs across a run hit the same cache
+    bucket on the Responses API."""
+    capture = _capture_agent_kwargs(monkeypatch)
+
+    client = AgentLLMClient(
+        model_names=["azure-gpt-5.4-mini"],
+        temperatures=0.5,
+        max_tokens=1000,
+        reasoning_efforts="disabled",
+        verbose=False,
+    )
+
+    result = asyncio.run(
+        client.query(
+            msg="prompt body",
+            system_msg="static-system-prompt",
+            call_metadata={
+                "run_id": "test-run-42",
+                "generation": "7",
+                "island_idx": "1",
+                "purpose": "proposer",
+            },
+            store=False,
+            safety_identifier="user-42",
+            cache_static_prompt=True,
+        )
+    )
+    assert isinstance(result, QueryResult)
+
+    agent_kwargs = capture["agent_kwargs"]
+    settings = agent_kwargs["model_settings"]
+
+    # Metadata flows through verbatim (coerced to str→str).
+    assert settings.metadata == {
+        "run_id": "test-run-42",
+        "generation": "7",
+        "island_idx": "1",
+        "purpose": "proposer",
+    }
+    assert settings.store is False
+
+    # extra_args carries both prompt_cache_key (auto-derived) and
+    # safety_identifier (explicit).
+    extra = settings.extra_args
+    assert extra is not None
+    assert "prompt_cache_key" in extra
+    assert len(extra["prompt_cache_key"]) == 32
+    assert extra["safety_identifier"] == "user-42"
+
+
+def test_query_cache_static_prompt_off_omits_cache_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``cache_static_prompt=False``, the prompt_cache_key is NOT
+    sent — useful for one-off calls whose system msg should not poison
+    a cache bucket."""
+    capture = _capture_agent_kwargs(monkeypatch)
+    client = AgentLLMClient(
+        model_names=["azure-gpt-5.4-mini"],
+        temperatures=0.5,
+        max_tokens=1000,
+        reasoning_efforts="disabled",
+        verbose=False,
+    )
+    asyncio.run(
+        client.query(msg="hi", system_msg="sys", cache_static_prompt=False)
+    )
+    settings = capture["agent_kwargs"]["model_settings"]
+    extra = settings.extra_args or {}
+    assert "prompt_cache_key" not in extra
+
+
+def test_query_no_call_metadata_means_no_metadata_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``call_metadata`` is None (e.g. ``tag_calls_with_metadata``
+    is off in config), the ModelSettings.metadata field stays at its
+    SDK default of None — we don't ship an empty dict."""
+    capture = _capture_agent_kwargs(monkeypatch)
+    client = AgentLLMClient(
+        model_names=["azure-gpt-5.4-mini"],
+        temperatures=0.5,
+        max_tokens=1000,
+        reasoning_efforts="disabled",
+        verbose=False,
+    )
+    asyncio.run(client.query(msg="hi", system_msg="sys"))
+    settings = capture["agent_kwargs"]["model_settings"]
+    assert settings.metadata is None
+
+
+def test_prompt_cache_key_stable_across_identical_system_msgs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same system_msg ⇒ same prompt_cache_key. This is the property
+    that lets the Responses API hit its cache; if the key drifted per
+    call the discount would never kick in."""
+    capture1 = _capture_agent_kwargs(monkeypatch)
+    client1 = AgentLLMClient(
+        model_names=["azure-gpt-5.4-mini"],
+        temperatures=0.5,
+        max_tokens=1000,
+        reasoning_efforts="disabled",
+        verbose=False,
+    )
+    asyncio.run(client1.query(msg="hi-1", system_msg="STABLE"))
+    key1 = capture1["agent_kwargs"]["model_settings"].extra_args[
+        "prompt_cache_key"
+    ]
+
+    capture2 = _capture_agent_kwargs(monkeypatch)
+    client2 = AgentLLMClient(
+        model_names=["azure-gpt-5.4-mini"],
+        temperatures=0.5,
+        max_tokens=1000,
+        reasoning_efforts="disabled",
+        verbose=False,
+    )
+    asyncio.run(client2.query(msg="hi-2", system_msg="STABLE"))
+    key2 = capture2["agent_kwargs"]["model_settings"].extra_args[
+        "prompt_cache_key"
+    ]
+    assert key1 == key2
+
+    # And different prompts must produce different keys.
+    capture3 = _capture_agent_kwargs(monkeypatch)
+    client3 = AgentLLMClient(
+        model_names=["azure-gpt-5.4-mini"],
+        temperatures=0.5,
+        max_tokens=1000,
+        reasoning_efforts="disabled",
+        verbose=False,
+    )
+    asyncio.run(client3.query(msg="hi-3", system_msg="DIFFERENT"))
+    key3 = capture3["agent_kwargs"]["model_settings"].extra_args[
+        "prompt_cache_key"
+    ]
+    assert key3 != key1

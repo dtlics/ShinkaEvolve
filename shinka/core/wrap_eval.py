@@ -2,10 +2,16 @@ import importlib.util
 import json
 import os
 import time
+import traceback
 import numpy as np
 import pickle
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from typing import Callable, Any, Dict, List, Tuple, Optional, Union
+
+# Maximum bytes of traceback text persisted to correct.json. Tracebacks for
+# deep stack frames can be several KB; we cap to keep DB rows compact while
+# preserving the head + tail (where the actual exception line usually lives).
+_ERROR_TRACEBACK_MAX_BYTES = 8 * 1024
 
 from shinka.utils.eval_stop import (
     EarlyStopMethod,
@@ -79,16 +85,35 @@ def _extract_early_stop_score(
     return None
 
 
+def _truncate_traceback(tb: Optional[str]) -> Optional[str]:
+    """Truncate a traceback string to ``_ERROR_TRACEBACK_MAX_BYTES``.
+
+    Preserves the head and tail of the traceback (the head usually has the
+    exception type + initial frames; the tail has the actual raise site).
+    Returns the input unchanged when None or already small enough.
+    """
+    if not tb:
+        return tb
+    if len(tb) <= _ERROR_TRACEBACK_MAX_BYTES:
+        return tb
+    head = _ERROR_TRACEBACK_MAX_BYTES // 2
+    tail = _ERROR_TRACEBACK_MAX_BYTES - head - 32  # 32 chars for the elision marker
+    return f"{tb[:head]}\n... [traceback truncated] ...\n{tb[-tail:]}"
+
+
 def save_json_results(
     results_dir: str,
     metrics: Dict[str, Any],
     correct: bool,
     error: Optional[str] = None,
+    error_traceback: Optional[str] = None,
 ) -> None:
     """Saves metrics and correctness status to JSON files."""
     os.makedirs(results_dir, exist_ok=True)
 
-    correct_payload = {"correct": correct, "error": error}
+    correct_payload: Dict[str, Any] = {"correct": correct, "error": error}
+    if error_traceback is not None:
+        correct_payload["error_traceback"] = _truncate_traceback(error_traceback)
     correct_file = os.path.join(results_dir, "correct.json")
     with open(correct_file, "w") as f:
         json.dump(correct_payload, f, indent=4)
@@ -426,6 +451,11 @@ def run_shinka_eval(
 
     except Exception as e:
         print(f"Evaluation error: {e}")
+        # Capture the full traceback while we still have live exc_info. The
+        # truncated string is persisted via save_json_results into correct.json
+        # so the agentic proposer's evaluate_tool path and downstream analytics
+        # can read the actual stack site (not just str(e)).
+        error_traceback_str: Optional[str] = traceback.format_exc()
         metrics = {
             k: effective_default_metrics.get(k, v_default)
             for k, v_default in DEFAULT_METRICS_ON_ERROR.items()
@@ -441,6 +471,11 @@ def run_shinka_eval(
 
         first_error_message = str(e)
         overall_correct_flag = False
+    else:
+        # No exception: no traceback to record. Validation-failures (correct=False
+        # without an exception) carry their messages through first_error_message
+        # already.
+        error_traceback_str = None
 
     if "extra_data" in metrics:
         os.makedirs(results_dir, exist_ok=True)
@@ -480,5 +515,11 @@ def run_shinka_eval(
             except Exception as e:
                 print(f"Error generating plots: {e}")
 
-    save_json_results(results_dir, metrics, overall_correct_flag, first_error_message)
+    save_json_results(
+        results_dir,
+        metrics,
+        overall_correct_flag,
+        first_error_message,
+        error_traceback=error_traceback_str,
+    )
     return metrics, overall_correct_flag, first_error_message

@@ -170,6 +170,7 @@ class Program:
     private_metrics: Dict[str, Any] = field(default_factory=dict)
     text_feedback: Union[str, List[str]] = ""
     correct: bool = False  # Whether the program is functionally correct
+    error_traceback: Optional[str] = None  # Truncated stderr/traceback when correct=False
     children_count: int = 0
 
     # Derived features
@@ -437,6 +438,7 @@ class ProgramDatabase:
                 embedding_pca_3d TEXT, -- JSON serialized List[float]
                 embedding_cluster_id INTEGER,
                 correct BOOLEAN DEFAULT 0,  -- Correct (0=False, 1=True)
+                error_traceback TEXT,  -- Truncated stderr/traceback when correct=False
                 children_count INTEGER NOT NULL DEFAULT 0,
                 metadata TEXT,      -- JSON serialized Dict[str, Any]
                 migration_history TEXT, -- JSON of migration events
@@ -609,6 +611,21 @@ class ProgramDatabase:
             self.conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Error during attempt_log migration: {e}")
+
+        # Migration 5: Add error_traceback column (phase 1 of research-grounding).
+        # Stores a truncated stderr/traceback when correct=False so the agent's
+        # inner-loop fix attempts have queryable context, and downstream
+        # analytics can correlate model behaviour with error mode.
+        try:
+            if "error_traceback" not in columns:
+                logger.info("Adding error_traceback column to programs table")
+                self.cursor.execute(
+                    "ALTER TABLE programs ADD COLUMN error_traceback TEXT"
+                )
+                self.conn.commit()
+                logger.info("Successfully added error_traceback column")
+        except sqlite3.Error as e:
+            logger.error(f"Error during error_traceback migration: {e}")
 
     @db_retry()
     def _load_metadata_from_db(self):
@@ -866,10 +883,10 @@ class ProgramDatabase:
                     combined_score, public_metrics, private_metrics,
                     text_feedback, complexity, embedding, embedding_pca_2d,
                     embedding_pca_3d, embedding_cluster_id, correct,
-                    children_count, metadata, island_idx, migration_history,
-                    system_prompt_id)
+                    error_traceback, children_count, metadata, island_idx,
+                    migration_history, system_prompt_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                           ?, ?, ?, ?, ?, ?, ?)
+                           ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     program.id,
@@ -891,6 +908,7 @@ class ProgramDatabase:
                     embedding_pca_3d_json,
                     program.embedding_cluster_id,
                     program.correct,
+                    program.error_traceback,
                     program.children_count,
                     metadata_json,
                     program.island_idx,

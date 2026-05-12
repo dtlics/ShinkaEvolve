@@ -346,6 +346,11 @@ class ShinkaEvolveRunner:
         self.db_config = db_config
         self.banner_style = banner_style
         self.enable_deadlock_debugging = debug
+        # Stable per-run identifier; surfaces in Azure call metadata so
+        # cost dashboards can attribute spend back to a specific shinka
+        # run. Generated once per ShinkaEvolveRunner instance; resume
+        # cycles get fresh ids (the lineage is captured in DB rows).
+        self.run_id: str = str(uuid.uuid4())
         log_filename = f"{self.results_dir}/evolution_run.log"
 
         if self.verbose:
@@ -1331,6 +1336,37 @@ class ShinkaEvolveRunner:
             f"{self.evo_config.prompt_archive_size}"
         )
 
+    def _build_call_metadata(
+        self,
+        purpose: str,
+        *,
+        generation: Optional[int] = None,
+        island_idx: Optional[int] = None,
+    ) -> Optional[Dict[str, str]]:
+        """Build the ``call_metadata`` dict for ``AgentLLMClient.run_agent``.
+
+        Returns ``None`` when ``evo_config.tag_calls_with_metadata`` is off
+        so callers can pass the value through unconditionally.
+
+        ``purpose`` should be one of:
+        ``"proposer"``, ``"meta"``, ``"dr_stage_a"``, ``"dr_stage_b"``,
+        ``"dr_stage_c"``, ``"dr_stage_d"``, ``"lit_grounded"``, ``"novelty"``.
+        Anything else is fine but won't slot into the cost dashboard
+        categories. ``generation`` and ``island_idx`` are stringified by
+        the client so callers don't have to.
+        """
+        if not getattr(self.evo_config, "tag_calls_with_metadata", True):
+            return None
+        meta: Dict[str, str] = {
+            "run_id": self.run_id,
+            "purpose": purpose,
+        }
+        if generation is not None:
+            meta["generation"] = str(generation)
+        if island_idx is not None:
+            meta["island_idx"] = str(island_idx)
+        return meta
+
     def _get_current_system_prompt(self) -> Tuple[Optional[str], Optional[str]]:
         """
         Get the current system prompt text and ID.
@@ -1883,12 +1919,28 @@ class ShinkaEvolveRunner:
 
         total_costs = 0.0
 
+        _init_call_metadata = self._build_call_metadata(
+            purpose="init",
+            generation=0,
+        )
+        _init_store_flag = (
+            False
+            if not getattr(self.evo_config, "store_llm_responses", False)
+            else None
+        )
+        _init_cache_static = getattr(
+            self.evo_config, "cache_static_system_prompt", True
+        )
         for attempt in range(self.evo_config.max_patch_attempts):
             response = await self.llm.query(
                 msg=user_msg,
                 system_msg=sys_msg,
                 model_sample_probs=model_sample_probs,
                 model_posterior=model_posterior,
+                call_metadata=_init_call_metadata,
+                store=_init_store_flag,
+                safety_identifier=self.run_id,
+                cache_static_prompt=_init_cache_static,
             )
 
             if response is None or response.content is None:
@@ -3496,6 +3548,19 @@ class ShinkaEvolveRunner:
                 model_name = llm_kwargs.get("model_name", "unknown")
                 self.llm_selection.update_submitted(model_name)
 
+            _fix_call_metadata = self._build_call_metadata(
+                purpose="fix",
+                generation=generation,
+                island_idx=getattr(incorrect_program, "island_idx", None),
+            )
+            _store_flag = (
+                False
+                if not getattr(self.evo_config, "store_llm_responses", False)
+                else None
+            )
+            _cache_static = getattr(
+                self.evo_config, "cache_static_system_prompt", True
+            )
             for patch_attempt in range(self.evo_config.max_patch_attempts):
                 response = await self.llm.query(
                     msg=patch_msg,
@@ -3503,6 +3568,10 @@ class ShinkaEvolveRunner:
                     msg_history=msg_history,
                     model_sample_probs=model_sample_probs,
                     model_posterior=model_posterior,
+                    call_metadata=_fix_call_metadata,
+                    store=_store_flag,
+                    safety_identifier=self.run_id,
+                    cache_static_prompt=_cache_static,
                 )
 
                 if not response or not response.content:
@@ -3788,6 +3857,16 @@ class ShinkaEvolveRunner:
             agent_max_turns = max(
                 1, int(self.evo_config.max_patch_attempts) * 3
             )
+            call_metadata = self._build_call_metadata(
+                purpose="proposer",
+                generation=generation,
+                island_idx=getattr(parent_program, "island_idx", None),
+            )
+            store_flag = (
+                False
+                if not getattr(self.evo_config, "store_llm_responses", False)
+                else None
+            )
             response = await self.llm.run_agent(
                 msg=patch_msg,
                 system_msg=patch_sys,
@@ -3798,6 +3877,12 @@ class ShinkaEvolveRunner:
                 output_type=PatchProposalOutput,
                 model_sample_probs=model_sample_probs,
                 model_posterior=model_posterior,
+                call_metadata=call_metadata,
+                store=store_flag,
+                safety_identifier=self.run_id,
+                cache_static_prompt=getattr(
+                    self.evo_config, "cache_static_system_prompt", True
+                ),
             )
 
             total_costs = (
@@ -3989,6 +4074,19 @@ class ShinkaEvolveRunner:
                 model_name = llm_kwargs.get("model_name", "unknown")
                 self.llm_selection.update_submitted(model_name)
 
+            _proposer_call_metadata = self._build_call_metadata(
+                purpose="proposer",
+                generation=generation,
+                island_idx=getattr(parent_program, "island_idx", None),
+            )
+            _store_flag = (
+                False
+                if not getattr(self.evo_config, "store_llm_responses", False)
+                else None
+            )
+            _cache_static = getattr(
+                self.evo_config, "cache_static_system_prompt", True
+            )
             for patch_attempt in range(self.evo_config.max_patch_attempts):
                 # Query LLM for patch
                 response = await self.llm.query(
@@ -3997,6 +4095,10 @@ class ShinkaEvolveRunner:
                     msg_history=msg_history,
                     model_sample_probs=model_sample_probs,
                     model_posterior=model_posterior,
+                    call_metadata=_proposer_call_metadata,
+                    store=_store_flag,
+                    safety_identifier=self.run_id,
+                    cache_static_prompt=_cache_static,
                 )
 
                 if not response or not response.content:
@@ -4461,6 +4563,12 @@ class ShinkaEvolveRunner:
                 text_feedback = metrics_val.get("text_feedback", "")
                 stdout_log = results.get("stdout_log", "")
                 stderr_log = results.get("stderr_log", "")
+                # error_traceback is written by wrap_eval.save_json_results when
+                # the evaluator raises. None on success or on validation-only
+                # failures (those carry their message through first_error).
+                error_traceback_val: Optional[str] = results.get(
+                    "correct", {}
+                ).get("error_traceback")
 
                 logger.info(
                     f"✅ VALID RESULTS: {job.job_id} has valid results - correct={correct_val}, score={combined_score}"
@@ -4478,6 +4586,7 @@ class ShinkaEvolveRunner:
                 text_feedback = "Job completed but results could not be retrieved"
                 stdout_log = ""
                 stderr_log = "Results retrieval failed"
+                error_traceback_val = None
 
             # Extract system_prompt_id from meta_patch_data
             system_prompt_id = None
@@ -4497,6 +4606,7 @@ class ShinkaEvolveRunner:
                 public_metrics=public_metrics,
                 private_metrics=private_metrics,
                 text_feedback=text_feedback,
+                error_traceback=error_traceback_val,
                 timestamp=datetime.now().timestamp(),
                 parent_id=job.parent_id,
                 archive_inspiration_ids=job.archive_insp_ids,

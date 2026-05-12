@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 import tempfile
 import threading
 import time
@@ -319,3 +320,179 @@ def test_async_db_can_run_multiple_writes_concurrently(monkeypatch):
     asyncio.run(_run())
 
     assert peak_adds >= 2
+
+
+# ----------------------------------------------------------------------
+# Phase 1 of research-grounding: error_traceback column round-trip and
+# old-schema migration. The Program column is a nullable TEXT that holds
+# a truncated stderr/traceback from wrap_eval.save_json_results when the
+# evaluator raises an exception. Downstream analytics (and the agentic
+# proposer's evaluate_tool path) can read it without parsing
+# stdout/stderr blobs.
+# ----------------------------------------------------------------------
+
+
+def test_error_traceback_roundtrip(monkeypatch):
+    """A Program with ``error_traceback`` set must round-trip through
+    INSERT → SELECT preserving the field exactly."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    tb_text = (
+        "Traceback (most recent call last):\n"
+        '  File "/tmp/eval.py", line 5, in run\n'
+        "    raise ValueError('bad input')\n"
+        "ValueError: bad input"
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "error_traceback_rt.db"
+        db = ProgramDatabase(
+            config=DatabaseConfig(db_path=str(db_path), num_islands=1),
+            embedding_model="",
+        )
+        try:
+            failed = Program(
+                id="err-1",
+                code="def f():\n    raise ValueError('bad input')\n",
+                correct=False,
+                combined_score=0.0,
+                generation=1,
+                island_idx=0,
+                error_traceback=tb_text,
+            )
+            db.add(failed)
+
+            loaded = db.get("err-1")
+            assert loaded is not None
+            assert loaded.error_traceback == tb_text
+            # SQLite stores bools as 0/1; we just need falsy.
+            assert not loaded.correct
+
+            # And a successful program leaves error_traceback at None.
+            ok = Program(
+                id="ok-1",
+                code="def f():\n    return 1\n",
+                correct=True,
+                combined_score=1.0,
+                generation=2,
+                island_idx=0,
+            )
+            db.add(ok)
+            loaded_ok = db.get("ok-1")
+            assert loaded_ok is not None
+            assert loaded_ok.error_traceback is None
+        finally:
+            db.close()
+
+
+def test_old_schema_migration_adds_error_traceback(monkeypatch):
+    """An existing DB created before Phase 1 must migrate cleanly: the
+    error_traceback column is added by _run_migrations on next open,
+    and prior rows keep working."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "old_schema.db"
+
+        # Hand-roll a pre-migration schema: the same CREATE TABLE shape
+        # as before Phase 1 — no error_traceback column. We don't need
+        # every index or foreign-key; the migration only inspects
+        # PRAGMA table_info(programs).
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            """
+            CREATE TABLE programs (
+                id TEXT PRIMARY KEY,
+                code TEXT NOT NULL,
+                language TEXT NOT NULL,
+                parent_id TEXT,
+                archive_inspiration_ids TEXT,
+                top_k_inspiration_ids TEXT,
+                generation INTEGER NOT NULL,
+                timestamp REAL NOT NULL,
+                code_diff TEXT,
+                combined_score REAL,
+                public_metrics TEXT,
+                private_metrics TEXT,
+                text_feedback TEXT,
+                complexity REAL,
+                embedding TEXT,
+                embedding_pca_2d TEXT,
+                embedding_pca_3d TEXT,
+                embedding_cluster_id INTEGER,
+                correct BOOLEAN DEFAULT 0,
+                children_count INTEGER NOT NULL DEFAULT 0,
+                metadata TEXT,
+                migration_history TEXT,
+                island_idx INTEGER,
+                system_prompt_id TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO programs(id, code, language, generation, timestamp, "
+            "combined_score, correct, public_metrics, private_metrics, metadata,"
+            "archive_inspiration_ids, top_k_inspiration_ids) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-1",
+                "def f(): pass\n",
+                "python",
+                0,
+                0.0,
+                1.0,
+                1,
+                "{}",
+                "{}",
+                "{}",
+                "[]",
+                "[]",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        # Sanity: column was not there pre-migration.
+        check_conn = sqlite3.connect(str(db_path))
+        cols_before = {
+            row[1] for row in check_conn.execute("PRAGMA table_info(programs)")
+        }
+        assert "error_traceback" not in cols_before
+        check_conn.close()
+
+        # Open via ProgramDatabase — _run_migrations should ALTER TABLE
+        # to add the new column without dropping data.
+        db = ProgramDatabase(
+            config=DatabaseConfig(db_path=str(db_path), num_islands=1),
+            embedding_model="",
+        )
+        try:
+            # Column exists now.
+            assert db.cursor is not None
+            cols_after = {
+                row[1] for row in db.cursor.execute("PRAGMA table_info(programs)")
+            }
+            assert "error_traceback" in cols_after
+
+            # Pre-existing row still loads and has error_traceback=None.
+            legacy = db.get("legacy-1")
+            assert legacy is not None
+            assert legacy.error_traceback is None
+
+            # New writes that set error_traceback land in the column.
+            db.add(
+                Program(
+                    id="new-1",
+                    code="def f():\n    1/0\n",
+                    correct=False,
+                    combined_score=0.0,
+                    generation=1,
+                    island_idx=0,
+                    error_traceback="ZeroDivisionError: division by zero",
+                )
+            )
+            new = db.get("new-1")
+            assert new is not None
+            assert new.error_traceback == "ZeroDivisionError: division by zero"
+        finally:
+            db.close()

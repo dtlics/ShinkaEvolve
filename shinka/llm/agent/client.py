@@ -322,7 +322,18 @@ class AgentLLMClient:
         msg_history: List[Dict[str, Any]],
         llm_kwargs: Dict[str, Any],
         model_posteriors: Optional[Dict[str, float]],
+        *,
+        tools_override: Optional[List[Any]] = None,
+        tool_context: Optional[Any] = None,
+        max_turns_override: Optional[int] = None,
     ) -> Optional[QueryResult]:
+        """Internal agents-SDK run.
+
+        Used by both ``query`` (no tools, no context) and ``run_agent``
+        (per-call tools + context). Factoring kept here so the
+        agent-construction details (model settings, fresh-client
+        factory, retry plumbing) live in one place.
+        """
         from agents import Agent, ModelSettings
 
         model_name = llm_kwargs["model_name"]
@@ -350,6 +361,11 @@ class AgentLLMClient:
                 reasoning_payload["summary"] = reasoning_spec["summary"]
             model_settings_kwargs["reasoning"] = Reasoning(**reasoning_payload)
 
+        # Per-call tools take precedence over constructor-time defaults.
+        effective_tools = (
+            list(tools_override) if tools_override is not None else list(self._tools)
+        )
+
         def make_agent() -> Any:
             """Construct a fresh Agent (and AsyncOpenAI client) per attempt.
 
@@ -373,7 +389,7 @@ class AgentLLMClient:
                 instructions=system_msg,
                 model=model,
                 model_settings=ModelSettings(**model_settings_kwargs),
-                tools=list(self._tools),
+                tools=effective_tools,
             )
 
         runner = RobustRunner(make_agent, max_attempts=self._max_attempts)
@@ -388,11 +404,16 @@ class AgentLLMClient:
         else:
             agent_input = msg
 
+        runner_kwargs: Dict[str, Any] = {
+            "max_turns": max_turns_override
+            if max_turns_override is not None
+            else self._max_tool_steps,
+        }
+        if tool_context is not None:
+            runner_kwargs["context"] = tool_context
+
         try:
-            run_result = await runner.run(
-                agent_input,
-                max_turns=self._max_tool_steps,
-            )
+            run_result = await runner.run(agent_input, **runner_kwargs)
         except Exception as exc:
             logger.info("Agent run failed after retries: %s", exc)
             return None
@@ -407,6 +428,119 @@ class AgentLLMClient:
             llm_kwargs=llm_kwargs,
             model_posteriors=model_posteriors,
             verbose=self.verbose,
+        )
+
+    # ------------------------------------------------------------------
+    # Public: agentic (tool-using) entry point
+    # ------------------------------------------------------------------
+
+    async def run_agent(
+        self,
+        msg: str,
+        system_msg: str,
+        *,
+        tool_context: Any,
+        tools: List[Any],
+        max_turns: Optional[int] = None,
+        msg_history: Optional[List[Dict[str, Any]]] = None,
+        llm_kwargs: Optional[Dict[str, Any]] = None,
+        model_sample_probs: Optional[List[float]] = None,
+        model_posterior: Optional[List[float]] = None,
+    ) -> Optional[QueryResult]:
+        """Run the agent with the given tools and a per-call context.
+
+        Unlike ``query``, this accepts:
+
+        * ``tools`` — an explicit list of agent tools to expose for
+          this call (FunctionTool, WebSearchTool, etc.).
+        * ``tool_context`` — a ``ShinkaToolContext`` (or anything the
+          tools expect) passed to ``Runner.run(context=...)``. Tools
+          read from and mutate this; the caller can inspect it after
+          the call to see what changed.
+        * ``max_turns`` — cap on agent-loop iterations for this call.
+          Defaults to the constructor's ``max_tool_steps``.
+
+        For Azure/OpenAI text models, the run goes through the
+        agents SDK (bg+poll, fresh-client retry). For other
+        providers or structured-output requests, falls back to
+        ``query`` semantics — tools/context are ignored since the
+        legacy path doesn't support them. The caller is responsible
+        for handling that gracefully (typically by not setting
+        ``tool_context`` when running on non-OpenAI providers).
+        """
+        if msg_history is None:
+            msg_history = []
+        posterior = (
+            model_sample_probs
+            if model_sample_probs is not None
+            else self.model_sample_probs
+        )
+        if llm_kwargs is None:
+            llm_kwargs = sample_model_kwargs(
+                model_names=self.model_names,
+                temperatures=self.temperatures,
+                max_tokens=self.max_tokens,
+                reasoning_efforts=self.reasoning_efforts,
+                model_sample_probs=posterior,
+            )
+        elif "model_name" not in llm_kwargs:
+            sampled = sample_model_kwargs(
+                model_names=self.model_names,
+                temperatures=self.temperatures,
+                max_tokens=self.max_tokens,
+                reasoning_efforts=self.reasoning_efforts,
+                model_sample_probs=posterior,
+            )
+            llm_kwargs = {**sampled, **llm_kwargs}
+
+        if self.verbose:
+            logger.info(
+                "==> AGENT RUN: %s (tools=%d, max_turns=%s)",
+                [str(v) for v in llm_kwargs.values()],
+                len(tools),
+                max_turns,
+            )
+
+        model_posteriors: Optional[Dict[str, float]] = None
+        if model_posterior is not None:
+            model_posteriors = {
+                name: float(prob)
+                for name, prob in zip(self.model_names, model_posterior)
+            }
+
+        resolved = resolve_model_backend(llm_kwargs["model_name"])
+        provider = resolved.provider
+        use_agents_sdk = (
+            provider in _AGENT_SDK_PROVIDERS and not self.structured_output
+        )
+
+        if use_agents_sdk:
+            return await self._query_via_agents(
+                msg=msg,
+                system_msg=system_msg,
+                msg_history=msg_history,
+                llm_kwargs=llm_kwargs,
+                model_posteriors=model_posteriors,
+                tools_override=tools,
+                tool_context=tool_context,
+                max_turns_override=max_turns,
+            )
+
+        # Non-OpenAI: tools/context can't be honored. Fall back to
+        # the legacy single-turn query and let the caller deal with
+        # the lack of tool support.
+        if tools:
+            logger.warning(
+                "run_agent: tools requested on non-OpenAI provider %r; "
+                "falling back to single-turn query (tools ignored).",
+                provider,
+            )
+        return await self._query_via_legacy(
+            msg=msg,
+            system_msg=system_msg,
+            msg_history=msg_history,
+            llm_kwargs=llm_kwargs,
+            model_posteriors=model_posteriors,
         )
 
     # ------------------------------------------------------------------

@@ -634,6 +634,35 @@ class ShinkaEvolveRunner:
         self._last_meta_log_state: dict | None = None
         self._last_meta_log_info_time: float | None = None
 
+    def _build_error_fix_shell_tools(
+        self, picked_model: Optional[str]
+    ) -> Tuple[Optional[List[Any]], Optional[Any]]:
+        """Phase 4d: decide if THIS fix round gets the Codex shell tool.
+
+        Returns ``(tools, tool_budget)`` -- both ``None`` when ineligible.
+        Eligibility requires ``error_fix_enable_shell`` AND the sampled
+        model name being in ``error_fix_shell_models`` (Codex variants
+        only; other models would reject the ``{"type":"shell"}`` spec).
+        """
+        if not self.evo_config.error_fix_enable_shell:
+            return None, None
+        allowed = self.evo_config.error_fix_shell_models or []
+        if not picked_model or picked_model not in allowed:
+            return None, None
+        from shinka.llm.tools import ShellTool, ToolBudget
+
+        shell_budget = int(self.evo_config.error_fix_shell_budget or 0)
+        tools = [ShellTool()]
+        budget = ToolBudget(
+            max_searches=0,
+            max_fetches=0,
+            max_shell=shell_budget,
+            # +2 turns gives the model a turn to invoke the tool plus a
+            # turn to produce the fix after seeing the shell output.
+            max_turns=shell_budget + 2,
+        )
+        return tools, budget
+
     def _retry_budget_for_mutation_type(self, mutation_type: Optional[str]) -> int:
         """Return the configured retry-round budget for the given mutation type.
 
@@ -736,7 +765,10 @@ class ShinkaEvolveRunner:
                 )
                 return
 
-            # Sample fix model (separate bandit if enabled).
+            # Sample fix model (separate bandit if enabled). We materialize
+            # llm_kwargs eagerly so we can read the selected model name
+            # BEFORE the call -- needed to decide whether to attach the
+            # Codex server-side shell tool in Phase 4d.
             fix_model_sample_probs = None
             fix_model_posterior = None
             if self.llm_fix_selection is not None:
@@ -749,6 +781,25 @@ class ShinkaEvolveRunner:
                     fix_model_sample_probs,
                     fix_model_posterior,
                 ) = self.llm_selection.select_llm()
+            fix_llm_kwargs = self.llm.get_kwargs(
+                model_sample_probs=fix_model_sample_probs
+            )
+            picked_model = fix_llm_kwargs.get("model_name")
+
+            # Phase 4d: opt-in Codex server-side shell tool for the fix loop
+            # ONLY. Never enabled on proposer / meta / DR / lit_grounded
+            # calls (shell != web_search; shell is "reproduce + iterate"
+            # not "look up alternatives"). The helper returns (None, None)
+            # when ineligible so the call reverts to text-only.
+            shell_tools, shell_budget = self._build_error_fix_shell_tools(
+                picked_model
+            )
+            if shell_tools is not None:
+                # Bump reasoning summary detail on shell-enabled rounds so
+                # failed-fix diagnosis is easier to read in the run log.
+                reasoning_cfg = fix_llm_kwargs.get("reasoning")
+                if isinstance(reasoning_cfg, dict) and reasoning_cfg.get("effort"):
+                    reasoning_cfg["summary"] = "detailed"
 
             # Accumulate history with the round we just observed failing.
             prior_history = list(job.error_fix_history or [])
@@ -790,12 +841,15 @@ class ShinkaEvolveRunner:
             response = await self.llm.query(
                 msg=user_msg,
                 system_msg=sys_msg,
+                llm_kwargs=fix_llm_kwargs,
                 model_sample_probs=fix_model_sample_probs,
                 model_posterior=fix_model_posterior,
                 call_metadata={
                     "purpose": "error_fix",
                     "attempt_round": str(next_attempt_round),
                 },
+                tools=shell_tools,
+                tool_budget=shell_budget,
             )
             if not response or not response.content:
                 logger.info(

@@ -623,6 +623,87 @@ def test_maybe_enqueue_fires_when_budget_remains():
     ]
 
 
+# ---------------------------------------------------------------------------
+# Phase 4d: optional Codex shell tool wiring
+# ---------------------------------------------------------------------------
+
+
+def _shell_runner(
+    *,
+    enable_shell: bool = True,
+    shell_models=None,
+    shell_budget: int = 4,
+):
+    """Stub runner exposing just the fields _build_error_fix_shell_tools
+    reads."""
+
+    class _Cfg:
+        error_fix_enable_shell = enable_shell
+        error_fix_shell_budget = shell_budget
+        error_fix_shell_models = (
+            ["gpt-5-codex"] if shell_models is None else list(shell_models)
+        )
+
+    class _Runner:
+        evo_config = _Cfg()
+
+    return _Runner()
+
+
+def test_build_error_fix_shell_tools_attaches_shell_for_codex_model():
+    from shinka.llm.tools import ShellTool, ToolBudget
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    runner = _shell_runner(shell_budget=4)
+    tools, budget = ShinkaEvolveRunner._build_error_fix_shell_tools(
+        runner, picked_model="gpt-5-codex"
+    )
+    assert tools is not None and len(tools) == 1
+    assert isinstance(tools[0], ShellTool)
+    assert isinstance(budget, ToolBudget)
+    # Search + fetch caps zeroed; shell budget threads through.
+    assert budget.remaining("web_search") == 0
+    assert budget.remaining("web_fetch") == 0
+    assert budget.remaining("shell") == 4
+    # +2 turns above the shell budget so the model can produce a fix
+    # after seeing the tool output.
+    assert budget.turns_left == 6
+
+
+def test_build_error_fix_shell_tools_skipped_when_flag_off():
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    runner = _shell_runner(enable_shell=False)
+    tools, budget = ShinkaEvolveRunner._build_error_fix_shell_tools(
+        runner, picked_model="gpt-5-codex"
+    )
+    assert tools is None
+    assert budget is None
+
+
+def test_build_error_fix_shell_tools_skipped_when_model_not_in_allowlist():
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    runner = _shell_runner(shell_models=["gpt-5-codex"])
+    # gpt-5 (non-codex) -> ineligible
+    tools, budget = ShinkaEvolveRunner._build_error_fix_shell_tools(
+        runner, picked_model="gpt-5"
+    )
+    assert tools is None
+    assert budget is None
+
+
+def test_build_error_fix_shell_tools_skipped_for_missing_model_name():
+    from shinka.core.async_runner import ShinkaEvolveRunner
+
+    runner = _shell_runner()
+    tools, budget = ShinkaEvolveRunner._build_error_fix_shell_tools(
+        runner, picked_model=None
+    )
+    assert tools is None
+    assert budget is None
+
+
 def test_maybe_enqueue_fires_through_multiple_rounds():
     """Round 1 failure -> enqueues round 2. Round 2 failure -> enqueues
     round 3 if budget supports. Round at budget -> stops enqueueing."""

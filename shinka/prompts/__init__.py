@@ -31,6 +31,14 @@ from .prompts_meta import (
     META_STEP3_USER_MSG,
 )
 from .prompts_novelty import NOVELTY_SYSTEM_MSG, NOVELTY_USER_MSG
+from .prompts_deep_research import (
+    DR_STAGE_A_SYS_MSG,
+    DR_STAGE_A_USER_MSG,
+    DR_STAGE_C_SYS_MSG,
+    DR_STAGE_C_USER_MSG,
+    DR_STAGE_D_SYS_MSG,
+    DR_STAGE_D_USER_MSG,
+)
 from .prompts_prompt_evo import (
     PROMPT_EVO_DIFF_SYSTEM,
     PROMPT_EVO_DIFF_USER,
@@ -72,6 +80,13 @@ __all__ = [
     "META_STEP3_USER_MSG",
     "NOVELTY_SYSTEM_MSG",
     "NOVELTY_USER_MSG",
+    # Deep-research meta cycle prompts (phase 2 of research-grounding)
+    "DR_STAGE_A_SYS_MSG",
+    "DR_STAGE_A_USER_MSG",
+    "DR_STAGE_C_SYS_MSG",
+    "DR_STAGE_C_USER_MSG",
+    "DR_STAGE_D_SYS_MSG",
+    "DR_STAGE_D_USER_MSG",
     # Prompt evolution prompts
     "PROMPT_EVO_DIFF_SYSTEM",
     "PROMPT_EVO_DIFF_USER",

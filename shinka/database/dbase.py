@@ -627,6 +627,57 @@ class ProgramDatabase:
         except sqlite3.Error as e:
             logger.error(f"Error during error_traceback migration: {e}")
 
+        # Migration 6: Add deep-research tables (phase 2 of research-grounding).
+        # ``meta_briefs`` records the structured Stage A→D output per island
+        # per generation; ``dr_brief_cache`` caches DR query→brief pairs
+        # keyed on the embedded research question so two islands that
+        # drift in the same direction reuse a single expensive DR call.
+        try:
+            self.cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS meta_briefs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    island_idx INTEGER NOT NULL,
+                    generation INTEGER NOT NULL,
+                    stage TEXT NOT NULL,
+                    content TEXT,
+                    structured_json TEXT,
+                    model_used TEXT,
+                    cost REAL,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            self.cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_meta_briefs_island
+                ON meta_briefs(island_idx, generation)
+                """
+            )
+            self.cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS dr_brief_cache (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    query_text TEXT NOT NULL,
+                    query_embedding BLOB,
+                    brief_json TEXT,
+                    model_used TEXT,
+                    cost REAL,
+                    hits INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL
+                )
+                """
+            )
+            self.cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_dr_brief_cache_created_at
+                ON dr_brief_cache(created_at)
+                """
+            )
+            self.conn.commit()
+        except sqlite3.Error as e:
+            logger.error(f"Error during deep-research tables migration: {e}")
+
     @db_retry()
     def _load_metadata_from_db(self):
         if not self.cursor:

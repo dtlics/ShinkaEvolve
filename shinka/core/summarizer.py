@@ -1,4 +1,5 @@
-from typing import List, Optional, Tuple
+from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 import logging
 import json
 import random
@@ -45,6 +46,16 @@ class MetaSummarizer:
         # Track programs evaluated since last meta query for persistent memory
         self.evaluated_since_last_meta: List[Program] = []
 
+        # Per-island accumulator for the deep-research meta pipeline
+        # (phase 2 of research-grounding). The DR Stage A drift judge runs
+        # per-island and needs only the recent programs on that island;
+        # the freeform path keeps using the flat list above. Keys are
+        # ``island_idx``; programs without an island_idx fall into the
+        # ``None`` key — the DR summarizer skips that bucket.
+        self.evaluated_since_last_meta_by_island: Dict[
+            Optional[int], List[Program]
+        ] = defaultdict(list)
+
         # Track the accumulated count of programs processed in meta updates
         self.total_programs_processed = 0
 
@@ -58,6 +69,13 @@ class MetaSummarizer:
         # Track ALL evaluated programs (both correct and incorrect)
         # for meta learning
         self.evaluated_since_last_meta.append(program)
+        # Also push into the per-island bucket so the DR Stage A drift
+        # judge can read just one island's recent activity (phase 2 of
+        # research-grounding). The flat list above is preserved as-is so
+        # the freeform meta path is unchanged.
+        self.evaluated_since_last_meta_by_island[program.island_idx].append(
+            program
+        )
         logger.info(
             f"Added program {program.id} to meta memory tracking "
             f"(correct={program.correct}, "
@@ -72,6 +90,23 @@ class MetaSummarizer:
                     f"programs tracked"
                 )
         self._last_logged_count = len(self.evaluated_since_last_meta)
+
+    def consume_island_programs(self, island_idx: Optional[int]) -> List[Program]:
+        """Pop the per-island accumulator for ``island_idx``.
+
+        Called by ``DeepResearchSummarizer`` after Stage A→D finishes
+        for an island (or skips early via the drift / novelty gate),
+        so the next DR cadence sees only programs added since this
+        invocation. The flat ``evaluated_since_last_meta`` list is NOT
+        touched here — the freeform meta path keeps owning that one.
+        Returns the captured list so the caller has it for Stage A
+        prompts without a second peek.
+        """
+        captured = list(
+            self.evaluated_since_last_meta_by_island.get(island_idx, [])
+        )
+        self.evaluated_since_last_meta_by_island[island_idx] = []
+        return captured
 
     def should_update_meta(self, meta_rec_interval: Optional[int]) -> bool:
         """Check if meta update should be performed based on interval.

@@ -247,6 +247,9 @@ class LLMClient:
         model_posterior: Optional[List[float]] = None,
         poll_timeout: Optional[float] = None,
         delete_after: Optional[bool] = None,
+        tools=None,
+        tool_budget=None,
+        tool_context: Optional[Dict] = None,
     ) -> Optional[QueryResult]:
         """Execute a single query to the LLM.
 
@@ -307,6 +310,12 @@ class LLMClient:
                 extra_kwargs = {"delete_after": effective_delete_after}
                 if poll_timeout is not None:
                     extra_kwargs["poll_timeout"] = poll_timeout
+                if tools is not None:
+                    extra_kwargs["tools"] = tools
+                if tool_budget is not None:
+                    extra_kwargs["tool_budget"] = tool_budget
+                if tool_context is not None:
+                    extra_kwargs["tool_context"] = tool_context
                 result = query(
                     msg=msg,
                     system_msg=system_msg,
@@ -533,6 +542,9 @@ class AsyncLLMClient:
         model_posterior: Optional[List[float]] = None,
         poll_timeout: Optional[float] = None,
         delete_after: Optional[bool] = None,
+        tools=None,
+        tool_budget=None,
+        tool_context: Optional[Dict] = None,
     ) -> Optional[QueryResult]:
         """Execute a single query to the LLM asynchronously.
 
@@ -593,6 +605,12 @@ class AsyncLLMClient:
                 extra_kwargs = {"delete_after": effective_delete_after}
                 if poll_timeout is not None:
                     extra_kwargs["poll_timeout"] = poll_timeout
+                if tools is not None:
+                    extra_kwargs["tools"] = tools
+                if tool_budget is not None:
+                    extra_kwargs["tool_budget"] = tool_budget
+                if tool_context is not None:
+                    extra_kwargs["tool_context"] = tool_context
                 result = await query_async(
                     msg=msg,
                     system_msg=system_msg,

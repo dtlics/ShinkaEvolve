@@ -39,9 +39,10 @@ Failure modes
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
-from typing import Any, Optional, Type
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Type
 
 import openai
 from pydantic import BaseModel
@@ -60,6 +61,14 @@ logger = logging.getLogger(__name__)
 _TERMINAL_OK = ("completed",)
 _TERMINAL_PARTIAL = ("incomplete",)
 _TERMINAL_ERROR = ("failed", "cancelled", "expired")
+# Status that signals "client must invoke a custom function tool and submit
+# the result back via responses.submit_tool_outputs(...)".
+_REQUIRES_ACTION = "requires_action"
+
+ToolDispatcher = Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]
+AsyncToolDispatcher = Callable[
+    [List[Dict[str, Any]]], Awaitable[List[Dict[str, Any]]]
+]
 
 # Transient errors that should bounce off the retrieve loop instead of
 # crashing the whole call. APIConnectionError covers DNS / TCP / TLS;
@@ -100,6 +109,41 @@ class PollFailedError(RuntimeError):
 
 def _next_interval(current: float) -> float:
     return min(current * POLL_INTERVAL_GROWTH, POLL_INTERVAL_MAX)
+
+
+def _extract_pending_tool_calls(response: Any) -> List[Dict[str, Any]]:
+    """Pull ``requires_action`` function calls out of a Response.
+
+    The Responses API surfaces pending function calls under
+    ``response.required_action.submit_tool_outputs.tool_calls``. We return
+    a list of ``{"call_id", "name", "arguments"}`` dicts for downstream
+    dispatch. Returns ``[]`` if no action is required (so callers can keep
+    polling without raising).
+    """
+    required = getattr(response, "required_action", None)
+    if not required:
+        return []
+    submit = getattr(required, "submit_tool_outputs", None)
+    if not submit:
+        return []
+    raw_calls = getattr(submit, "tool_calls", None) or []
+    out: List[Dict[str, Any]] = []
+    for raw in raw_calls:
+        call_id = getattr(raw, "id", None) or getattr(raw, "call_id", None)
+        function = getattr(raw, "function", None)
+        name = getattr(function, "name", None) if function else getattr(raw, "name", None)
+        arguments_raw = (
+            getattr(function, "arguments", None) if function else getattr(raw, "arguments", None)
+        )
+        # Arguments arrive as a JSON-encoded string; decode for the dispatcher.
+        try:
+            arguments = json.loads(arguments_raw) if arguments_raw else {}
+        except json.JSONDecodeError:
+            arguments = {"_raw": arguments_raw}
+        out.append(
+            {"call_id": call_id, "name": name, "arguments": arguments}
+        )
+    return out
 
 
 def _best_effort_delete_sync(client: Any, response_id: str) -> None:
@@ -186,6 +230,7 @@ def create_and_poll(
     *,
     poll_timeout: float = POLL_TIMEOUT_DEFAULT,
     delete_after: bool = True,
+    tool_dispatcher: Optional[ToolDispatcher] = None,
     **create_kwargs: Any,
 ) -> Any:
     """Submit a ``responses.create(background=True)`` call and poll to terminal.
@@ -194,6 +239,13 @@ def create_and_poll(
     On ``failed`` / ``cancelled`` / ``expired`` raises ``PollFailedError``.
     On polling-budget exhaustion raises ``PollTimeoutError`` and leaves
     the server-side response in place (no delete).
+
+    When the API returns ``status="requires_action"`` (custom function tool
+    pending), ``tool_dispatcher`` is invoked with the list of pending
+    function-call dicts and is expected to return a matching list of
+    ``{"tool_call_id", "output"}`` results which we submit via
+    ``client.responses.submit_tool_outputs``. Without a dispatcher we keep
+    polling -- safe for callers that pass only server-side tools.
     """
     initial = _submit_with_transient_retry_sync(
         client.responses.create, _create_kwargs(create_kwargs)
@@ -250,6 +302,15 @@ def create_and_poll(
             if delete_after:
                 _best_effort_delete_sync(client, response_id)
             raise PollFailedError(last_response)
+        if status == _REQUIRES_ACTION and tool_dispatcher is not None:
+            pending = _extract_pending_tool_calls(last_response)
+            outputs = tool_dispatcher(pending) if pending else []
+            if outputs:
+                client.responses.submit_tool_outputs(
+                    response_id, tool_outputs=outputs
+                )
+            interval = POLL_INTERVAL_INITIAL  # reset after action
+            continue
 
         interval = _next_interval(interval)
 
@@ -259,6 +320,7 @@ async def create_and_poll_async(
     *,
     poll_timeout: float = POLL_TIMEOUT_DEFAULT,
     delete_after: bool = True,
+    tool_dispatcher: Optional[AsyncToolDispatcher] = None,
     **create_kwargs: Any,
 ) -> Any:
     """Async mirror of :func:`create_and_poll`."""
@@ -316,6 +378,15 @@ async def create_and_poll_async(
             if delete_after:
                 await _best_effort_delete_async(client, response_id)
             raise PollFailedError(last_response)
+        if status == _REQUIRES_ACTION and tool_dispatcher is not None:
+            pending = _extract_pending_tool_calls(last_response)
+            outputs = await tool_dispatcher(pending) if pending else []
+            if outputs:
+                await client.responses.submit_tool_outputs(
+                    response_id, tool_outputs=outputs
+                )
+            interval = POLL_INTERVAL_INITIAL
+            continue
 
         interval = _next_interval(interval)
 

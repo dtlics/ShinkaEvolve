@@ -1,10 +1,14 @@
 """OpenAI / Azure OpenAI provider, threaded through the bg+poll helpers.
 
-Phase 2b of research-grounding: all calls now use ``create_and_poll`` instead
-of a blocking foreground ``client.responses.create(...)``. The previous
-``@backoff.on_exception`` decorator that retried whole-call failures is gone:
-transient errors are caught and retried inside the polling layer.
+Phase 2b of research-grounding routed everything through ``create_and_poll``;
+Phase 3a now also accepts a ``tools`` kwarg + companion ``tool_budget`` /
+``tool_context`` and dispatches client-side function tools when the API
+returns ``status="requires_action"``.
 """
+
+import json
+import logging
+from typing import Any, Dict, Iterable, List, Optional
 
 from .pricing import calculate_cost, model_exists
 from .result import QueryResult
@@ -15,9 +19,102 @@ from ..poll import (
     create_and_poll_parse,
     create_and_poll_parse_async,
 )
-import logging
+from ..tools import (
+    ToolBudget,
+    ToolBudgetExceeded,
+    ToolSpec,
+    lookup_tool_by_name,
+    serialize_tools,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _build_tool_dispatcher(
+    tools: Optional[Iterable[ToolSpec]],
+    tool_budget: Optional[ToolBudget],
+    tool_context: Optional[Dict[str, Any]],
+    trace: List[Dict[str, Any]],
+):
+    """Sync dispatcher that the bg+poll loop hands ``requires_action`` calls to.
+
+    Server-side tools never reach here, so dispatched names should always
+    be in our ToolSpec list. Budget violations and unknown tool names emit
+    an error payload (the model sees it and decides whether to abort).
+    """
+    if not tools:
+        return None
+
+    def _dispatch(pending):
+        outputs = []
+        for call in pending:
+            name = call.get("name") or ""
+            args = call.get("arguments") or {}
+            call_id = call.get("call_id")
+            tool = lookup_tool_by_name(tools, name)
+            if tool is None:
+                payload = {"error": f"unknown tool {name!r}"}
+            else:
+                try:
+                    if tool_budget is not None:
+                        tool_budget.spend(name)
+                    payload = tool.dispatch(args, tool_context or {})
+                except ToolBudgetExceeded as exc:
+                    payload = {"error": str(exc)}
+                except Exception as exc:  # noqa: BLE001
+                    payload = {"error": f"dispatch failed: {exc}"}
+            trace.append({"name": name, "args": args, "output": payload})
+            outputs.append(
+                {"tool_call_id": call_id, "output": json.dumps(payload)}
+            )
+        if tool_budget is not None:
+            tool_budget.consume_turn()
+        return outputs
+
+    return _dispatch
+
+
+def _build_tool_dispatcher_async(
+    tools: Optional[Iterable[ToolSpec]],
+    tool_budget: Optional[ToolBudget],
+    tool_context: Optional[Dict[str, Any]],
+    trace: List[Dict[str, Any]],
+):
+    if not tools:
+        return None
+
+    async def _dispatch(pending):
+        outputs = []
+        for call in pending:
+            name = call.get("name") or ""
+            args = call.get("arguments") or {}
+            call_id = call.get("call_id")
+            tool = lookup_tool_by_name(tools, name)
+            if tool is None:
+                payload = {"error": f"unknown tool {name!r}"}
+            else:
+                try:
+                    if tool_budget is not None:
+                        tool_budget.spend(name)
+                    if hasattr(tool, "dispatch_async"):
+                        payload = await tool.dispatch_async(  # type: ignore[attr-defined]
+                            args, tool_context or {}
+                        )
+                    else:
+                        payload = tool.dispatch(args, tool_context or {})
+                except ToolBudgetExceeded as exc:
+                    payload = {"error": str(exc)}
+                except Exception as exc:  # noqa: BLE001
+                    payload = {"error": f"dispatch failed: {exc}"}
+            trace.append({"name": name, "args": args, "output": payload})
+            outputs.append(
+                {"tool_call_id": call_id, "output": json.dumps(payload)}
+            )
+        if tool_budget is not None:
+            tool_budget.consume_turn()
+        return outputs
+
+    return _dispatch
 
 
 def get_openai_costs(response, model):
@@ -90,22 +187,38 @@ def query_openai(
     model_posteriors=None,
     poll_timeout: float = POLL_TIMEOUT_DEFAULT,
     delete_after: bool = True,
+    tools: Optional[Iterable[ToolSpec]] = None,
+    tool_budget: Optional[ToolBudget] = None,
+    tool_context: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> QueryResult:
     """Query an OpenAI / Azure OpenAI Responses model in bg+poll mode."""
     new_msg_history = msg_history + [{"role": "user", "content": msg}]
     thought = ""
+    tool_trace: List[Dict[str, Any]] = []
+    extra_create_kwargs: Dict[str, Any] = {}
+    serialized_tools = serialize_tools(tools)
+    if serialized_tools is not None:
+        extra_create_kwargs["tools"] = serialized_tools
+        # ``auto`` lets the model decide; we never set ``required`` to avoid
+        # unbounded tool loops (research-grounding plan gotcha #7).
+        extra_create_kwargs.setdefault("tool_choice", "auto")
+        # Force serial dispatch so client-side budgeting actually bites.
+        extra_create_kwargs["parallel_tool_calls"] = False
+    dispatcher = _build_tool_dispatcher(tools, tool_budget, tool_context, tool_trace)
+
     if output_model is None:
         response = create_and_poll(
             client,
             poll_timeout=poll_timeout,
             delete_after=delete_after,
+            tool_dispatcher=dispatcher,
             model=model,
             input=[
                 {"role": "system", "content": system_msg},
                 *new_msg_history,
             ],
-            **kwargs,
+            **{**extra_create_kwargs, **kwargs},
         )
         content, thought = _extract_text_output(response)
         if not content:
@@ -139,6 +252,8 @@ def query_openai(
     enriched_kwargs = dict(kwargs)
     enriched_kwargs["response_status"] = getattr(response, "status", None)
     enriched_kwargs["response_id"] = getattr(response, "id", None)
+    if tool_trace:
+        enriched_kwargs["tool_trace"] = tool_trace
 
     return QueryResult(
         content=content,
@@ -150,6 +265,7 @@ def query_openai(
         **cost_results,
         thought=thought,
         model_posteriors=model_posteriors,
+        num_tool_calls=len(tool_trace),
     )
 
 
@@ -163,22 +279,37 @@ async def query_openai_async(
     model_posteriors=None,
     poll_timeout: float = POLL_TIMEOUT_DEFAULT,
     delete_after: bool = True,
+    tools: Optional[Iterable[ToolSpec]] = None,
+    tool_budget: Optional[ToolBudget] = None,
+    tool_context: Optional[Dict[str, Any]] = None,
     **kwargs,
 ) -> QueryResult:
     """Async mirror of :func:`query_openai`."""
     new_msg_history = msg_history + [{"role": "user", "content": msg}]
     thought = ""
+    tool_trace: List[Dict[str, Any]] = []
+    extra_create_kwargs: Dict[str, Any] = {}
+    serialized_tools = serialize_tools(tools)
+    if serialized_tools is not None:
+        extra_create_kwargs["tools"] = serialized_tools
+        extra_create_kwargs.setdefault("tool_choice", "auto")
+        extra_create_kwargs["parallel_tool_calls"] = False
+    dispatcher = _build_tool_dispatcher_async(
+        tools, tool_budget, tool_context, tool_trace
+    )
+
     if output_model is None:
         response = await create_and_poll_async(
             client,
             poll_timeout=poll_timeout,
             delete_after=delete_after,
+            tool_dispatcher=dispatcher,
             model=model,
             input=[
                 {"role": "system", "content": system_msg},
                 *new_msg_history,
             ],
-            **kwargs,
+            **{**extra_create_kwargs, **kwargs},
         )
         content, thought = _extract_text_output(response)
         if not content:
@@ -210,6 +341,8 @@ async def query_openai_async(
     enriched_kwargs = dict(kwargs)
     enriched_kwargs["response_status"] = getattr(response, "status", None)
     enriched_kwargs["response_id"] = getattr(response, "id", None)
+    if tool_trace:
+        enriched_kwargs["tool_trace"] = tool_trace
 
     return QueryResult(
         content=content,
@@ -221,4 +354,5 @@ async def query_openai_async(
         **cost_results,
         thought=thought,
         model_posteriors=model_posteriors,
+        num_tool_calls=len(tool_trace),
     )

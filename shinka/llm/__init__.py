@@ -6,6 +6,15 @@ from .prioritization import (
     FixedSampler,
     ThompsonSampler,
 )
+from .tools import (
+    ShellTool,
+    ToolBudget,
+    ToolBudgetExceeded,
+    ToolSpec,
+    URLFetchCache,
+    WebFetchTool,
+    WebSearchTool,
+)
 
 __all__ = [
     "LLMClient",
@@ -18,4 +27,11 @@ __all__ = [
     "AsymmetricUCB",
     "FixedSampler",
     "ThompsonSampler",
+    "ShellTool",
+    "ToolBudget",
+    "ToolBudgetExceeded",
+    "ToolSpec",
+    "URLFetchCache",
+    "WebFetchTool",
+    "WebSearchTool",
 ]

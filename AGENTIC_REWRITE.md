@@ -234,3 +234,9 @@ Pass criteria:
 | 2026-05-12 | Phase B.1 — `AgentLLMClient` + 13 tests | done | `297f5ea` |
 | 2026-05-12 | Phase B.3 — `pyproject.toml`: add `openai-agents>=0.17.2`, relax `httpx>=0.28` | done | `6a96591` |
 | 2026-05-12 | Phase B.2 — `async_runner` migrates 4 LLM client sites to `AgentLLMClient` | done | `7d42997` |
+| 2026-05-12 | Phase C.1 — tool context + registry skeleton + 9 tests | done | `7ade0b6` |
+| 2026-05-12 | Phase C.2 — `apply_patch_tool` + 8 tests | done | `58c0a9a` |
+| 2026-05-12 | Phase C.3 — `evaluate_tool` + 10 tests | done | `8e74506` |
+| 2026-05-12 | Phase C.4 — `query_evolution_db_tool` + 17 tests | done | `d3cb3d6` |
+| 2026-05-12 | Phase C.5 — `read_host_file_tool` + 13 tests | done | `5ac0808` |
+| 2026-05-12 | Phase C.6 — `web_search` opt-in tool + opt-in registry flag + 7 tests | done | `317335d` |

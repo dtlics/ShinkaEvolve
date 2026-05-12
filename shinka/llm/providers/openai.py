@@ -1,3 +1,12 @@
+"""Legacy non-agentic OpenAI provider path.
+
+Only reached when ``AgentLLMClient._query_via_legacy`` is invoked — i.e.,
+when a structured ``output_model`` is requested or the backend isn't
+detected as Azure/OpenAI. The agentic path goes through the OpenAI Agents
+SDK Runner, which parses ``/v1/responses`` payloads internally; the
+helpers below are not used there.
+"""
+
 import openai
 from .pricing import calculate_cost, model_exists
 from .result import QueryResult

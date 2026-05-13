@@ -6,6 +6,31 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
+# Doom-remediation Fix 4: cap on stderr_log size before it reaches the
+# agent loop. Chatty evaluators (jax compile noise, numpy deprecation
+# warnings, qiskit transpiler chatter) can emit 100KB+ of stderr per
+# eval; without truncation that gets pasted into the agent's tape on
+# every apply_patch's auto-eval, blowing up cost + context window +
+# drowning the actual exception. 16KB (split head/tail) preserves both
+# the head (usually imports + setup noise) and the tail (where the
+# actual raise site lives).
+_STDERR_LOG_MAX_BYTES = 16 * 1024
+_TRUNCATED_MARKER = "\n... [stderr truncated] ...\n"
+
+
+def _truncate_log(text: str, max_bytes: int = _STDERR_LOG_MAX_BYTES) -> str:
+    """Head + tail truncation. Preserves both ends so the actual error
+    line (typically at the tail) survives even when noisy setup logs
+    fill the head. Returns ``text`` unchanged when below the cap.
+    """
+    if not isinstance(text, str) or len(text) <= max_bytes:
+        return text
+    marker_len = len(_TRUNCATED_MARKER)
+    head = (max_bytes - marker_len) // 2
+    tail = max_bytes - marker_len - head
+    return text[:head] + _TRUNCATED_MARKER + text[-tail:]
+
+
 def load_configs_from_yaml(config_path: str):
     """
     Loads configs from a YAML file.
@@ -47,7 +72,10 @@ def load_results(results_dir: str):
     stderr_log_path = results_dir_path / "job_log.err"
     if stderr_log_path.exists():
         with open(stderr_log_path, "r") as f:
-            loaded_results["stderr_log"] = f.read()
+            raw_stderr = f.read()
+        # Cap at _STDERR_LOG_MAX_BYTES with head+tail preservation so
+        # chatty evaluators don't flood the agent's tape (Fix 4).
+        loaded_results["stderr_log"] = _truncate_log(raw_stderr)
     else:
         loaded_results["stderr_log"] = ""
 

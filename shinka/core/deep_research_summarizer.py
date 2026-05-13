@@ -67,9 +67,14 @@ class StageAOutput:
     drift_score: float
     justification: str
     candidate_question: str
+    # Cost of the Stage A LLM judge call (USD). The cheap drift model
+    # is still a real LLM call and used to be discarded — doom-
+    # remediation Fix 2 retains it so the orchestrator can sum it into
+    # ``self.total_api_cost``.
+    cost: float = 0.0
 
     @classmethod
-    def parse(cls, raw: str) -> "StageAOutput":
+    def parse(cls, raw: str, cost: float = 0.0) -> "StageAOutput":
         """Tolerant JSON parser — the cheap drift judge sometimes wraps
         its output in markdown fencing or trailing prose. Strip and
         retry rather than crashing the whole DR cycle."""
@@ -78,6 +83,7 @@ class StageAOutput:
             drift_score=float(data.get("drift_score", 0.0)),
             justification=str(data.get("justification", "")),
             candidate_question=str(data.get("candidate_question", "")),
+            cost=float(cost),
         )
 
 
@@ -130,7 +136,17 @@ class DRBrief:
     drift_score: float = 0.0
     source: str = "fresh"  # "fresh" | "cache_hit" | "drift_skip" | "placeholder"
     rendered_markdown: str = ""
+    # ``cost`` is Stage C + Stage D LLM spend on this brief. Stage A
+    # cost lives on ``stage_a_cost`` separately because Stage A may
+    # fire on every DR cadence tick (even when the gate aborts the
+    # rest of the pipeline). ``total_cost`` sums them for the
+    # orchestrator's budget accounting (doom-remediation Fix 2).
     cost: float = 0.0
+    stage_a_cost: float = 0.0
+
+    @property
+    def total_cost(self) -> float:
+        return float(self.cost or 0.0) + float(self.stage_a_cost or 0.0)
 
 
 # --------------------------------------------------------------------
@@ -485,6 +501,7 @@ class DeepResearchSummarizer:
                 source="drift_skip",
                 rendered_markdown=prev_brief.rendered_markdown,
                 cost=0.0,
+                stage_a_cost=stage_a.cost,
             )
 
         # ---- Stage B: novelty cache lookup ---------------------------
@@ -523,6 +540,7 @@ class DeepResearchSummarizer:
                 source="cache_hit",
                 rendered_markdown=md,
                 cost=0.0,
+                stage_a_cost=stage_a.cost,
             )
             if self.db_conn is not None:
                 try:
@@ -589,6 +607,7 @@ class DeepResearchSummarizer:
             source="fresh",
             rendered_markdown=md,
             cost=total_cost,
+            stage_a_cost=stage_a.cost,
         )
 
         if self.db_conn is not None:
@@ -648,7 +667,7 @@ class DeepResearchSummarizer:
             drift_threshold=self.drift_threshold,
         )
         try:
-            raw, _cost = await self.stage_a_judge(
+            raw, cost_a = await self.stage_a_judge(
                 system_msg=DR_STAGE_A_SYS_MSG, user_msg=user_msg
             )
         except Exception as exc:  # noqa: BLE001
@@ -657,8 +676,9 @@ class DeepResearchSummarizer:
                 drift_score=1.0,
                 justification=f"stage_a_judge raised: {exc}",
                 candidate_question="(judge failed)",
+                cost=0.0,
             )
-        return StageAOutput.parse(raw)
+        return StageAOutput.parse(raw, cost=float(cost_a or 0.0))
 
     async def _run_stage_c(
         self,
@@ -718,6 +738,7 @@ class DeepResearchSummarizer:
             source="placeholder",
             rendered_markdown=md,
             cost=0.0,
+            stage_a_cost=stage_a.cost,
         )
         if self.db_conn is not None:
             try:

@@ -629,3 +629,165 @@ def test_sampler_falls_back_to_meta_recommendations_without_island_brief() -> No
         island_brief=None,
     )
     assert "GENERIC FREEFORM REC" in sys_msg
+
+
+# ----------------------------------------------------------------------
+# Doom-remediation Fix 2: DR pipeline cost is summed into total_api_cost.
+# Stage A LLM judge cost lives on DRBrief.stage_a_cost; Stage C + Stage D
+# costs live on DRBrief.cost. DRBrief.total_cost sums them. The
+# orchestrator's DR firing block adds this into self.total_api_cost so
+# max_api_costs budget enforcement covers DR spend.
+# ----------------------------------------------------------------------
+
+
+def test_stage_a_output_carries_cost() -> None:
+    """StageAOutput.parse accepts a cost kwarg and preserves it. This
+    is the foundation for Stage A cost flowing through to DRBrief."""
+    raw = '{"drift_score": 0.7, "justification": "x", "candidate_question": "Q?"}'
+    out = StageAOutput.parse(raw, cost=0.0123)
+    assert out.drift_score == pytest.approx(0.7)
+    assert out.cost == pytest.approx(0.0123)
+    # Default cost when not supplied is 0.0 (backward compat).
+    out_no_cost = StageAOutput.parse(raw)
+    assert out_no_cost.cost == 0.0
+
+
+def test_dr_brief_total_cost_sums_stage_a_and_main() -> None:
+    """DRBrief.total_cost = stage_a_cost + cost. The orchestrator reads
+    only this composite value, so internal cost partitioning is an
+    implementation detail."""
+    brief = DRBrief(island_idx=0, generation=5, cost=4.5, stage_a_cost=0.02)
+    assert brief.total_cost == pytest.approx(4.52)
+    # Default values give zero — empty briefs don't accidentally
+    # advance the budget.
+    empty = DRBrief(island_idx=0, generation=5)
+    assert empty.total_cost == 0.0
+
+
+def test_dr_brief_stage_a_cost_set_from_judge_in_drift_skip_path() -> None:
+    """The drift-skip branch (drift_score < threshold) must still
+    record stage_a_cost — Stage A ran, the LLM judge was paid for,
+    even though Stage C/D never fired."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = ProgramDatabase(
+            config=DatabaseConfig(
+                db_path=str(Path(tmpdir) / "db.sqlite"), num_islands=1
+            ),
+            embedding_model="",
+        )
+        try:
+            # Seed a previous brief so drift_skip can fire.
+            meta = MetaSummarizer(meta_llm_client=None, async_mode=True)
+
+            async def cheap_judge(*args: Any, **kwargs: Any) -> Tuple[str, float]:
+                # Below threshold → drift_skip path.
+                return (
+                    '{"drift_score": 0.1, "justification": "stable", "candidate_question": "Q?"}',
+                    0.005,
+                )
+
+            dr = DeepResearchSummarizer(
+                meta_summarizer=meta,
+                stage_a_judge=cheap_judge,
+                db_conn=db.conn,
+                drift_threshold=0.5,
+            )
+            # Pre-populate previous brief so the drift_skip branch is reachable.
+            dr._previous_brief_by_island[0] = DRBrief(
+                island_idx=0,
+                generation=0,
+                items=[BriefItem(idea="x")],
+                rendered_markdown="**Idea 1**: x",
+            )
+            meta.add_evaluated_program(_program("p0", island_idx=0))
+            result = asyncio.run(
+                dr.update_async(generation=20, island_indices=[0])
+            )
+            assert 0 in result
+            brief = result[0]
+            assert brief.source == "drift_skip"
+            assert brief.cost == 0.0  # Stage C/D didn't run
+            assert brief.stage_a_cost == pytest.approx(0.005)
+            assert brief.total_cost == pytest.approx(0.005)
+        finally:
+            db.close()
+
+
+def test_dr_brief_total_cost_aggregates_stage_a_plus_c_plus_d() -> None:
+    """End-to-end fresh-brief path: stage_a (judge) + stage_c (DR) +
+    stage_d (per-item agent grounding) all show up in total_cost."""
+
+    async def cheap_judge(*args: Any, **kwargs: Any) -> Tuple[str, float]:
+        return (
+            '{"drift_score": 0.9, "justification": "shift", "candidate_question": "Q?"}',
+            0.01,  # Stage A cost
+        )
+
+    async def fake_stage_c(*, candidate_question, programs):
+        return (
+            [BriefItem(idea="t1", reference_source="s", reference_snippet="snip")],
+            5.0,  # Stage C cost
+            "o3-deep-research",
+        )
+
+    async def fake_stage_d(items):
+        return list(items), 0.25  # Stage D cost
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db = ProgramDatabase(
+            config=DatabaseConfig(
+                db_path=str(Path(tmpdir) / "db.sqlite"), num_islands=1
+            ),
+            embedding_model="",
+        )
+        try:
+            meta = MetaSummarizer(meta_llm_client=None, async_mode=True)
+            dr = DeepResearchSummarizer(
+                meta_summarizer=meta,
+                stage_a_judge=cheap_judge,
+                stage_c_fn=fake_stage_c,
+                stage_d_fn=fake_stage_d,
+                db_conn=db.conn,
+                drift_threshold=0.5,
+            )
+            meta.add_evaluated_program(_program("p0", island_idx=0))
+            result = asyncio.run(
+                dr.update_async(generation=20, island_indices=[0])
+            )
+            brief = result[0]
+            assert brief.source == "fresh"
+            assert brief.cost == pytest.approx(5.25)  # cost_c + cost_d
+            assert brief.stage_a_cost == pytest.approx(0.01)
+            assert brief.total_cost == pytest.approx(5.26)
+        finally:
+            db.close()
+
+
+def test_dr_brief_placeholder_carries_stage_a_cost() -> None:
+    """Even when DR aborts to a placeholder (Stage C failure, budget
+    exhausted, etc.), the Stage A judge call already happened and was
+    billed. The placeholder brief must record stage_a_cost so the
+    orchestrator can sum it into the budget — otherwise repeated
+    Stage C failures silently leak Stage A spend."""
+
+    async def cheap_judge(*args: Any, **kwargs: Any) -> Tuple[str, float]:
+        return (
+            '{"drift_score": 0.9, "justification": "shift", "candidate_question": "Q?"}',
+            0.003,
+        )
+
+    async def stage_c_explodes(**_kwargs):
+        raise RuntimeError("DR endpoint unreachable")
+
+    meta = MetaSummarizer(meta_llm_client=None, async_mode=True)
+    dr = DeepResearchSummarizer(
+        meta_summarizer=meta,
+        stage_a_judge=cheap_judge,
+        stage_c_fn=stage_c_explodes,
+    )
+    meta.add_evaluated_program(_program("p0", island_idx=0))
+    result = asyncio.run(dr.update_async(generation=20, island_indices=[0]))
+    brief = result[0]
+    assert brief.source == "placeholder"
+    assert brief.stage_a_cost == pytest.approx(0.003)
+    assert brief.total_cost == pytest.approx(0.003)

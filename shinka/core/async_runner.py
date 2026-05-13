@@ -5343,6 +5343,14 @@ class ShinkaEvolveRunner:
                                     generation=program.generation,
                                     island_indices=island_indices,
                                 )
+                                # Doom-remediation Fix 2: sum DR pipeline
+                                # cost (Stage A judge + Stage C DR call +
+                                # Stage D grounding agent runs) into
+                                # self.total_api_cost so the run respects
+                                # ``max_api_costs``. The budget-stop check
+                                # at the proposer site picks up the new
+                                # total on its next iteration.
+                                dr_cycle_cost = 0.0
                                 for island_idx, brief in briefs.items():
                                     if brief.rendered_markdown:
                                         self._latest_island_briefs[island_idx] = (
@@ -5352,6 +5360,18 @@ class ShinkaEvolveRunner:
                                     # literature_grounded arm can pick a
                                     # specific BriefItem to ground in.
                                     self._latest_island_brief_obj[island_idx] = brief
+                                    dr_cycle_cost += float(
+                                        getattr(brief, "total_cost", 0.0) or 0.0
+                                    )
+                                if dr_cycle_cost > 0:
+                                    self.total_api_cost += dr_cycle_cost
+                                    logger.info(
+                                        "DR cycle gen=%s cost=$%.4f "
+                                        "(total run cost $%.4f)",
+                                        program.generation,
+                                        dr_cycle_cost,
+                                        self.total_api_cost,
+                                    )
                                 if briefs:
                                     logger.info(
                                         "DR cycle produced %d island brief(s) at gen %s",

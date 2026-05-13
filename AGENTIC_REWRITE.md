@@ -6,10 +6,15 @@ This document is the single source of truth for the `agentic-rewrite` branch. Re
 > The `agent-research-grounding` branch then added the three
 > research-grounding features (error_traceback + fix telemetry + Azure-aware
 > kwargs; per-island DR meta cycle; `literature_grounded` mutation arm) on
-> top, and `collapsed-agent` reorganized the repo layout. See
-> [CHANGELOG.md](CHANGELOG.md) for the branch lineage and
-> [CLAUDE.md](CLAUDE.md) for current operating instructions. This file
-> stays as the design rationale for the rewrite itself.
+> top, and `collapsed-agent` reorganized the repo layout. Five
+> doom-loophole fixes followed on `collapsed-agent` itself — most
+> notably **`apply_patch` now auto-evaluates after every successful
+> apply** (the LLM no longer chooses when to call evaluate), so the
+> Phase D/E "two-tool" loop described below in this doc is now
+> "one-tool" in default operation. See [CHANGELOG.md](CHANGELOG.md) for
+> the full branch lineage and [CLAUDE.md](CLAUDE.md) for current
+> operating instructions. This file stays as the design rationale for
+> the rewrite itself; for the current loop semantics read CLAUDE.md.
 
 ## Goal
 

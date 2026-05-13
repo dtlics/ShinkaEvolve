@@ -78,7 +78,7 @@ Per-task results live inside `tasks/<name>/results/` (gitignored). Cross-task `r
 
 ### Enabling the research-grounding features
 
-Each is opt-in via Hydra `--set`. The agent loop benefits from `max_patch_attempts=2`+ so it has room to apply→evaluate→fix:
+Each is opt-in via Hydra `--set`. The agent loop benefits from `max_patch_attempts=2`+ so it has multiple turns to apply a fix after seeing an eval failure:
 
 ```bash
 shinka_run --task-dir tasks/<name> --results-dir tasks/<name>/results \
@@ -91,23 +91,24 @@ shinka_run --task-dir tasks/<name> --results-dir tasks/<name>/results \
 
 What each flag turns on:
 
-- **`use_agentic_proposer=true`** — `_run_agent_proposal` instead of `_run_patch_async`. The agent loops apply_patch → evaluate → reflect with continuous context across attempts (one `Runner.run` per generation, `max_turns = max_patch_attempts × 3`).
-- **`enable_deep_research=true`** — every `dr_meta_interval` (default 20) programs, run Stage A (drift judge) → Stage B (novelty cache lookup) → Stage C (o3-deep-research call) → Stage D (per-item web_search grounding). Per-island briefs; the freeform meta cycle keeps running at its own cadence (`meta_rec_interval`, default 10).
-- **`enable_literature_grounded=true`** — adds a fourth mutation type that picks one BriefItem from the parent's island brief and asks the agent to apply it, with `web_search` enabled for that one call. Suppressed for islands with no eligible brief item.
+- **`use_agentic_proposer=true`** — `_run_agent_proposal` instead of `_run_patch_async`. The agent emits `apply_patch` tool calls; **each successful apply automatically runs the evaluator and returns the score in the tool response** (doom-remediation Fix 1). The agent's loop is `apply_patch → see apply+eval result → fix-apply (if correct=False) → ... → emit final structured output on success`. One `Runner.run` per generation with `max_turns = max_patch_attempts × 3` LLM rounds.
+- **`enable_deep_research=true`** — every `dr_meta_interval` (default 20) programs, run Stage A (drift judge) → Stage B (novelty cache lookup) → Stage C (o3-deep-research call) → Stage D (per-item web_search grounding). Per-island briefs; the freeform meta cycle keeps running at its own cadence (`meta_rec_interval`, default 10). DR cost (Stages A+C+D) is summed into `total_api_cost` so `max_api_costs` covers it.
+- **`enable_literature_grounded=true`** — adds a fourth mutation type that picks one **confirmed** BriefItem from the parent's island brief and asks the agent to apply it, with `web_search` enabled for that one call. Suppressed for islands with no confirmed eligible brief item.
 
-The schema column `error_traceback` (truncated stderr/traceback when correct=False) and the in-loop `Program.metadata.fix_telemetry` dict (`{apply_attempts, eval_attempts, had_failure_then_success, final_correct}`) are written on every agentic run — they don't need flags. Query them after a run for fix-skill diagnostics.
+The schema column `error_traceback` (truncated stderr/traceback when correct=False) and the in-loop `Program.metadata.fix_telemetry` dict (`{apply_attempts, eval_attempts, had_failure_then_success, final_correct}`) are written on every agentic run — they don't need flags. Query them after a run for fix-skill diagnostics. `stderr_log` is capped at ~16KB head+tail at load (chatty evaluators can't flood the agent's context).
 
 ## Agentic architecture (one screen)
 
 `AgentLLMClient` (in `shinka/llm/agent/client.py`) wraps the `openai-agents` SDK. Each generation:
 
-1. `_run_agent_proposal` builds a `ShinkaToolContext` with the parent's code, the patch dir, the wired evaluator closure, and the per-island brief.
-2. It picks tools from `evo_config.agentic_tools` (default `["apply_patch", "evaluate"]`); for the `literature_grounded` arm it forces in `web_search` for that one call.
+1. `_run_agent_proposal` builds a `ShinkaToolContext` with the parent's code, the patch dir, the **pre-bound evaluator closure** (`_make_agent_evaluator`), and the per-island brief.
+2. It picks tools from `evo_config.agentic_tools` (default `["apply_patch"]` — just one tool, since apply_patch auto-evaluates). For the `literature_grounded` arm it forces in `web_search` for that single call.
 3. `AgentLLMClient.run_agent` constructs a fresh `Agent` + `BackgroundOpenAIResponsesModel` + `AsyncAzureOpenAI` client per call, calls `Runner.run`, parses the `PatchProposalOutput` Pydantic structured output (name + description).
-4. The agent's tool calls mutate `tool_ctx`: `last_successful_patch_text`, `last_successful_num_applied`, `last_eval_result`, `tool_call_trace`. The orchestrator reads these after the run and either short-circuits to the cached eval result (Phase E cache-and-skip) or submits the patched code through the scheduler.
-5. Bandit update happens once on the program's final `combined_score`; `abort_reason="insufficient_reference"` (literature_grounded clean abort) skips the update to preserve the "aborts ≠ low-score" invariant.
+4. The agent's loop: emit `apply_patch` → framework runs `apply_patch_async` AND `ctx.evaluator()` → tool returns `"OK: applied ... \nEVAL: OK|FAILED: ..."`. If eval says `correct=True`, the LLM emits its final structured output and the SDK terminates. If `correct=False`, the LLM emits another `apply_patch` as a fix attempt. Continues until success or `max_turns` exhausted.
+5. After the run, `tool_ctx` carries: `last_successful_patch_text`, `last_successful_num_applied`, `last_eval_result` (structurally fresh — always paired with the latest applied code), `tool_call_trace`. The orchestrator either short-circuits with the cached eval result (no double-evaluation) or, if no apply ever succeeded, persists a failed Program row.
+6. Bandit update happens once on the program's final `combined_score`. `abort_reason="insufficient_reference"` (literature_grounded clean abort) skips the update to preserve the "aborts ≠ low-score" invariant.
 
-Six agent tools (registered in `shinka/llm/agent/tools/`): `apply_patch`, `evaluate`, `web_search` (opt-in, server-side via `agents.WebSearchTool`), `query_evolution_db`, `read_host_file`. Web search is enabled per-call only — never set as a global default (each call costs $0.01–0.03 plus content tokens).
+Five agent tools registered in `shinka/llm/agent/tools/`: `apply_patch` (default — auto-evaluates), `evaluate` (registered but **not in default** — manual re-eval for edge cases like different seeds), `web_search` (opt-in, server-side via `agents.WebSearchTool`), `query_evolution_db`, `read_host_file`. Web search is enabled per-call only — never set as a global default (each call costs $0.01–0.03 plus content tokens).
 
 ## Working in this repo
 

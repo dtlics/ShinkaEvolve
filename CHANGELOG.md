@@ -13,6 +13,49 @@ here now. Outer repo becomes a thin pointer; daily work happens here.
 `.gitignore` extended for `.env`, `tasks/*/results/`, etc. Pytest scoped to
 `tests/` so smoke runners and per-task `evaluate.py` aren't discovered.
 
+**Doom-loophole remediation** (five fixes from the always-on workflow
+walkthrough, 5 commits, 560 tests):
+
+- **Fix 1 (auto-eval inside `apply_patch`)** — `apply_patch` now
+  deterministically runs the evaluator after every successful apply
+  and appends the eval result to its tool return string. The LLM no
+  longer chooses when to evaluate; the framework guarantees every
+  code change is scored. Default `agentic_tools` drops from
+  `["apply_patch", "evaluate"]` to `["apply_patch"]` (manual
+  `evaluate` is still registered, opt-in for edge cases like
+  re-evaluating with different seeds). Eliminates the cache-and-skip
+  staleness mode at the source: `tool_ctx.last_eval_result` is now
+  structurally always paired with the latest applied code. Reduces
+  per-cycle LLM round count by ~30% on the agent path.
+- **Fix 2 (DR pipeline cost into `total_api_cost`)** — Stage A judge
+  + Stage C `o3-deep-research` + Stage D agent runs all sum into
+  `self.total_api_cost` at the DR firing site. `DRBrief` gains a
+  `total_cost` property; `StageAOutput` gains a `cost` field so the
+  judge call's spend stops being discarded. With
+  `dr_max_calls_per_run=30` this previously allowed $150-300+ to
+  bypass `max_api_costs`.
+- **Fix 3 (placeholder briefs don't poison the prompt)** —
+  `_latest_island_briefs[island_idx]` is only updated when the new
+  brief is real (`source != "placeholder"` AND `items` non-empty). A
+  Stage C failure no longer suppresses the freeform meta_recommendations
+  fallback for 20 generations with a "DR pipeline did not produce
+  items..." string. Placeholder briefs still persist into the
+  `meta_briefs` SQLite table for diagnostic visibility.
+- **Fix 4 (`stderr_log` head+tail truncation at load site)** —
+  `_load_results` in `shinka.utils.general` caps `stderr_log` at
+  ~16KB with both head and tail preserved (the tail is where the
+  actual raise site lives). Chatty evaluators (jax compile noise,
+  numpy deprecation warnings, qiskit transpiler chatter) can no
+  longer flood the agent's intra-loop fix context with megabytes.
+- **Fix 5 (`BriefItem.confirmed` + lit_grounded filter)** —
+  `BriefItem` gains a `confirmed: bool` field (default True for
+  backward compat). Stage D sets `confirmed=False` when its
+  per-item web_search verification couldn't validate the reference
+  (crash, empty response, or model returned `confirmed: false`). The
+  lit_grounded eligibility filter excludes unconfirmed items so the
+  agent doesn't burn a generation re-discovering Stage D's negative
+  verdict.
+
 ### `agent-research-grounding`
 Three features on top of the agentic rewrite, 8 commits, 538 tests:
 

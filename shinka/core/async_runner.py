@@ -1631,21 +1631,58 @@ class ShinkaEvolveRunner:
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("DR Stage D agent run failed: %s", exc)
-                    grounded.append(item)
+                    # Stage D agent itself crashed → we can't tell if
+                    # the reference is good or bad. Mark unconfirmed
+                    # so lit_grounded doesn't pick it (Fix 5).
+                    grounded.append(
+                        BriefItem(
+                            idea=item.idea,
+                            rationale=item.rationale,
+                            reference_source=item.reference_source,
+                            reference_snippet=item.reference_snippet,
+                            gotchas=item.gotchas,
+                            confirmed=False,
+                        )
+                    )
                     continue
 
                 if response is None or not response.content:
-                    grounded.append(item)
+                    # Stage D returned nothing → unconfirmed (same
+                    # rationale as the exception path).
+                    grounded.append(
+                        BriefItem(
+                            idea=item.idea,
+                            rationale=item.rationale,
+                            reference_source=item.reference_source,
+                            reference_snippet=item.reference_snippet,
+                            gotchas=item.gotchas,
+                            confirmed=False,
+                        )
+                    )
                     continue
                 total_cost += float(response.cost or 0.0)
                 from shinka.core.deep_research_summarizer import _strip_to_json
 
                 parsed = _strip_to_json(response.content)
                 if not parsed or not parsed.get("confirmed"):
-                    # Confirmation failed; keep the original item so
-                    # the brief still surfaces it, with notes carried
-                    # forward.
-                    grounded.append(item)
+                    # Doom-remediation Fix 5: Stage D returned
+                    # ``confirmed: false`` (or unparseable). Mark the
+                    # item ``confirmed=False`` so the lit_grounded
+                    # eligibility filter skips it. Before Fix 5 the
+                    # item passed through unchanged with default
+                    # confirmed=True, and lit_grounded would later
+                    # web_search to re-discover Stage D's negative
+                    # verdict — double cost on the same signal.
+                    grounded.append(
+                        BriefItem(
+                            idea=item.idea,
+                            rationale=item.rationale,
+                            reference_source=item.reference_source,
+                            reference_snippet=item.reference_snippet,
+                            gotchas=item.gotchas,
+                            confirmed=False,
+                        )
+                    )
                     continue
                 grounded.append(
                     BriefItem(
@@ -1657,6 +1694,7 @@ class ShinkaEvolveRunner:
                         ),
                         gotchas=item.gotchas
                         or str(parsed.get("notes") or ""),
+                        confirmed=True,
                     )
                 )
             return grounded, total_cost
@@ -4115,10 +4153,16 @@ class ShinkaEvolveRunner:
             island_idx_for_brief = getattr(parent_program, "island_idx", None)
             island_brief = self._latest_island_briefs.get(island_idx_for_brief)
             # Phase 3 of research-grounding: pick ONE BriefItem with a
-            # non-empty reference_snippet so the sampler can render the
-            # literature_grounded prompt. The sampler suppresses the
-            # arm when this is None, so we pick eagerly and let it
-            # decide.
+            # non-empty reference_snippet AND ``confirmed=True`` so the
+            # sampler can render the literature_grounded prompt. The
+            # sampler suppresses the arm when this is None, so we pick
+            # eagerly and let it decide.
+            #
+            # Doom-remediation Fix 5: ``confirmed=False`` items are
+            # Stage D's "could not verify this reference" verdicts.
+            # Re-trying them in lit_grounded burns a web_search +
+            # apply_patch budget to re-discover the same negative
+            # signal; filter them out at pick time.
             literature_grounded_item: Optional[Dict[str, Any]] = None
             if getattr(self.evo_config, "enable_literature_grounded", False):
                 brief_obj = self._latest_island_brief_obj.get(island_idx_for_brief)
@@ -4127,6 +4171,7 @@ class ShinkaEvolveRunner:
                         it
                         for it in brief_obj.items
                         if str(getattr(it, "reference_snippet", "") or "").strip()
+                        and getattr(it, "confirmed", True)
                     ]
                     if eligible:
                         chosen = eligible[

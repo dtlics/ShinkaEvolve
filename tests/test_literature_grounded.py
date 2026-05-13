@@ -393,3 +393,170 @@ def test_literature_grounded_uses_island_brief_when_provided() -> None:
     # ISLAND-MD must NOT appear — meta-rec slot is suppressed for
     # literature_grounded (brief item is the focus material).
     assert "ISLAND-MD" not in sys_msg
+
+
+# ----------------------------------------------------------------------
+# Doom-remediation Fix 5: lit_grounded eligibility filter excludes
+# unconfirmed brief items. Stage D sets ``confirmed=False`` on items
+# whose references it couldn't validate via web_search. Without this
+# filter, lit_grounded would later web_search to re-discover the same
+# negative verdict — double cost on the same signal.
+# ----------------------------------------------------------------------
+
+
+def test_lit_grounded_picker_excludes_unconfirmed_items(tmp_path: Path) -> None:
+    """Build a brief with a mix of confirmed/unconfirmed items; assert
+    the lit_grounded picker only ever surfaces a confirmed item to the
+    sampler."""
+    from shinka.core.deep_research_summarizer import BriefItem, DRBrief
+
+    runner = _runner_stub(tmp_path)
+
+    # Override the brief: 3 items, only the middle one is confirmed.
+    runner._latest_island_brief_obj[0] = DRBrief(
+        island_idx=0,
+        generation=10,
+        items=[
+            BriefItem(
+                idea="unconfirmed-1",
+                reference_snippet="snip1",
+                confirmed=False,
+            ),
+            BriefItem(
+                idea="confirmed-middle",
+                reference_snippet="snip-middle",
+                confirmed=True,
+            ),
+            BriefItem(
+                idea="unconfirmed-2",
+                reference_snippet="snip2",
+                confirmed=False,
+            ),
+        ],
+        rendered_markdown="**mixed brief**",
+    )
+
+    captured: dict = {}
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        # Capture the sample() call args via the prompt_sampler mock.
+        ctx: ShinkaToolContext = kwargs["tool_context"]
+        ctx.last_successful_patch_text = "diff"
+        ctx.last_successful_patch_type = "literature_grounded"
+        ctx.last_successful_num_applied = 1
+        return SimpleNamespace(
+            content="<NAME>x</NAME><DESCRIPTION>y</DESCRIPTION>",
+            cost=0.0,
+            to_dict=lambda: {},
+        )
+
+    runner.llm.run_agent = AsyncMock(side_effect=fake_run_agent)
+
+    # The prompt_sampler stub already records sample() calls via
+    # MagicMock. We'll inspect call_args after the proposal runs.
+    asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_lit_parent(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=10,
+        )
+    )
+
+    # Inspect what sample() got as literature_grounded_item.
+    sample_call = runner.prompt_sampler.sample.call_args
+    assert sample_call is not None
+    lit_item = sample_call.kwargs.get("literature_grounded_item")
+    # Only the middle item (confirmed=True) is eligible — even though
+    # the unconfirmed items have non-empty reference_snippets.
+    assert lit_item is not None
+    assert lit_item["idea"] == "confirmed-middle"
+    assert lit_item["reference_snippet"] == "snip-middle"
+
+
+def test_lit_grounded_picker_returns_none_when_all_items_unconfirmed(
+    tmp_path: Path,
+) -> None:
+    """If every item with a reference_snippet is unconfirmed, the
+    picker returns None and the sampler suppresses lit_grounded for
+    this call. Prevents the agent from being asked to ground in
+    references Stage D already verified as bad."""
+    from shinka.core.deep_research_summarizer import BriefItem, DRBrief
+
+    runner = _runner_stub(tmp_path)
+
+    runner._latest_island_brief_obj[0] = DRBrief(
+        island_idx=0,
+        generation=10,
+        items=[
+            BriefItem(idea="bad-1", reference_snippet="s1", confirmed=False),
+            BriefItem(idea="bad-2", reference_snippet="s2", confirmed=False),
+        ],
+        rendered_markdown="**all unconfirmed**",
+    )
+
+    # Sampler returns "diff" since lit_grounded was suppressed by the
+    # picker returning None. The proposer flow tolerates this.
+    runner.prompt_sampler.sample = MagicMock(
+        return_value=("sys", "user", "diff")
+    )
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        ctx: ShinkaToolContext = kwargs["tool_context"]
+        ctx.last_successful_patch_text = "diff"
+        ctx.last_successful_patch_type = "diff"
+        ctx.last_successful_num_applied = 1
+        return SimpleNamespace(
+            content="<NAME>x</NAME><DESCRIPTION>y</DESCRIPTION>",
+            cost=0.0,
+            to_dict=lambda: {},
+        )
+
+    runner.llm.run_agent = AsyncMock(side_effect=fake_run_agent)
+
+    asyncio.run(
+        ShinkaEvolveRunner._run_agent_proposal(
+            runner,
+            parent_program=_lit_parent(),
+            archive_programs=[],
+            top_k_programs=[],
+            generation=10,
+        )
+    )
+
+    sample_call = runner.prompt_sampler.sample.call_args
+    assert sample_call is not None
+    # No eligible item → literature_grounded_item is None →
+    # sampler suppresses the arm.
+    assert sample_call.kwargs.get("literature_grounded_item") is None
+
+
+def test_brief_item_default_confirmed_is_true() -> None:
+    """Default ``confirmed=True`` preserves backward compat: items
+    constructed without going through Stage D (cache_hit, tests,
+    legacy paths) remain eligible for lit_grounded."""
+    from shinka.core.deep_research_summarizer import BriefItem
+
+    item = BriefItem(idea="x", reference_snippet="snip")
+    assert item.confirmed is True
+
+
+def test_brief_item_parse_list_reads_confirmed_from_json() -> None:
+    """``parse_list`` propagates ``confirmed`` when present in the
+    DR model's JSON. Default True when omitted (which is the common
+    case — Stage C's prompt doesn't mention the field)."""
+    from shinka.core.deep_research_summarizer import BriefItem
+
+    raw_json = (
+        '{"techniques": ['
+        '{"idea": "a", "reference_snippet": "s", "confirmed": true},'
+        '{"idea": "b", "reference_snippet": "s"},'
+        '{"idea": "c", "reference_snippet": "s", "confirmed": false}'
+        "]}"
+    )
+    items = BriefItem.parse_list(raw_json)
+    assert len(items) == 3
+    assert items[0].confirmed is True
+    assert items[1].confirmed is True  # default
+    assert items[2].confirmed is False

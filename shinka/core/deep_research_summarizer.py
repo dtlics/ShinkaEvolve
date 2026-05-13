@@ -89,13 +89,24 @@ class StageAOutput:
 
 @dataclass
 class BriefItem:
-    """One technique entry in a research brief."""
+    """One technique entry in a research brief.
+
+    ``confirmed`` (doom-remediation Fix 5) defaults to True for items
+    that haven't been through Stage D's per-item web_search verification
+    (Stage C output before Stage D, cache-hit items, anything synthesized
+    without grounding). Stage D sets it to False when it failed to
+    confirm the item's reference via the web_search agent run. The
+    lit_grounded mutation arm's eligibility filter consults this flag
+    so the agent doesn't burn a generation re-discovering Stage D's
+    "unconfirmable" verdict.
+    """
 
     idea: str
     rationale: str = ""
     reference_source: str = ""
     reference_snippet: str = ""
     gotchas: str = ""
+    confirmed: bool = True
 
     @classmethod
     def parse_list(cls, raw: str) -> List["BriefItem"]:
@@ -114,6 +125,13 @@ class BriefItem:
                     reference_source=str(item.get("reference_source", "")),
                     reference_snippet=str(item.get("reference_snippet", "")),
                     gotchas=str(item.get("gotchas", "")),
+                    # Fresh from Stage C → not yet confirmed by Stage D.
+                    # Default ``True`` here keeps backward compat for
+                    # any path that constructs items without going
+                    # through Stage D (cache_hit, tests, etc.). Stage
+                    # D explicitly flips to False when confirmation
+                    # fails.
+                    confirmed=bool(item.get("confirmed", True)),
                 )
             )
         return out

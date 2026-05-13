@@ -2,17 +2,24 @@
 
 Deep research runs through a **separate Azure resource** from the
 general ``gpt-*`` chat/reasoning endpoint configured in
-``shinka.llm.client``. The user provisions a dedicated Foundry project
-for the DR deployment and exposes it via two new env vars:
+``shinka.llm.client``. Both resources use the same umbrella-URL form
+(``https://<resource>.openai.azure.com``); the DR client is a parallel
+factory keyed on its own env vars so credentials, cost, and routing
+stay separable.
 
-* ``AZURE_DR_ENDPOINT`` — the Azure AI services base URL (e.g.
-  ``https://<resource>.services.ai.azure.com/api/projects/<project>``).
-  We append ``/openai/v1`` so the responses API path resolves the same
-  way ``shinka.llm.client._build_azure_base_url`` does for the main
-  endpoint.
-* ``AZURE_DR_API_KEY`` — the key for that resource. Distinct from
-  ``AZURE_OPENAI_API_KEY`` even when the two resources live in the
-  same tenant.
+Env vars
+--------
+* ``AZURE_DR_ENDPOINT`` — bare Azure OpenAI resource URL, e.g.
+  ``https://<resource>.openai.azure.com``. We append ``/openai/v1`` so
+  the responses API path resolves the same way
+  ``shinka.llm.client._build_azure_base_url`` does for the main
+  endpoint. The Azure AI Services project URL
+  (``https://<resource>.services.ai.azure.com/api/projects/<project>``)
+  also works — both surfaces serve the same deployments, and
+  ``_build_dr_base_url`` normalizes either form to the responses-API
+  base.
+* ``AZURE_DR_API_KEY`` — key for that resource. Distinct from
+  ``AZURE_OPENAI_API_KEY`` even when both resources share a tenant.
 * ``AZURE_DR_API_VERSION`` (optional) — defaults to ``"preview"``,
   matching the main endpoint's default. ``o3-deep-research`` is in
   preview, so the preview API surface is what we want.
@@ -22,15 +29,6 @@ The DR endpoint is **not** routed through the bandit-driven
 ``get_dr_async_client`` directly, which keeps DR cost separable from
 proposer/meta cost in the Azure dashboard (the ``purpose=dr_stage_*``
 tag on each call also feeds this distinction).
-
-Why a separate file
--------------------
-Reusing ``shinka.llm.client.get_async_client_llm`` would force the DR
-endpoint into the same env-var pair as the main endpoint, conflicting
-with the user's "separate Azure resource" decision. Reusing the model
-resolver is unnecessary too: DR has exactly one deployment per run, so
-we accept the deployment name as a constructor arg rather than
-plumbing it through ``resolve_model_backend``.
 """
 
 from __future__ import annotations
@@ -84,23 +82,22 @@ DR_API_VERSION_ENV: str = "AZURE_DR_API_VERSION"
 def _build_dr_base_url(endpoint: str) -> str:
     """Canonicalize the DR endpoint to the responses-API base URL.
 
-    Mirrors ``shinka.llm.client._build_azure_base_url``: the public
-    endpoint is something like
-    ``https://<resource>.services.ai.azure.com/api/projects/<project>``
-    and the responses API lives at ``/openai/v1/responses``. We strip
-    a trailing slash and append ``/openai/v1`` so the AsyncAzureOpenAI
-    client's ``base_url`` resolves to the right path.
-
-    The user may supply the URL already with ``/openai/v1`` appended
-    (per their internal docs) — in that case we leave it alone so
-    we don't double-append.
+    Mirrors ``shinka.llm.client._build_azure_base_url``: bare resource
+    URL → appends ``/openai/v1`` so AsyncAzureOpenAI's ``base_url``
+    resolves to the responses API. Both URL surfaces work — the
+    Azure-OpenAI umbrella form (``https://<resource>.openai.azure.com``)
+    and the AI Services project form
+    (``https://<resource>.services.ai.azure.com/api/projects/<proj>``).
+    We accept either and tolerate a user pasting the full
+    ``/openai/v1`` or ``/openai/v1/responses`` URL so the env-var
+    contract is forgiving.
     """
     endpoint = endpoint.rstrip("/")
     if endpoint.endswith("/openai/v1"):
         return endpoint
     if endpoint.endswith("/openai/v1/responses"):
-        # The user pasted the full responses URL; drop the /responses
-        # suffix because AsyncAzureOpenAI appends the path itself.
+        # User pasted the full responses URL; drop ``/responses``
+        # since AsyncAzureOpenAI appends the path itself.
         return endpoint[: -len("/responses")]
     return endpoint + "/openai/v1"
 

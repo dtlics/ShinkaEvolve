@@ -66,6 +66,24 @@ def test_build_dr_base_url_strips_responses_suffix() -> None:
     assert url == "https://x.services.ai.azure.com/api/projects/p/openai/v1"
 
 
+def test_build_dr_base_url_handles_azure_openai_umbrella_form() -> None:
+    """The DR resource has two parallel URLs: the AI Services project URL
+    and the Azure-OpenAI umbrella URL (``*.openai.azure.com``). Both
+    serve the same deployments; we use the umbrella form for parity
+    with the main endpoint configured in shinka.llm.client. Either form
+    must normalize cleanly to a ``.../openai/v1`` base."""
+    url = _build_dr_base_url(
+        "https://dtlics2000-4351-resource.openai.azure.com"
+    )
+    assert url == "https://dtlics2000-4351-resource.openai.azure.com/openai/v1"
+
+    # Idempotent on the umbrella + /openai/v1 form.
+    url2 = _build_dr_base_url(
+        "https://dtlics2000-4351-resource.openai.azure.com/openai/v1"
+    )
+    assert url2 == url
+
+
 def test_get_dr_async_client_requires_endpoint(monkeypatch) -> None:
     """Missing endpoint is a hard error — the message must point at the
     env-var name so the user knows what to set."""

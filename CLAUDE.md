@@ -1,144 +1,83 @@
-# CLAUDE.md — Project Memory for Shinka (collapsed-agent layout)
+# CLAUDE.md — Project Memory
 
-This file is loaded into every Claude Code session at this repo root. Read it first.
+Read first. This file is loaded into every Claude Code session at this repo root.
 
 ## What this repo is
 
-A working environment for **ShinkaEvolve** (Sakana AI's LLM-driven evolutionary code optimization) with an Azure OpenAI backend, plus the user's own task code and the **research-grounding** features added on top of the agentic rewrite (deep research, literature_grounded mutation arm, fix telemetry, Azure-aware cost kwargs).
+Personal working repo for evolutionary code optimization with [ShinkaEvolve](https://github.com/SakanaAI/ShinkaEvolve), running on Azure OpenAI. Started as a fork to fix Azure compat, then a sequence of branches added agentic features and research grounding (see [README.md](README.md) for the branch table). Now collapsed so everything lives here — framework, tasks, configs, credentials, skills.
 
-After the `collapsed-agent` reorganization, **everything meaningful lives in this repo**:
-- Framework source (`shinka/`), examples, tests.
-- User tasks (`tasks/<name>/`).
-- Shared Hydra config overrides (`configs/`).
-- Smoke-test scripts (`scripts/`).
-- Credentials (`.env`, gitignored).
-- Project-scoped Claude Code skills (`.claude/skills/`).
-
-The outer repo at `/Users/dantongli/GIthub/Shinka/` is a thin shim that initializes this submodule and gets out of the way. **All edits happen here.**
-
-## Layout
-
-```
-shinkaevolve/
-├── shinka/             # framework source — pip install -e .
-├── examples/           # upstream example tasks (circle_packing, game_2048, ...)
-├── tasks/              # user-defined tasks (initial.<ext>, evaluate.py, ...)
-├── configs/            # shared Hydra config overrides
-├── scripts/            # smoke tests (test_azure.py, test_agentic.py)
-├── skills/             # Claude Code / Codex skills, exposed via .claude/skills/*
-├── tests/              # pytest suite (537 tests as of collapse)
-├── docs/, mkdocs.yml   # documentation
-├── .env                # Azure + LLM credentials (gitignored — never commit)
-├── .env.example        # template
-├── .claude/skills/     # symlinks into skills/ — what Claude Code reads
-├── CLAUDE.md           # this file
-└── pyproject.toml      # editable install metadata
-```
+The outer `Shinka` repo at `/Users/dantongli/GIthub/Shinka/` is a thin shim that initializes this submodule. **Daily work happens here, in `shinkaevolve/`.**
 
 ## Environment
 
-- **Python env**: conda env named `shinka` with Python 3.11. Always use this — never let pip install into `base` or any other env.
+- **Conda env**: `shinka` (Python 3.11). Never let pip install into `base` or any other env on this machine — others must stay clean (`coc`, `couple_therapy`, `efficient_cs`, `pl_ht`, `supercollider`).
   - Activate: `conda activate shinka`
-  - Direct binary path (for non-interactive shells): `/opt/anaconda3/envs/shinka/bin/python`, `/opt/anaconda3/envs/shinka/bin/pip`.
-  - Shinka CLI: `/opt/anaconda3/envs/shinka/bin/shinka_launch`, `shinka_run`, `shinka_models`, `shinka_visualize`.
-- **ShinkaEvolve install**: editable (`pip install -e .` from this directory). Edits to `shinka/...` take effect immediately — no reinstall needed.
-- **Branches**: this repo is `dtlics/ShinkaEvolve.git`. Active branches:
-  - `agentic-rewrite` — agents-SDK rewrite + 6 agent tools (apply_patch / evaluate / web_search / query_evolution_db / read_host_file).
-  - `agent-research-grounding` — on top of agentic-rewrite: error_traceback persistence, Azure-aware call kwargs, fix telemetry, DR meta cycle, literature_grounded mutation arm.
-  - `collapsed-agent` — on top of agent-research-grounding: this layout (tasks/configs/scripts/.env collapsed in).
+  - Direct binaries when activation isn't available: `/opt/anaconda3/envs/shinka/bin/{python, pip, shinka_run, shinka_launch, shinka_models, shinka_visualize}`
+- **Install**: this package is `pip install -e .` from this directory. Edits to `shinka/...` take effect immediately.
+- **Pytest**: `testpaths = ["tests"]` in pyproject — keeps `scripts/` smoke runners and `tasks/*/evaluate.py` out of test discovery.
 
-## LLM backends (two separate Azure resources)
+## Two Azure resources, parallel structure
 
-### Main chat/reasoning endpoint
-Foundry resource: **dtlics2000shinka** in **East US 2**, project name **Shinka**. All deployments are **Global Standard**. Credentials in `.env`:
+The user runs **two separate Azure resources**: a main chat/reasoning endpoint and a deep-research endpoint. Both use the umbrella URL form (`https://<resource>.openai.azure.com`); each has its own key, project, and deployment set. The framework keeps them separable via distinct env-var pairs.
 
-| Var | Value |
-|---|---|
-| `AZURE_OPENAI_API_KEY` | (in `.env`) |
-| `AZURE_API_ENDPOINT` | `https://dtlics2000shinka.openai.azure.com` (bare; shinka appends `/openai/v1`) |
-| `AZURE_API_VERSION` | `preview` |
+| | Main | Deep research |
+|---|---|---|
+| Resource | `dtlics2000shinka` | `dtlics2000-4351-resource` |
+| Region | East US 2 | (different region) |
+| Endpoint env | `AZURE_API_ENDPOINT` | `AZURE_DR_ENDPOINT` |
+| Key env | `AZURE_OPENAI_API_KEY` | `AZURE_DR_API_KEY` |
+| API version | `AZURE_API_VERSION=preview` | `AZURE_DR_API_VERSION=preview` |
+| Client factory | `shinka.llm.client.get_async_client_llm` | `shinka.llm.agent.dr_client.get_dr_async_client` |
+| Used by | proposer / meta / novelty / fix | `DeepResearchSummarizer` Stage C only |
+| Cost separation | `purpose=proposer / meta / fix` | `purpose=dr_stage_a / dr_stage_b / dr_stage_c / dr_stage_d` |
 
-Chat/reasoning deployments (used for `evo.llm_models`, `evo.meta_llm_models`, `evo.novelty_llm_models`):
+Both endpoints' base_url is built by appending `/openai/v1` to the bare resource URL — same logic, two parallel functions (`_build_azure_base_url` and `_build_dr_base_url`).
+
+### Main resource deployments
 
 | Shinka model id | Deployment name | Underlying model | Notes |
 |---|---|---|---|
-| `azure-gpt-5.4-pro` | `gpt-5.4-pro` | gpt-5.4-pro v2026-03-05 | Strong reasoning, $30/$180 per 1M. **Requires reasoning effort ≥ medium** (low rejected). |
+| `azure-gpt-5.4-pro` | `gpt-5.4-pro` | gpt-5.4-pro v2026-03-05 | $30/$180 per 1M. **Requires reasoning effort ≥ medium** (low rejected). |
 | `azure-gpt-5.5` | `gpt-5.5` | gpt-5.5 v2026-04-24 | $5/$30 per 1M. |
 | `azure-gpt-5.3-codex` | `gpt-5.3-codex` | gpt-5.3-codex v2026-02-24 | Coding-tuned, $1.75/$14 per 1M. |
 | `azure-gpt-5.4-mini` | `gpt-5.4-mini` | gpt-5.4-mini v2026-03-17 | Cheap workhorse, $0.75/$4.50 per 1M. |
+| `azure-text-embedding-3-small` | `text-embedding-3-small` | — | $0.02 per 1M tokens. Default for all tasks. |
+| `azure-text-embedding-3-large` | `text-embedding-3-large` | — | $0.13 per 1M tokens. Only when dedup looks lossy. |
 
-Embedding deployments (used for `evo.embedding_model` — separate from chat: vector embeddings for code-similarity dedup and dashboard PCA, NOT proposal/novelty/meta):
+**Critical**: the bare name `text-embedding-3-small` (no `azure-` prefix) routes to the OpenAI provider and demands `OPENAI_API_KEY`. Always use `azure-text-embedding-3-small`. Verify deployments with `shinka_models --verbose`.
 
-| Shinka model id | Deployment name | Notes |
-|---|---|---|
-| `azure-text-embedding-3-small` | `text-embedding-3-small` | $0.02 per 1M tokens. Default for all tasks. |
-| `azure-text-embedding-3-large` | `text-embedding-3-large` | $0.13 per 1M tokens. Only when dedup looks lossy. |
+### DR resource deployment
 
-**Critical**: the bare `text-embedding-3-small` (without the `azure-` prefix) routes to the OpenAI provider and demands `OPENAI_API_KEY`. Always use the `azure-text-embedding-3-small` form. Verify availability with `shinka_models --verbose`.
+- `o3-deep-research` deployment, underlying model version `2025-06-26`. Used by `DeepResearchSummarizer` Stage C via the dedicated `dr_client`. The framework default `evo.dr_model="o3-deep-research"` matches; override per task if you rename the deployment.
 
-### Deep-research endpoint (phase 2 of research-grounding)
-**Separate** Foundry resource: **dtlics2000-4351-resource**, project **dtlics2000-4351**. Hosts the `o3-deep-research` deployment (model version `2025-06-26`). Powers `DeepResearchSummarizer` Stage C — distinct from chat reasoning. Credentials in `.env`:
+### Reasoning-effort gotcha
 
-| Var | Value |
-|---|---|
-| `AZURE_DR_API_KEY` | (in `.env`) |
-| `AZURE_DR_ENDPOINT` | `https://dtlics2000-4351-resource.services.ai.azure.com/api/projects/dtlics2000-4351` (bare form; the dr_client normalizes both bare and `/openai/v1` and `/openai/v1/responses` variants) |
-| `AZURE_DR_API_VERSION` | `preview` |
-| `evo.dr_model` config knob | `o3-deep-research` (the deployment name; override if you renamed your deployment) |
-
-### Why this is a fork (`dtlics/ShinkaEvolve`) and not upstream
-
-Upstream `SakanaAI/ShinkaEvolve` builds the Azure client with `azure_endpoint=`, which makes the OpenAI SDK inject `/openai/deployments/{model}/...` into every URL. Shinka calls the **responses API**, and on Azure that endpoint only lives at `/openai/v1/responses` — not the deployment-based path. Result on upstream: 404 on every Azure call.
-
-The fork's Azure-compat patches:
-1. **LLM client base_url fix** — `base_url=` pointing at `/openai/v1` so the responses API works.
-2. **Embedding api-version split** — `/responses` requires `preview`, but embeddings need a stable date-based version (`AZURE_EMBEDDING_API_VERSION` env var, default `2024-10-21`).
-3. **LLM timeout 1200 → 3600 (60 min)** — `gpt-5.4-pro` at `reasoning_effort=high` regularly takes more than 20 min.
-4. **Disable inner @backoff retry** — the legacy `@backoff` decorator retried with the same poisoned httpx pool for hours on transient HTTP errors; fixed by relying on the outer client-rebuild retry (now further refined by the agentic-rewrite background-mode transport that avoids long idle TCP altogether).
-
-If upstream merges equivalent fixes, repoint the submodule back to `SakanaAI/ShinkaEvolve` and drop these patches.
-
-### Reasoning effort
-
-Shinka samples a reasoning effort per call from the YAML's `reasoning_efforts` list. **Use `[medium, high]` (or just `[medium]`) for any pool that includes `azure-gpt-5.4-pro`** — `low` errors out for that model. The cheaper models support all three (`low`/`medium`/`high`).
-
-For `meta_llm_models` and `novelty_llm_models` (which typically use `azure-gpt-5.4-mini`), `[low]` is fine and saves cost.
+Sampling `reasoning_efforts: [low, medium, high]` errors out for `azure-gpt-5.4-pro` (it rejects `low`). Use `[medium, high]` (or just `[medium]`) for any pool containing `gpt-5.4-pro`. The cheaper models support all three. For `meta_llm_models` and `novelty_llm_models` (typically `azure-gpt-5.4-mini`), `[low]` is fine and saves cost.
 
 ### Smoke tests
 
 ```bash
 conda activate shinka
 cd /Users/dantongli/GIthub/Shinka/shinkaevolve
-python scripts/test_azure.py     # hits each chat/embed deployment
+python scripts/test_azure.py     # hits each main-resource deployment
 python scripts/test_agentic.py   # exercises the agentic proposer end-to-end
 ```
 
-Run after any credential change or major patch. Either prints latency + per-call cost.
-
-## Working in this repo
-
-### Adding a new task
-Use the `shinka-setup` skill (scaffold from a description) or `shinka-convert` skill (turn an existing codebase into a shinka task). Don't write `evaluate.py`/`initial.<ext>` by hand — the skills know the calling conventions.
-
-### Running an existing task
-Use the `shinka-run` skill, or directly:
+## Running a task
 
 ```bash
-conda activate shinka
 cd /Users/dantongli/GIthub/Shinka/shinkaevolve
 shinka_run --task-dir tasks/<name> --results-dir tasks/<name>/results ...
 ```
 
-Per-task results stay inside `tasks/<name>/results/` (gitignored). Cross-task `results/` at the repo root is also fine and gitignored.
+Per-task results live inside `tasks/<name>/results/` (gitignored). Cross-task `results/` at the repo root also gitignored.
 
 ### Enabling the research-grounding features
 
-Each feature is opt-in via Hydra config. Compose them in your task's run config:
+Each is opt-in via Hydra `--set`. The agent loop benefits from `max_patch_attempts=2`+ so it has room to apply→evaluate→fix:
 
 ```bash
-shinka_run \
-  --task-dir tasks/<name> \
-  --results-dir tasks/<name>/results \
+shinka_run --task-dir tasks/<name> --results-dir tasks/<name>/results \
   --num_generations 30 \
   --set evo.use_agentic_proposer=true \
   --set evo.max_patch_attempts=2 \
@@ -146,33 +85,46 @@ shinka_run \
   --set evo.enable_literature_grounded=true
 ```
 
-- `use_agentic_proposer=true` activates the agent loop (apply_patch + evaluate + reflect, continuous context across fix attempts).
-- `enable_deep_research=true` activates Stage A→D every `dr_meta_interval` (default 20) programs.
-- `enable_literature_grounded=true` adds the new mutation arm; suppressed for islands with no eligible brief item.
+What each flag turns on:
+
+- **`use_agentic_proposer=true`** — `_run_agent_proposal` instead of `_run_patch_async`. The agent loops apply_patch → evaluate → reflect with continuous context across attempts (one `Runner.run` per generation, `max_turns = max_patch_attempts × 3`).
+- **`enable_deep_research=true`** — every `dr_meta_interval` (default 20) programs, run Stage A (drift judge) → Stage B (novelty cache lookup) → Stage C (o3-deep-research call) → Stage D (per-item web_search grounding). Per-island briefs; the freeform meta cycle keeps running at its own cadence (`meta_rec_interval`, default 10).
+- **`enable_literature_grounded=true`** — adds a fourth mutation type that picks one BriefItem from the parent's island brief and asks the agent to apply it, with `web_search` enabled for that one call. Suppressed for islands with no eligible brief item.
+
+The schema column `error_traceback` (truncated stderr/traceback when correct=False) and the in-loop `Program.metadata.fix_telemetry` dict (`{apply_attempts, eval_attempts, had_failure_then_success, final_correct}`) are written on every agentic run — they don't need flags. Query them after a run for fix-skill diagnostics.
+
+## Agentic architecture (one screen)
+
+`AgentLLMClient` (in `shinka/llm/agent/client.py`) wraps the `openai-agents` SDK. Each generation:
+
+1. `_run_agent_proposal` builds a `ShinkaToolContext` with the parent's code, the patch dir, the wired evaluator closure, and the per-island brief.
+2. It picks tools from `evo_config.agentic_tools` (default `["apply_patch", "evaluate"]`); for the `literature_grounded` arm it forces in `web_search` for that one call.
+3. `AgentLLMClient.run_agent` constructs a fresh `Agent` + `BackgroundOpenAIResponsesModel` + `AsyncAzureOpenAI` client per call, calls `Runner.run`, parses the `PatchProposalOutput` Pydantic structured output (name + description).
+4. The agent's tool calls mutate `tool_ctx`: `last_successful_patch_text`, `last_successful_num_applied`, `last_eval_result`, `tool_call_trace`. The orchestrator reads these after the run and either short-circuits to the cached eval result (Phase E cache-and-skip) or submits the patched code through the scheduler.
+5. Bandit update happens once on the program's final `combined_score`; `abort_reason="insufficient_reference"` (literature_grounded clean abort) skips the update to preserve the "aborts ≠ low-score" invariant.
+
+Six agent tools (registered in `shinka/llm/agent/tools/`): `apply_patch`, `evaluate`, `web_search` (opt-in, server-side via `agents.WebSearchTool`), `query_evolution_db`, `read_host_file`. Web search is enabled per-call only — never set as a global default (each call costs $0.01–0.03 plus content tokens).
+
+## Working in this repo
+
+### Adding a new task
+Use the `shinka-setup` skill (scaffold from a description) or `shinka-convert` skill (turn an existing repo into a Shinka task). Don't hand-write `evaluate.py` / `initial.<ext>` — the skills know the calling conventions.
 
 ### Inspecting results
 Use the `shinka-inspect` skill — it loads top programs into agent context as a markdown bundle.
 
-### Patching shinka itself
-Edit files under `shinka/` directly (editable install). To commit those changes:
-1. `git checkout -b <branch>` from the current working branch.
-2. Commit, then either push to fork and update the outer-repo gitlink, or keep changes local.
+### Patching the framework
+Edit `shinka/...` directly (editable install). Commit on the current branch. To push:
+
+```bash
+git push -u fork <branch>          # fork = dtlics/ShinkaEvolve.git
+# Outer-repo: git add shinkaevolve && git commit -m "Bump shinkaevolve: ..."
+```
 
 ## Things future agents should NOT do
 
-- Do **not** `pip install` into anything other than the `shinka` conda env. Other envs exist on this machine (`base`, `coc`, `couple_therapy`, `efficient_cs`, `pl_ht`, `supercollider`) and must stay clean.
-- Do **not** commit `.env`, `tasks/*/results/`, or `evolution_db.sqlite` files. They're gitignored — don't `git add -f` them.
-- Do **not** install the shinka skills into `~/.claude/skills/` (global). They're already symlinked into `.claude/skills/` so they track this repo's version.
-- Do **not** ship the `.env` content (real keys) outside this machine; rotate keys if accidentally exposed.
-
-## Quick references
-
-- Shinka source: [shinka/](shinka/)
-- Working examples: [examples/](examples/) — circle_packing, game_2048, julia_prime_counting, novelty_generator
-- User tasks: [tasks/](tasks/) — cnot_grid_synth (your existing task)
-- Azure client wiring (main endpoint): [shinka/llm/client.py](shinka/llm/client.py)
-- DR client wiring: [shinka/llm/agent/dr_client.py](shinka/llm/agent/dr_client.py)
-- Model name resolver (handles `azure-`, `openrouter/`, `local/` prefixes): [shinka/llm/providers/model_resolver.py](shinka/llm/providers/model_resolver.py)
-- Bundled Hydra configs: [shinka/configs/](shinka/configs/) (default portfolios)
-- Shared user overrides: [configs/](configs/) (e.g. `azure_default.yaml`)
-- Research-grounding plan + state: [AGENTIC_REWRITE.md](AGENTIC_REWRITE.md), Phase 1-3 commits on the `agent-research-grounding` branch.
+- Do not `pip install` into anything other than the `shinka` conda env.
+- Do not commit `.env`, `tasks/*/results/`, or `evolution_db.sqlite` (gitignored).
+- Do not install the shinka skills into `~/.claude/skills/` (global). They live at `.claude/skills/` in this repo and track this branch.
+- Do not add `web_search` to the global `agentic_tools` list — it's per-call only.
+- Do not edit `dr_client.py` to share env vars with the main endpoint — they're separate resources by design.

@@ -75,22 +75,13 @@ def test_project_metadata_targets_pypi_release():
     }
 
 
-def test_readme_documents_package_install():
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-
-    assert "pip install shinka-evolve" in readme
-    assert "uv pip install shinka-evolve" in readme
-    assert "CHANGELOG.md" in readme
-    assert "CONTRIBUTING.md" in readme
-    assert "release_notes.md" not in readme
-
-
-def test_changelog_tracks_current_package_version():
-    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-
-    assert shinka.__version__ == "0.0.5"
-    assert "# Changelog" in changelog
-    assert f"## {shinka.__version__} -" in changelog
+# Upstream tests ``test_readme_documents_package_install`` and
+# ``test_changelog_tracks_current_package_version`` were removed in
+# the ``collapsed-agent`` rewrite. They asserted upstream's PyPI
+# release workflow (README mentions ``pip install shinka-evolve``,
+# CHANGELOG has a ``## 0.0.5 -`` section). This fork doesn't ship to
+# PyPI and the README is now a focused personal-fork README, so those
+# release gates no longer apply.
 
 
 def test_packaged_hydra_configs_live_inside_package():

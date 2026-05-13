@@ -2,6 +2,15 @@
 
 This document is the single source of truth for the `agentic-rewrite` branch. Read it before making any structural change.
 
+> **Status (2026-05-13):** all phases A–E + cleanup commits have landed.
+> The `agent-research-grounding` branch then added the three
+> research-grounding features (error_traceback + fix telemetry + Azure-aware
+> kwargs; per-island DR meta cycle; `literature_grounded` mutation arm) on
+> top, and `collapsed-agent` reorganized the repo layout. See
+> [CHANGELOG.md](CHANGELOG.md) for the branch lineage and
+> [CLAUDE.md](CLAUDE.md) for current operating instructions. This file
+> stays as the design rationale for the rewrite itself.
+
 ## Goal
 
 Rewrite ShinkaEvolve's LLM call layer and proposal loop on top of the official `openai-agents` SDK, while preserving full functional parity with the current framework (running on `shinka-azure-v1-fix`). The motivating outcome: the orchestrator becomes a thinner shell around an agent that has access to tools (apply_patch, evaluate, web_search, query_evolution_db, read_host_file, run_probe), enabling future capability additions without further per-feature plumbing.

@@ -1,18 +1,19 @@
 """Launcher for the cnot_grid_synth task.
 
-Mirrors the structure of shinkaevolve/examples/julia_prime_counting/run_evo.py
-but wires in the Azure model pool defined in configs/azure_default.yaml at
-the project root (and documented in CLAUDE.md).
+Mirrors the structure of examples/julia_prime_counting/run_evo.py but wires in
+the Azure model pool defined in configs/azure_default.yaml at the repo root
+(and documented in CLAUDE.md).
 
 Run from this directory:
 
-    cd /Users/dantongli/GIthub/Shinka/tasks/cnot_grid_synth
+    cd /Users/dantongli/GIthub/Shinka/shinkaevolve/tasks/cnot_grid_synth
     /opt/anaconda3/envs/shinka/bin/python run_evo.py
 """
 
-# Load the project-root .env BEFORE any shinka imports — shinka.env's default
-# search only checks CWD and the shinkaevolve package dir, missing our project
-# root when this file is launched from the task dir.
+# Explicitly load .env from the shinkaevolve repo root. shinka.env's default
+# search already covers the package root (which post-collapse is here), but
+# being explicit makes the launch-dir-independent behavior obvious and
+# robust if the script is launched from a different CWD.
 from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env", override=True)

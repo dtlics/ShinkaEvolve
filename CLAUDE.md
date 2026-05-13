@@ -72,6 +72,10 @@ shinka_run --task-dir tasks/<name> --results-dir tasks/<name>/results ...
 
 Per-task results live inside `tasks/<name>/results/` (gitignored). Cross-task `results/` at the repo root also gitignored.
 
+### Active user task
+
+[`tasks/cnot_grid_synth/`](tasks/cnot_grid_synth/) — CNOT-equivalent linear-function synthesis on a 2D L×L grid. EVOLVE-BLOCK in [initial.py](tasks/cnot_grid_synth/initial.py); scoring + baseline-cache + adjacency/Clifford gates in [evaluate.py](tasks/cnot_grid_synth/evaluate.py); launcher with the Azure model pool in [run_evo.py](tasks/cnot_grid_synth/run_evo.py). Read [tasks/cnot_grid_synth/README.md](tasks/cnot_grid_synth/README.md) for problem statement, depth metric, and score targets. Upstream working examples are in [examples/](examples/) — `circle_packing`, `game_2048`, `julia_prime_counting`, `novelty_generator` — same calling convention, smaller scope.
+
 ### Enabling the research-grounding features
 
 Each is opt-in via Hydra `--set`. The agent loop benefits from `max_patch_attempts=2`+ so it has room to apply→evaluate→fix:

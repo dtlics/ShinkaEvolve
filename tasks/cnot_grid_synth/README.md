@@ -82,7 +82,7 @@ Total cost per evaluation: ~270 syntheses (~25 s for the seed).
 
 ```bash
 conda activate shinka      # or use /opt/anaconda3/envs/shinka/bin/python directly
-cd /Users/dantongli/GIthub/Shinka
+cd /Users/dantongli/GIthub/Shinka/shinkaevolve
 python tasks/cnot_grid_synth/evaluate.py \
     --program_path tasks/cnot_grid_synth/initial.py \
     --results_dir /tmp/cnot_smoke
@@ -96,7 +96,7 @@ output: `correct=true`, `combined_score=0.0`, `slope ≈ 4.85`,
 ### Full evolution
 
 ```bash
-cd /Users/dantongli/GIthub/Shinka/tasks/cnot_grid_synth
+cd /Users/dantongli/GIthub/Shinka/shinkaevolve/tasks/cnot_grid_synth
 python run_evo.py
 ```
 
@@ -109,11 +109,23 @@ promise. Default num_generations: 80.
 ### Via `shinka_run` CLI (alternative)
 
 ```bash
-cd /Users/dantongli/GIthub/Shinka
+cd /Users/dantongli/GIthub/Shinka/shinkaevolve
 shinka_run --task-dir tasks/cnot_grid_synth \
-    --results_dir results/cnot_grid_synth \
+    --results-dir tasks/cnot_grid_synth/results \
     --num_generations 40 \
     --max-evaluation-jobs 2 --max-proposal-jobs 4 --max-db-workers 2
+```
+
+To enable the agentic + research-grounding features:
+
+```bash
+shinka_run --task-dir tasks/cnot_grid_synth \
+    --results-dir tasks/cnot_grid_synth/results \
+    --num_generations 30 \
+    --set evo.use_agentic_proposer=true \
+    --set evo.max_patch_attempts=2 \
+    --set evo.enable_deep_research=true \
+    --set evo.enable_literature_grounded=true
 ```
 
 ## Files

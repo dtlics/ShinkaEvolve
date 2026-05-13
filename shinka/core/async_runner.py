@@ -5352,13 +5352,33 @@ class ShinkaEvolveRunner:
                                 # total on its next iteration.
                                 dr_cycle_cost = 0.0
                                 for island_idx, brief in briefs.items():
-                                    if brief.rendered_markdown:
+                                    # Doom-remediation Fix 3: only stash
+                                    # briefs that actually contain
+                                    # content. Placeholder briefs (Stage
+                                    # C failed, DR not configured,
+                                    # budget exhausted) have
+                                    # rendered_markdown like
+                                    # "_DR pipeline did not produce
+                                    # items..._" which would otherwise
+                                    # poison the system prompt for the
+                                    # next 20 generations. Real briefs
+                                    # are those with structured items
+                                    # AND source != "placeholder".
+                                    is_real_brief = (
+                                        getattr(brief, "source", "") != "placeholder"
+                                        and bool(getattr(brief, "items", None))
+                                    )
+                                    if is_real_brief and brief.rendered_markdown:
                                         self._latest_island_briefs[island_idx] = (
                                             brief.rendered_markdown
                                         )
-                                    # Keep the structured brief so the
-                                    # literature_grounded arm can pick a
-                                    # specific BriefItem to ground in.
+                                    # Always store the structured brief
+                                    # for the literature_grounded arm
+                                    # picker + DB diagnostics, even when
+                                    # placeholder. The picker filters on
+                                    # eligible items separately, so a
+                                    # placeholder brief (items=[]) is
+                                    # harmless there.
                                     self._latest_island_brief_obj[island_idx] = brief
                                     dr_cycle_cost += float(
                                         getattr(brief, "total_cost", 0.0) or 0.0

@@ -763,6 +763,106 @@ def test_dr_brief_total_cost_aggregates_stage_a_plus_c_plus_d() -> None:
             db.close()
 
 
+# ----------------------------------------------------------------------
+# Doom-remediation Fix 3: placeholder briefs do NOT replace freeform meta.
+# The DR firing block at the orchestrator stashes brief.rendered_markdown
+# into _latest_island_briefs ONLY when the brief is real (has items AND
+# source != "placeholder"). Placeholder briefs still persist to the
+# meta_briefs SQLite table for diagnostic visibility but they don't
+# poison the sampler's prompt slot.
+# ----------------------------------------------------------------------
+
+
+def test_placeholder_brief_does_not_overwrite_latest_island_briefs() -> None:
+    """Simulate the orchestrator's DR firing block. Pre-seed
+    _latest_island_briefs[0] with a real brief (a prior cycle's
+    success). Run the DR cycle and get back a placeholder brief
+    (Stage C failed this time). Assert the prior brief is preserved —
+    the placeholder did NOT overwrite it."""
+    from types import SimpleNamespace
+
+    # Pre-seed: a real brief is already in place from a prior cycle.
+    prior_real_markdown = "**Idea 1**: real and valuable"
+    latest_island_briefs = {0: prior_real_markdown}
+    latest_island_brief_obj: dict = {}
+    dr_cycle_cost = 0.0
+
+    # New cycle returns a placeholder brief (Stage C failed). This is
+    # the shape DeepResearchSummarizer._placeholder_brief produces.
+    placeholder_brief = DRBrief(
+        island_idx=0,
+        generation=20,
+        items=[],
+        candidate_question="Q?",
+        drift_score=0.9,
+        source="placeholder",
+        rendered_markdown=(
+            "_DR pipeline did not produce items this cycle: stage_c_failed: <exc>._"
+            "\n\n_Candidate question:_ Q?"
+        ),
+        cost=0.0,
+        stage_a_cost=0.005,
+    )
+    briefs = {0: placeholder_brief}
+
+    # Replicate the orchestrator's DR firing block stash logic.
+    # (The actual block is in async_runner.py; this test exercises
+    # the contract independently to keep the test focused.)
+    for island_idx, brief in briefs.items():
+        is_real_brief = (
+            getattr(brief, "source", "") != "placeholder"
+            and bool(getattr(brief, "items", None))
+        )
+        if is_real_brief and brief.rendered_markdown:
+            latest_island_briefs[island_idx] = brief.rendered_markdown
+        latest_island_brief_obj[island_idx] = brief
+        dr_cycle_cost += float(getattr(brief, "total_cost", 0.0) or 0.0)
+
+    # Prior real brief still in place.
+    assert latest_island_briefs[0] == prior_real_markdown
+    # Placeholder brief NOT promoted to _latest_island_briefs[0].
+    assert "DR pipeline did not produce items" not in latest_island_briefs[0]
+    # But the structured brief object IS recorded for diagnostics +
+    # the lit_grounded picker (which filters on item.confirmed and
+    # non-empty reference_snippet separately).
+    assert latest_island_brief_obj[0] is placeholder_brief
+    # Stage A cost still surfaces in the budget tally (Fix 2 contract).
+    assert dr_cycle_cost == pytest.approx(0.005)
+
+
+def test_real_brief_does_overwrite_latest_island_briefs() -> None:
+    """The flip side of the placeholder gate: a real brief (with items
+    and source="fresh" or "cache_hit") MUST overwrite the prior
+    entry. Otherwise the gate would also block valid updates."""
+    latest_island_briefs = {0: "old prior brief markdown"}
+    latest_island_brief_obj: dict = {}
+
+    fresh_brief = DRBrief(
+        island_idx=0,
+        generation=40,
+        items=[BriefItem(idea="new technique", reference_snippet="snip")],
+        candidate_question="Q?",
+        drift_score=0.9,
+        source="fresh",
+        rendered_markdown="**Idea 1**: new technique",
+        cost=5.0,
+        stage_a_cost=0.01,
+    )
+    briefs = {0: fresh_brief}
+
+    for island_idx, brief in briefs.items():
+        is_real_brief = (
+            getattr(brief, "source", "") != "placeholder"
+            and bool(getattr(brief, "items", None))
+        )
+        if is_real_brief and brief.rendered_markdown:
+            latest_island_briefs[island_idx] = brief.rendered_markdown
+        latest_island_brief_obj[island_idx] = brief
+
+    assert latest_island_briefs[0] == "**Idea 1**: new technique"
+    assert latest_island_brief_obj[0] is fresh_brief
+
+
 def test_dr_brief_placeholder_carries_stage_a_cost() -> None:
     """Even when DR aborts to a placeholder (Stage C failure, budget
     exhausted, etc.), the Stage A judge call already happened and was

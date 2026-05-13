@@ -1,18 +1,20 @@
-"""``evaluate_tool`` — run the task's evaluator against the current program.
+"""``evaluate_tool`` — manual evaluator invocation. Rarely needed.
 
-The agent calls this after ``apply_patch_tool`` has produced a
-candidate solution. The tool invokes a pre-bound evaluator callable
-that the orchestrator stashed on ``ShinkaToolContext.evaluator`` (the
-orchestrator already knows the task's program path, results dir,
-``aggregate_metrics_fn``, ``validate_fn``, etc.). The agent doesn't
-need to know any of that — it just calls ``evaluate()`` and reads
-back the score.
+**Doom-remediation Fix 1** made every successful ``apply_patch_tool``
+auto-evaluate the resulting code and return the eval result in its
+own response. The agent therefore does not need to call ``evaluate``
+explicitly during a normal apply→fix→apply loop.
 
-This is where the cost-per-generation can climb: evaluations may take
-seconds to many minutes depending on the task. The agent should call
-this sparingly — typically once per generation, after it's confident
-in a candidate. ``max_turns`` in the runner config bounds runaway
-loops.
+This tool remains registered for edge cases — re-evaluating the same
+code with different seeds, validating intermediate state without
+applying another patch, etc. It is dropped from the default
+``agentic_tools`` list in ``EvolutionConfig``; tasks that want manual
+control can opt it back in via config.
+
+The tool body lives on ``_evaluate_impl`` and is invoked from
+``apply_patch_tool`` (auto-eval) and from the ``@function_tool``
+wrapper below (manual). Both paths share the same per-call telemetry
+contract.
 
 Return format
 -------------
@@ -28,12 +30,6 @@ Always a single string the LLM can read on its next turn:
 
 * On infrastructure error (no evaluator bound, tool exception):
   ``"Error: <message>"``
-
-The agent should use combined_score to decide whether further patches
-are warranted. A high score with ``correct=true`` signals the
-generation is ready to be reported as the final state; a low score
-or ``correct=false`` is feedback for the next ``apply_patch_tool``
-call.
 """
 
 from __future__ import annotations
@@ -116,17 +112,12 @@ def _compact_metrics_json(metrics: Any) -> str:
 async def _evaluate_tool(
     ctx: RunContextWrapper[ShinkaToolContext],
 ) -> str:
-    """Run the task's evaluator against the currently-patched program.
+    """Manually re-evaluate the current program. Rarely needed.
 
-    Call this after you've applied a patch you believe is an
-    improvement. The evaluator runs the patched program (possibly
-    multiple times depending on the task config), validates the
-    output, computes a combined_score, and returns the result.
-
-    Use the score to decide whether more patches are warranted. Be
-    judicious — each evaluation can take from seconds to many
-    minutes depending on the task. One or two calls per generation
-    is typical.
+    ``apply_patch`` already auto-evaluates after every successful
+    apply, so use this tool ONLY for edge cases like re-running the
+    evaluator with different seeds or validating intermediate state
+    without applying a new patch.
 
     Returns:
         ``"OK: combined_score=...; correct=True; details=..."`` on

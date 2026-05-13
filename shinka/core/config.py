@@ -64,18 +64,25 @@ class EvolutionConfig:
     use_agentic_proposer: bool = False
 
     # Tools exposed to the agent when use_agentic_proposer=True.
-    # Default is ``apply_patch`` + ``evaluate`` so the LLM can iterate
-    # apply→evaluate→reflect inside one generation (Phase E). The eval
-    # closure is wired up by ``_run_agent_proposal`` and its result is
-    # cached on the tool context so the orchestrator skips re-evaluating
-    # after the agent loop returns.
     #
-    # Add ``read_host_file`` to let the agent peek at other files in the
-    # task directory, ``query_evolution_db`` to read past generation
-    # history, or ``web_search`` to enable OpenAI/Azure server-side web
-    # search (incurs per-call $0.01-0.03 plus content-token cost).
+    # Default is JUST ``apply_patch`` because (doom-remediation Fix 1)
+    # every successful apply_patch now auto-runs the evaluator and
+    # returns the score in its tool response. The agent's loop is
+    # therefore: emit apply_patch → see apply+eval result → emit
+    # apply_patch (fix) if needed → ... → on correct=True emit final
+    # structured output. The LLM never spends a turn deciding to call
+    # evaluate; the framework guarantees every code change is scored.
+    #
+    # ``evaluate`` is still registered in the tool registry — opt it
+    # back in here for edge cases (re-eval with different seeds,
+    # validating intermediate state without applying a new patch).
+    # Add ``read_host_file`` to let the agent peek at other files in
+    # the task directory, ``query_evolution_db`` to read past
+    # generation history, or ``web_search`` to enable OpenAI/Azure
+    # server-side web search (incurs per-call $0.01-0.03 plus
+    # content-token cost).
     agentic_tools: List[str] = field(
-        default_factory=lambda: ["apply_patch", "evaluate"]
+        default_factory=lambda: ["apply_patch"]
     )
 
     # Azure-aware LLM call kwargs (phase 1 of research-grounding).

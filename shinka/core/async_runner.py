@@ -245,19 +245,30 @@ def _summarize_fix_telemetry(
     Program row with a single ``combined_score``). This helper extracts
     the in-loop dynamics from the ``ShinkaAgentHooks``-populated trace.
 
-    Keys returned:
-    * ``apply_attempts``: number of ``apply_patch`` tool calls, success
-      or fail. Multiple attempts indicates iteration; single attempt
-      indicates a one-shot fix.
-    * ``eval_attempts``: number of ``evaluate`` tool calls.
-    * ``had_failure_then_success``: True iff a failing ``evaluate``
-      entry (correct=False) appears in the trace earlier than a passing
-      one — i.e., the agent fixed an error within the run.
-    * ``final_correct``: success state of the final ``evaluate`` call,
-      or ``None`` when the agent never invoked ``evaluate``.
+    Two trace shapes are supported:
 
-    Tools other than ``apply_patch`` / ``evaluate`` are ignored — they
-    don't speak to fix-skill (e.g., web_search, read_host_file).
+    1. **Auto-eval (doom-remediation Fix 1, default):** ``apply_patch``
+       runs the evaluator after every successful apply. The trace has
+       only ``apply_patch`` entries; each carries
+       ``eval_correct`` / ``eval_combined_score`` in its extras.
+    2. **Manual evaluate (legacy / opt-in):** ``apply_patch`` and
+       ``evaluate`` are separate trace entries. Used when a task
+       includes ``"evaluate"`` back in ``agentic_tools``.
+
+    Keys returned:
+    * ``apply_attempts``: number of ``apply_patch`` calls (success or
+      fail).
+    * ``eval_attempts``: number of evaluations actually executed
+      (counting both auto-evals on apply and manual ``evaluate`` calls).
+    * ``had_failure_then_success``: True iff a failing eval appears
+      earlier in the trace than a passing one — i.e., the agent fixed
+      an error within the run.
+    * ``final_correct``: outcome of the LAST evaluation in the trace,
+      or ``None`` when the agent never produced an eval result (e.g.
+      every apply_patch failed before reaching the auto-eval step).
+
+    Tools other than ``apply_patch`` / ``evaluate`` are ignored —
+    they don't speak to fix-skill (e.g., web_search, read_host_file).
     """
     apply_attempts = 0
     eval_attempts = 0
@@ -267,10 +278,26 @@ def _summarize_fix_telemetry(
 
     for entry in tool_call_trace:
         name = entry.get("name")
-        success = bool(entry.get("success"))
         if name == "apply_patch":
             apply_attempts += 1
+            # Fix 1: auto-eval rides on the apply_patch trace entry.
+            # ``eval_correct`` is absent when apply failed (no eval
+            # ran) or when this trace pre-dates Fix 1.
+            eval_correct = entry.get("eval_correct")
+            if eval_correct is None:
+                continue
+            eval_attempts += 1
+            final_correct = bool(eval_correct)
+            if eval_correct and saw_eval_fail:
+                had_failure_then_success = True
+            if not eval_correct:
+                saw_eval_fail = True
         elif name == "evaluate":
+            # Manual evaluate (only present when the user opted
+            # ``evaluate`` back into agentic_tools). Backward-compat
+            # path: use the hook-derived ``success`` field as the
+            # correctness signal.
+            success = bool(entry.get("success"))
             eval_attempts += 1
             final_correct = success
             if success and saw_eval_fail:

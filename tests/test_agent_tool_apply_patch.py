@@ -226,3 +226,238 @@ def test_function_tool_schema_excludes_ctx_param() -> None:
     properties = schema.get("properties", {})
     assert set(properties.keys()) == {"patch_text", "patch_type"}
     assert "ctx" not in properties
+
+
+# ----------------------------------------------------------------------
+# Doom-remediation Fix 1: auto-eval inside apply_patch.
+# Every successful apply runs the evaluator and the result is appended
+# to the tool return so the agent sees apply + eval in a single
+# response, never has to call ``evaluate`` itself, and the
+# ``last_eval_result`` field is structurally guaranteed fresh for the
+# orchestrator's cache-and-skip path.
+# ----------------------------------------------------------------------
+
+
+def test_auto_eval_after_successful_apply_appends_eval_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful apply + successful eval → tool return contains both
+    the apply message AND the EVAL section. ``ctx.last_eval_result``
+    is populated by the evaluator path."""
+    state = _ctx()
+    mock_apply = AsyncMock(
+        return_value=(
+            "def f():\n    return 2\n",
+            1,
+            "/tmp/gen-0/evolve.py",
+            None,
+            "patch",
+            "/tmp/gen-0/patch.diff",
+        )
+    )
+    monkeypatch.setattr(
+        "shinka.llm.agent.tools.apply_patch.apply_patch_async", mock_apply
+    )
+
+    # Wire an evaluator that returns (metrics, correct=True, first_error=None).
+    eval_metrics = {"combined_score": 0.87, "execution_time_mean": 0.42}
+    eval_results = {"correct": {"correct": True}, "metrics": eval_metrics}
+
+    async def fake_evaluator():
+        # Production _make_agent_evaluator sets last_eval_result before
+        # returning; mirror that contract here.
+        state.last_eval_result = eval_results
+        state.last_eval_rtime = 0.5
+        return eval_metrics, True, None
+
+    state.evaluator = fake_evaluator
+
+    result = asyncio.run(_apply_patch_impl(state, "diff content"))
+
+    # Both apply OK and EVAL section present.
+    assert result.startswith("OK: applied 1 change")
+    assert "EVAL: " in result
+    assert "OK: combined_score=0.87" in result
+    assert "correct=True" in result
+
+    # ctx.last_eval_result is set (fresh — orchestrator can trust the cache).
+    assert state.last_eval_result is eval_results
+
+    # extras carry the eval signal for fix_telemetry to consume.
+    extras = state.last_tool_extras
+    assert extras is not None
+    assert extras["patch_type"] == "diff"
+    assert extras["num_applied"] == 1
+    assert extras["eval_correct"] is True
+    assert extras["eval_combined_score"] == 0.87
+
+
+def test_auto_eval_failed_eval_marks_eval_correct_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Successful apply + failed eval (correct=False) → tool return
+    is ``"OK: applied ... \\nEVAL: FAILED: ..."``; the hook will
+    classify the apply itself as successful (prefix=OK), but the
+    extras record ``eval_correct=False`` so fix_telemetry sees the
+    failure correctly."""
+    state = _ctx()
+    mock_apply = AsyncMock(
+        return_value=(
+            "def f():\n    raise ValueError('bad')\n",
+            1,
+            "/tmp/gen-0/evolve.py",
+            None,
+            "patch",
+            "/tmp/gen-0/patch.diff",
+        )
+    )
+    monkeypatch.setattr(
+        "shinka.llm.agent.tools.apply_patch.apply_patch_async", mock_apply
+    )
+
+    async def fake_evaluator():
+        state.last_eval_result = {
+            "correct": {"correct": False},
+            "metrics": {"combined_score": 0.0},
+        }
+        state.last_eval_rtime = 0.3
+        return {"combined_score": 0.0}, False, "Validation failed: bad"
+
+    state.evaluator = fake_evaluator
+
+    result = asyncio.run(_apply_patch_impl(state, "broken diff"))
+
+    assert result.startswith("OK: applied 1 change")  # apply still succeeded
+    assert "EVAL: FAILED: " in result
+    assert "Validation failed: bad" in result
+
+    extras = state.last_tool_extras
+    assert extras is not None
+    assert extras["eval_correct"] is False
+    assert extras["eval_combined_score"] == 0.0
+
+
+def test_failed_apply_does_not_run_eval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When apply itself fails (parse error, etc.), no eval runs —
+    there's no new code on disk to evaluate. Verify the evaluator
+    callable is never invoked."""
+    state = _ctx()
+    mock_apply = AsyncMock(
+        return_value=(None, 0, None, "Could not parse diff hunk", None, None)
+    )
+    monkeypatch.setattr(
+        "shinka.llm.agent.tools.apply_patch.apply_patch_async", mock_apply
+    )
+
+    fake_evaluator = AsyncMock()
+    state.evaluator = fake_evaluator
+
+    result = asyncio.run(_apply_patch_impl(state, "malformed"))
+
+    assert result.startswith("Error:")
+    assert "Could not parse diff hunk" in result
+    fake_evaluator.assert_not_awaited()
+    # current_code is unchanged on apply failure.
+    assert state.current_code == "def f():\n    return 1\n"
+    # last_eval_result stays None — no eval ran.
+    assert state.last_eval_result is None
+
+
+def test_apply_without_evaluator_returns_only_apply_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``ctx.evaluator is None`` (some unit-test contexts, or any
+    runner path that doesn't wire one), the tool returns just the
+    apply success message — no EVAL section, no crash. Graceful
+    degradation."""
+    state = _ctx()
+    # state.evaluator stays None (the default).
+    mock_apply = AsyncMock(
+        return_value=(
+            "def f():\n    return 2\n",
+            1,
+            "/tmp/gen-0/evolve.py",
+            None,
+            "patch",
+            "/tmp/gen-0/patch.diff",
+        )
+    )
+    monkeypatch.setattr(
+        "shinka.llm.agent.tools.apply_patch.apply_patch_async", mock_apply
+    )
+
+    result = asyncio.run(_apply_patch_impl(state, "diff content"))
+
+    assert result.startswith("OK: applied 1 change")
+    assert "EVAL:" not in result  # no eval section appended
+    # No eval extras either; the apply-only path doesn't fabricate them.
+    extras = state.last_tool_extras
+    assert extras is not None
+    assert "eval_correct" not in extras
+    assert "eval_combined_score" not in extras
+
+
+def test_fix_telemetry_reads_eval_outcomes_from_apply_patch_entries() -> None:
+    """After Fix 1 the trace has only ``apply_patch`` entries (no
+    separate ``evaluate``). fix_telemetry must read ``eval_correct``
+    from the extras merged into each apply entry."""
+    from shinka.core.async_runner import _summarize_fix_telemetry
+
+    # Apply 1 succeeded but eval failed; apply 2 succeeded and eval
+    # passed. Classic "fixed within the loop" pattern, expressed in
+    # the new trace shape (no evaluate entries).
+    trace = [
+        {
+            "name": "apply_patch",
+            "success": True,
+            "patch_type": "diff",
+            "num_applied": 1,
+            "eval_correct": False,
+            "eval_combined_score": 0.0,
+        },
+        {
+            "name": "apply_patch",
+            "success": True,
+            "patch_type": "diff",
+            "num_applied": 1,
+            "eval_correct": True,
+            "eval_combined_score": 0.85,
+        },
+    ]
+    summary = _summarize_fix_telemetry(trace)
+    assert summary == {
+        "apply_attempts": 2,
+        "eval_attempts": 2,
+        "had_failure_then_success": True,
+        "final_correct": True,
+    }
+
+
+def test_fix_telemetry_apply_without_eval_does_not_count_as_eval_attempt() -> None:
+    """When apply failed (no eval ran), the trace entry has no
+    ``eval_correct`` key. fix_telemetry must NOT count it as an
+    eval attempt."""
+    from shinka.core.async_runner import _summarize_fix_telemetry
+
+    trace = [
+        # Apply failed → eval never ran → no eval_correct field.
+        {"name": "apply_patch", "success": False, "error": "parse failure"},
+        # Apply succeeded, eval ran and passed.
+        {
+            "name": "apply_patch",
+            "success": True,
+            "patch_type": "diff",
+            "num_applied": 1,
+            "eval_correct": True,
+            "eval_combined_score": 0.9,
+        },
+    ]
+    summary = _summarize_fix_telemetry(trace)
+    assert summary == {
+        "apply_attempts": 2,  # both apply calls count
+        "eval_attempts": 1,   # only the second produced an eval result
+        "had_failure_then_success": False,  # no failing eval to fix
+        "final_correct": True,
+    }

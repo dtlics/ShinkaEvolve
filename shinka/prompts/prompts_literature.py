@@ -36,8 +36,12 @@ a referenceable source.
 
 Constraints
 -----------
-1. Use the ``apply_patch`` tool to make the edit, then ``evaluate`` to
-   check the result. Iterate within your turn budget.
+1. Use the ``apply_patch`` tool to make the edit. ``apply_patch``
+   automatically evaluates the resulting code and returns the score
+   in its response — you do not need to call a separate evaluator.
+   If the eval comes back with ``correct=True``, emit your final
+   ``<NAME>``/``<DESCRIPTION>`` output to finish. If ``correct=False``,
+   call ``apply_patch`` again with a fix.
 2. You have the ``web_search`` tool. Use it ONLY to confirm or extend
    the reference material below — do NOT pursue alternative ideas,
    even if you think of better ones. The orchestrator decides later
@@ -93,5 +97,5 @@ do not pursue alternative ideas. If you cannot confirm the reference
 or it does not apply to this program, return the parent unchanged
 with a one-sentence ``<DESCRIPTION>`` explaining why.
 
-Iterate via ``apply_patch`` + ``evaluate`` within your turn budget.
+Iterate via ``apply_patch`` (which auto-evaluates) within your turn budget.
 """

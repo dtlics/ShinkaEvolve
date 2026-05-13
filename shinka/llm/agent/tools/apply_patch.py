@@ -1,21 +1,34 @@
-"""``apply_patch_tool`` — apply a code patch and update the run state.
+"""``apply_patch_tool`` — apply a code patch and run the evaluator.
 
 Wraps the existing ``shinka.edit.async_apply.apply_patch_async`` so the
 agent can decide *when* to apply patches (and how many times), rather
 than the orchestrator firing exactly one patch attempt per generation
 the way ``_run_patch_async`` does today.
 
+Doom-remediation Fix 1: every successful apply is immediately followed
+by a deterministic evaluator call. The eval result is appended to the
+tool's return string so the agent sees the score on its next turn
+without having to call a separate ``evaluate`` tool. This makes
+"every code change is evaluated" a structural invariant (the agent
+can't commit a change without the framework scoring it). It also
+guarantees ``ctx.last_eval_result`` is always the eval of the latest
+code on disk — the orchestrator's cache-and-skip path is therefore
+always fresh.
+
 On success the tool:
 - Updates ``ctx.current_code`` with the modified source.
-- The underlying ``apply_patch_async`` has already written the
-  modified code to the patch directory; the agent doesn't need to
-  know the filename — the path is reported back in the success
-  message.
+- Writes the modified code to the patch directory.
+- Runs the evaluator (if ``ctx.evaluator`` is set) against the new
+  code; caches the result on ``ctx.last_eval_result``.
+- Returns ``"OK: applied N change(s) ... EVAL: <eval result>"``.
 
-On failure the tool returns the error string so the agent can
-self-correct on its next turn (same "feed the error back" pattern
-shinka's existing patch-retry loop uses, but now driven by the agent
-rather than the orchestrator).
+On apply failure the tool returns ``"Error: <message>"`` and does NOT
+run the evaluator (no code on disk to evaluate). The agent feeds the
+error back into its next apply_patch.
+
+If ``ctx.evaluator`` is ``None`` (legacy paths and tests that don't
+wire an evaluator), the tool returns just the apply success message —
+no eval section appended. This keeps unit-test ergonomics simple.
 
 Testing
 -------
@@ -36,6 +49,7 @@ from agents import RunContextWrapper, function_tool
 from shinka.edit.async_apply import apply_patch_async
 
 from .context import ShinkaToolContext
+from .evaluate import _evaluate_impl
 from .registry import register_tool
 
 logger = logging.getLogger(__name__)
@@ -111,15 +125,46 @@ async def _apply_patch_impl(
     state.last_successful_num_applied = num_applied
     state.last_successful_patch_path = str(patch_path) if patch_path else None
 
+    apply_msg = (
+        f"OK: applied {num_applied} change(s) via {patch_type} patch. "
+        f"Updated program written to {output_path}."
+    )
+
+    # Doom-remediation Fix 1: auto-eval after every successful apply.
+    # The agent never has to call evaluate explicitly; the framework
+    # guarantees the just-applied code is scored, and the result is
+    # appended to the tool return so the agent sees it next turn.
+    #
+    # If no evaluator is wired (legacy paths, unit tests), skip the
+    # eval step and return only the apply message. Downstream
+    # consumers that read ``last_tool_extras["eval_correct"]`` for
+    # fix-telemetry will see it absent and treat the call as
+    # eval-not-run.
+    eval_extras: dict = {}
+    eval_msg_part = ""
+    if state.evaluator is not None:
+        eval_result_str = await _evaluate_impl(state)
+        eval_msg_part = f"\nEVAL: {eval_result_str}"
+        # The evaluator path already set state.last_eval_result /
+        # state.last_eval_rtime and state.last_tool_extras (with
+        # combined_score / metrics_keys). We extract a small subset
+        # to merge into the apply_patch trace entry so fix_telemetry
+        # can read eval outcomes from the apply_patch entries
+        # directly (no separate ``evaluate`` trace entry exists in
+        # the auto-eval flow).
+        prior_extras = state.last_tool_extras or {}
+        eval_extras = {
+            "eval_combined_score": prior_extras.get("combined_score"),
+            "eval_correct": eval_result_str.startswith("OK"),
+        }
+
     state.last_tool_extras = {
         "patch_type": patch_type,
         "num_applied": num_applied,
         "output_path": str(output_path) if output_path else None,
+        **eval_extras,
     }
-    return (
-        f"OK: applied {num_applied} change(s) via {patch_type} patch. "
-        f"Updated program written to {output_path}."
-    )
+    return apply_msg + eval_msg_part
 
 
 @function_tool
@@ -128,11 +173,14 @@ async def _apply_patch_tool(
     patch_text: str,
     patch_type: str = "diff",
 ) -> str:
-    """Apply a code change to the current working solution.
+    """Apply a code change AND automatically evaluate the result.
 
     Use this tool to mutate the program toward a better solution. The
-    patched code becomes the new current state and is written to the
-    patch directory ready for evaluation.
+    patched code becomes the new current state, is written to the
+    patch directory, and is then **automatically evaluated**. You see
+    both the apply outcome and the eval outcome (score + correct flag)
+    in this tool's return string — there is no separate evaluate step
+    you need to remember to call.
 
     **Format**: the system prompt (above) specifies the exact format
     you must use. Pass that content as ``patch_text`` verbatim and
@@ -156,10 +204,20 @@ async def _apply_patch_tool(
         patch_type: One of ``"diff"`` (default), ``"full"``, ``"cross"``.
 
     Returns:
-        A short status string. ``"OK: applied N change(s). ..."`` on
-        success, or ``"Error: <message>"`` on failure. On error, the
-        current code is unchanged and you should fix the patch and
-        try again.
+        On apply+eval success:
+        ``"OK: applied N change(s) ... \\nEVAL: OK: combined_score=...; correct=True; details=..."``
+
+        On apply success + eval failure (your patch ran but failed
+        validation or scored badly):
+        ``"OK: applied N change(s) ... \\nEVAL: FAILED: <err>; partial_metrics=..."``
+        — read the EVAL section, write a fix patch, call this tool
+        again. Repeat until you see ``correct=True`` or you run out
+        of turns.
+
+        On apply failure:
+        ``"Error: <apply failure message>"`` — the eval was NOT run
+        (there's no new code on disk). Fix your patch text and try
+        again.
     """
     return await _apply_patch_impl(ctx.context, patch_text, patch_type)
 

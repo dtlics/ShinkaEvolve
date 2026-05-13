@@ -432,13 +432,15 @@ def test_agentic_tools_empty_list_falls_back_to_apply_patch_and_evaluate(
     assert len(tools) == 2
 
 
-def test_agentic_tools_default_is_apply_patch_and_evaluate() -> None:
-    """The config default is ``["apply_patch", "evaluate"]`` (Phase E):
-    the agent can apply patches and call the evaluator inline."""
+def test_agentic_tools_default_is_just_apply_patch() -> None:
+    """The config default is ``["apply_patch"]`` after doom-remediation
+    Fix 1: every successful apply auto-runs the evaluator, so the LLM
+    never needs to call ``evaluate`` explicitly. Tasks that want
+    manual eval control can opt ``"evaluate"`` back in via config."""
     from shinka.core.config import EvolutionConfig
 
     config = EvolutionConfig()
-    assert config.agentic_tools == ["apply_patch", "evaluate"]
+    assert config.agentic_tools == ["apply_patch"]
 
 
 def test_config_flag_default_routes_to_legacy() -> None:

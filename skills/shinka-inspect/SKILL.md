@@ -14,7 +14,7 @@ Use this skill when:
 
 Do not use this skill when:
 - You still need to scaffold a task (`shinka-setup`)
-- You need to run evolution batches (`shinka-run`)
+- You need to run evolution (use the **shinka-orchestrator** outer loop)
 
 ## What it does
 - Uses `shinka.utils.load_programs_to_df` to read program records

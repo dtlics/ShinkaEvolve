@@ -1,5 +1,10 @@
 # taxonomy.md — Four-Cell Classification of Shinka's Decision Points
 
+> **HISTORICAL design doc** (step 2 of the rewrite). The cell assignments and file
+> references below reflect the pre-prune codebase; the *implemented* result is the
+> mutable `orchestrator/scripts/*` set documented in
+> [orchestrator/SKILL.md](orchestrator/SKILL.md). Kept for design rationale.
+
 > Step 2 of the rewrite. From `AUDIT.md`, every decision point is placed into one
 > of four cells along two axes: **does it embed an LLM call?** × **may the
 > orchestrator rewrite it mid-run?** This file is the contract for what becomes a

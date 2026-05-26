@@ -19,7 +19,7 @@ This is the alternative starting point to `shinka-setup`:
 > `orchestrator/harness/run_window.py`. Use `scripts/orchestrator_run.json` as
 > the run-config starter.
 
-After conversion, the user should still be able to use `shinka-run`.
+After conversion, run evolution via the **shinka-orchestrator** outer loop (`orchestrator/SKILL.md`), not a per-task runner.
 
 ## When to Use
 Invoke this skill when the user:
@@ -29,7 +29,7 @@ Invoke this skill when the user:
 
 Do not use this skill when:
 - The user wants a brand-new task scaffold from only a natural-language description
-- `evaluate.py` and `initial.<ext>` already exist and the user only wants to launch evolution; use `shinka-run`
+- `evaluate.py` and `initial.<ext>` already exist and the user only wants to launch evolution; use the **shinka-orchestrator** outer loop
 
 ## User Inputs
 Start from freeform instructions, then ask follow-ups only if high-impact details are missing.
@@ -46,10 +46,9 @@ Generate a sidecar task directory at `./shinka_task/` unless the user requests a
 
 The task directory should contain:
 - `evaluate.py`
-- `run_evo.py`
-- `shinka.yaml`
 - `initial.<ext>`
 - A copied snapshot of the minimal runnable source subtree needed for evaluation
+- (the run itself is configured by an `orchestrator_run.json`, not a per-task `run_evo.py`/`shinka.yaml`)
 
 Do not edit the original source tree unless the user explicitly requests in-place conversion.
 
@@ -69,21 +68,21 @@ Do not edit the original source tree unless the user explicitly requests in-plac
 5. Rewrite the snapshot into a stable Shinka contract.
    - Preserve original behavior outside the evolvable region.
    - Keep CLI behavior intact where practical.
-   - Ensure the evolvable candidate entry file is named `initial.<ext>` so `shinka-run` can detect it.
+   - Ensure the evolvable candidate entry file is named `initial.<ext>` so the run config can point at it.
    - Add tight `EVOLVE-BLOCK-START` / `EVOLVE-BLOCK-END` markers.
 6. Generate the evaluator path.
    - Python: prefer exposing `run_experiment(...)` and use `run_shinka_eval`.
    - Non-Python: use `subprocess` and write `metrics.json` plus `correct.json`.
-7. Generate `run_evo.py` and `shinka.yaml`.
-   - Ensure `init_program_path` and `language` match the candidate file.
-   - Keep the output directly compatible with `shinka-run`.
+7. Write the run config (`orchestrator_run.json`).
+   - Copy `scripts/orchestrator_run.json`; set `task.eval_program_path` /
+     `task.init_program_path` / `task.language` to match the candidate file.
+   - Set `budget_usd`, the Azure `evo.llm_models`, and a precise `task_sys_msg`.
 8. Smoke test before handoff.
    - Run `python evaluate.py --program_path <initial file> --results_dir /tmp/shinka_convert_smoke`
    - Confirm evaluator runs without exceptions.
    - Confirm required metrics/correctness outputs are written.
-9. Ask the user for the next step.
-   - Either run evolution manually
-   - Or use the `shinka-run` skill
+9. Hand off to the **shinka-orchestrator** outer loop to run evolution
+   (`python orchestrator/harness/run_window.py --config <run>/run.json --until-decision`).
 
 ## Conversion Strategy by Language
 ### Python
@@ -169,11 +168,10 @@ def main(program_path: str, results_dir: str):
 ```
 
 ## Bundled Assets
-- Use `scripts/run_evo.py` as the starting runner template
-- Use `scripts/shinka.yaml` as the starting config template
+- Use `scripts/orchestrator_run.json` as the run-config starter
 
 ## Notes
 - Keep evolve regions tight; do not make the whole project mutable by default
 - Preserve correctness checks outside the evolve region where possible
 - Prefer deterministic evaluation and stable seeds
-- If the converted task is ready, offer to continue with `shinka-run`
+- If the converted task is ready, offer to continue with the **shinka-orchestrator** outer loop

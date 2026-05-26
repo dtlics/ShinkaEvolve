@@ -13,11 +13,7 @@
 ## Testing
 
 - Commands run:
-  - `uv run ruff check tests --exclude tests/file.py`
-  - `uv run mypy --follow-imports=skip --ignore-missing-imports tests/test_*.py tests/conftest.py`
-  - `uv run --with pytest-cov pytest -q -m "not requires_secrets" --cov=shinka --cov-report=term-missing --cov-report=xml:coverage.xml`
-- Optional secret-backed tests:
-  - `uv run pytest -q -m "requires_secrets"`
+  - `python -m pytest orchestrator/tests/ -q`   # offline parity / smoke / improvements
 - Results:
 
 ## Risks and compatibility
@@ -34,7 +30,6 @@ If this PR changes the core program evolution pipeline, provide:
 - Metric comparison
 - Short interpretation
 
-## Docs and UI
+## Docs
 
-- Docs updated if needed
-- Screenshots attached if UI/WebUI behavior changed
+- Docs updated if needed (CLAUDE.md / orchestrator/SKILL.md / README)

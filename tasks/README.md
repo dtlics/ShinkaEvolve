@@ -6,28 +6,37 @@ Each subdirectory here is a self-contained ShinkaEvolve task. Use the `shinka-se
 
 ```
 tasks/<task_name>/
-├── initial.<ext>        # seed solution; mark the optimizable region with EVOLVE-BLOCK markers
-├── evaluate.py          # scoring harness; returns metrics dict for shinka
-├── run_evo.py           # optional async runner (Python entry point)
-├── shinka_config.yaml   # optional per-task overrides (model list, generations, budget)
-└── results/             # gitignored — per-task run artifacts (evolution_db.sqlite, logs, plots)
+├── initial.<ext>          # seed solution; mark the optimizable region with EVOLVE-BLOCK markers
+├── evaluate.py            # scoring harness; returns the metrics dict for shinka
+├── results/               # gitignored — per-task run artifacts (programs.sqlite, journal/, logs)
+└── (run config)           # an orchestrator_run.json lives next to the run, not checked in
 ```
 
-## Running a task
+Only `initial.<ext>` + `evaluate.py` are the task contract. There is no per-task
+`run_evo.py` / `shinka.yaml` anymore — the run is configured by an
+`orchestrator_run.json` (the `shinka-setup`/`shinka-convert` skills emit a starter).
 
-From this repo root, with the `shinka` conda env activated:
+## Running a task (you are the orchestrator)
+
+From this repo root, with the `shinka` conda env activated, point a run config at
+the task's `evaluate.py` + `initial.<ext>` and drive windows — see
+[../orchestrator/SKILL.md](../orchestrator/SKILL.md):
 
 ```bash
-conda activate shinka                  # cwd: /Users/dantongli/GIthub/Shinka/shinkaevolve
-shinka_run --task-dir tasks/<task_name> --results-dir tasks/<task_name>/results ...
+conda activate shinka
+python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
 ```
 
-Per-task `results/` lives inside the task directory (gitignored). The flag composition for the agentic + research-grounding features is in [../CLAUDE.md](../CLAUDE.md).
+The inner loop runs windows autonomously and returns to you on stagnation or a
+window cap; the budget is hard-capped in code via `budget_usd`. Per-task
+`results/` lives inside the task directory (gitignored).
 
 ## Existing tasks
 
 * [cnot_grid_synth/](cnot_grid_synth/) — CNOT-equivalent linear-function synthesis on a 2D L×L grid (Clifford circuits, score = baseline_slope − candidate_slope). Active user task.
 
-## Upstream references
+## Reference example
 
-See [`../examples/`](../examples/) for upstream working references (circle_packing, game_2048, julia_prime_counting, novelty_generator) — same calling conventions, smaller scope.
+See [`../examples/circle_packing/`](../examples/circle_packing/) — the small
+reference task that drives the orchestrator smoke test (same calling conventions,
+smaller scope).

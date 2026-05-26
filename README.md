@@ -26,7 +26,7 @@ orchestrator/        the outer loop
   strategy_history/  append-only audit of every deployed strategy version
   subagents/         debug-agent, archive-analyst
   tests/             parity / improvements / smoke (offline, no API)
-shinka/              slimmed framework source (Azure-only) — pip install -e .
+shinka/              slimmed framework source (Azure-only) — imported in-place, no install
 tasks/               user tasks (evaluate.py + initial.<ext>)
 examples/circle_packing/  reference task used by the smoke test
 skills/              Claude Code skills: shinka-orchestrator (the outer loop),
@@ -38,14 +38,18 @@ AUDIT.md, taxonomy.md     design map of the rewrite
 ## Quick start
 
 ```bash
-conda activate shinka                 # python 3.11
-pip install -e .                      # editable install
+conda activate shinka                 # python 3.11 (deps from pyproject)
 cp .env.example .env                  # fill in the two Azure resources' keys
 python scripts/test_azure.py          # smoke-test the main endpoint
 
 # Run a task as the orchestrator (see orchestrator/SKILL.md):
 python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
 ```
+
+No `pip install` step: the orchestrator forces this repo root onto `sys.path`, so
+`import shinka` resolves to this tree. (`pip install -e .` is optional, only for
+importing `shinka` from outside the repo. You still need the deps from
+`pyproject.toml` in the env.)
 
 Operating guide for AI agents (and humans): [CLAUDE.md](CLAUDE.md). The
 orchestrator playbook: [orchestrator/SKILL.md](orchestrator/SKILL.md).

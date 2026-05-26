@@ -1,6 +1,10 @@
 # configs/
 
-Optional Hydra config overrides for shinka runs that you want to reuse across tasks. Per-task config belongs next to the task itself in `tasks/<task_name>/shinka_config.yaml`.
+> **Legacy.** These are Hydra config fragments from the pre-orchestrator launch
+> path. The orchestrator does **not** read them — a run is configured by an
+> `orchestrator_run.json` (see [orchestrator/SKILL.md](../orchestrator/SKILL.md)).
+> `azure_default.yaml` is kept as a handy reference for the Azure model portfolio
+> you'd copy into a run config's `evo.*` block.
 
 Reference the bundled configs that ship with shinka (one level up under the package):
 
@@ -17,8 +21,6 @@ This `configs/` directory at the repo root holds user-curated overrides:
 
 * [azure_default.yaml](azure_default.yaml) — Azure model portfolio (the four `azure-gpt-5.*` chat deployments + the `azure-text-embedding-3-small` embedding deployment) with sensible UCB bandit + reasoning_effort settings. Use as a base for per-task `evo.*` overrides.
 
-To use this dir from `shinka_launch`:
-
-```bash
-shinka_launch --config-dir /Users/dantongli/GIthub/Shinka/shinkaevolve/configs variant=...
-```
+The orchestrator run config (`orchestrator_run.json`) supersedes the old
+`shinka_launch` CLI; copy the model list from `azure_default.yaml` into your run
+config's `evo.*` block rather than launching from here.

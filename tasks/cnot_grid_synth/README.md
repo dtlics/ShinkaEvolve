@@ -48,8 +48,8 @@ no transpiler optimization — we benchmark the synthesis algorithm, not Qiskit.
    simulation). Catches non-Clifford gates, wrong matrix, uncancelled phases.
 
 Both are enforced in [evaluate.py](evaluate.py) — soft guidance is also given
-to the LLM via the docstring in `initial.py` and `task_sys_msg` in
-[run_evo.py](run_evo.py), but the evaluator's checks are authoritative.
+to the LLM via the docstring in `initial.py` and the `task_sys_msg` in the run
+config, but the evaluator's checks are authoritative.
 
 ## Score
 
@@ -82,7 +82,7 @@ Total cost per evaluation: ~270 syntheses (~25 s for the seed).
 
 ```bash
 conda activate shinka      # or use /opt/anaconda3/envs/shinka/bin/python directly
-cd /Users/dantongli/GIthub/Shinka/shinkaevolve
+cd /Users/dantongli/GIthub/ShinkaEvolve
 python tasks/cnot_grid_synth/evaluate.py \
     --program_path tasks/cnot_grid_synth/initial.py \
     --results_dir /tmp/cnot_smoke
@@ -93,40 +93,23 @@ First run computes and writes `_baseline_cache.json` (~22 s). Expected
 output: `correct=true`, `combined_score=0.0`, `slope ≈ 4.85`,
 `r_squared ≥ 0.999`.
 
-### Full evolution
+### Full evolution (as the orchestrator)
+
+Author a run config (copy `skills/shinka-setup/scripts/orchestrator_run.json`),
+point `task.eval_program_path` / `task.init_program_path` at this task's
+`evaluate.py` / `initial.py`, set the Azure `evo.llm_models` + a `budget_usd`,
+then drive windows — see [../../orchestrator/SKILL.md](../../orchestrator/SKILL.md):
 
 ```bash
-cd /Users/dantongli/GIthub/Shinka/shinkaevolve/tasks/cnot_grid_synth
-python run_evo.py
+cd /Users/dantongli/GIthub/ShinkaEvolve
+python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
 ```
 
-Uses the Azure model pool from the project [CLAUDE.md](../../CLAUDE.md):
-`azure-gpt-5.4-pro`, `azure-gpt-5.5`, `azure-gpt-5.3-codex`,
-`azure-gpt-5.4-mini`, with `reasoning_efforts=[medium, high]` (low rejected by
-gpt-5.4-pro). Default budget cap: $25; raise in `run_evo.py` if the run shows
-promise. Default num_generations: 80.
-
-### Via `shinka_run` CLI (alternative)
-
-```bash
-cd /Users/dantongli/GIthub/Shinka/shinkaevolve
-shinka_run --task-dir tasks/cnot_grid_synth \
-    --results-dir tasks/cnot_grid_synth/results \
-    --num_generations 40 \
-    --max-evaluation-jobs 2 --max-proposal-jobs 4 --max-db-workers 2
-```
-
-To enable the agentic + research-grounding features:
-
-```bash
-shinka_run --task-dir tasks/cnot_grid_synth \
-    --results-dir tasks/cnot_grid_synth/results \
-    --num_generations 30 \
-    --set evo.use_agentic_proposer=true \
-    --set evo.max_patch_attempts=2 \
-    --set evo.enable_deep_research=true \
-    --set evo.enable_literature_grounded=true
-```
+Suggested Azure pool (from the project [CLAUDE.md](../../CLAUDE.md)):
+`azure-gpt-5.4-mini` + `azure-gpt-5.5` (add `azure-gpt-5.4-pro` only with
+`reasoning_effort` ≥ `medium`, since it rejects `low`). The budget is hard-capped
+in code at `budget_usd`; the inner loop stops at the cap
+(`return_reason="budget_exhausted"`).
 
 ## Files
 
@@ -134,7 +117,6 @@ shinka_run --task-dir tasks/cnot_grid_synth \
 |---|---|
 | [initial.py](initial.py) | Grid utilities + EVOLVE-BLOCK seeded with snake-KMS. |
 | [evaluate.py](evaluate.py) | Sampler, both gates, depth measurer, baseline cache, scorer. |
-| [run_evo.py](run_evo.py) | Programmatic launcher with Azure model pool. |
 | `_baseline_cache.json` | Auto-generated on first run; gitignored. |
 
 ## Project context

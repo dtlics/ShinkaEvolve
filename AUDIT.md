@@ -1,4 +1,12 @@
-# AUDIT.md — Current ShinkaEvolve Structure
+# AUDIT.md — ShinkaEvolve Structure (pre-refactor snapshot)
+
+> **HISTORICAL — describes the codebase *before* the orchestrator rewrite +
+> Azure-only prune.** Many files cited below (`async_runner.py`, `novelty_judge.py`,
+> `deep_research_summarizer.py`, `prompt_evolver.py`, the agentic proposer,
+> `shinka_run`, `webui/`, `plots/`, non-Azure providers) have since been
+> **removed**. Kept as the design rationale behind the rewrite; for the current
+> system see [orchestrator/SKILL.md](orchestrator/SKILL.md) +
+> [orchestrator/NOTES.md](orchestrator/NOTES.md).
 
 > Produced as step 1 of the Claude-Code-orchestrated rewrite (see
 > `agent_rewrite_brief.md`). This document maps the *existing* codebase: every

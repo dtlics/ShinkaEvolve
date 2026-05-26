@@ -4,7 +4,7 @@ Read first. This file is loaded into every Claude Code session at this repo root
 
 ## What this repo is
 
-Personal working repo for evolutionary code optimization with [ShinkaEvolve](https://github.com/SakanaAI/ShinkaEvolve), running on Azure OpenAI. Started as a fork to fix Azure compat, then a sequence of branches added agentic features and research grounding (see [README.md](README.md) for the branch table). Now collapsed so everything lives here — framework, tasks, configs, credentials, skills.
+Personal working repo for evolutionary code optimization with [ShinkaEvolve](https://github.com/SakanaAI/ShinkaEvolve), running on Azure OpenAI. Started as a fork to fix Azure compat, then a sequence of branches added agentic features and research grounding (see [CHANGELOG.md](CHANGELOG.md) for the fork lineage), which were later **replaced** by the Claude-as-orchestrator rewrite + Azure-only prune. Everything lives here now — framework, tasks, configs, credentials, skills.
 
 The outer `Shinka` repo at `/Users/dantongli/GIthub/Shinka/` is a thin shim that initializes this submodule. **Daily work happens here, in `shinkaevolve/`.**
 
@@ -49,9 +49,9 @@ The Azure/deployment/env details below are your toolbox for live runs.
 
 - **Conda env**: `shinka` (Python 3.11). Never let pip install into `base` or any other env on this machine — others must stay clean (`coc`, `couple_therapy`, `efficient_cs`, `pl_ht`, `supercollider`).
   - Activate: `conda activate shinka`
-  - Direct binaries when activation isn't available: `/opt/anaconda3/envs/shinka/bin/{python, pip, shinka_run, shinka_launch, shinka_models, shinka_visualize}`
-- **Install**: this package is `pip install -e .` from this directory. Edits to `shinka/...` take effect immediately.
-- **Pytest**: `testpaths = ["tests"]` in pyproject — keeps `scripts/` smoke runners and `tasks/*/evaluate.py` out of test discovery.
+  - Direct binaries when activation isn't available: `/opt/anaconda3/envs/shinka/bin/{python, pip}` (the `shinka_run`/`shinka_launch`/`shinka_models`/`shinka_visualize` console scripts were removed in the Azure-only prune).
+- **Install**: not required. The orchestrator forces this repo root onto `sys.path` and the eval subprocess inherits a repo-root `PYTHONPATH`, so `import shinka` always resolves to *this* tree (`run_window` asserts it at startup). `pip install -e .` is optional — only needed for `import shinka` from a cwd outside the repo. Edits to `shinka/...` take effect immediately.
+- **Pytest**: `testpaths = ["orchestrator/tests"]` in pyproject — the offline parity/smoke/improvement suite; keeps `tasks/*/evaluate.py` out of test discovery.
 
 ## Two Azure resources, parallel structure
 
@@ -65,8 +65,8 @@ The user runs **two separate Azure resources**: a main chat/reasoning endpoint a
 | Key env | `AZURE_OPENAI_API_KEY` | `AZURE_DR_API_KEY` |
 | API version | `AZURE_API_VERSION=preview` | `AZURE_DR_API_VERSION=preview` |
 | Client factory | `shinka.llm.client.get_async_client_llm` | `shinka.llm.agent.dr_client.get_dr_async_client` |
-| Used by | proposer / meta / novelty / fix | `DeepResearchSummarizer` Stage C only |
-| Cost separation | `purpose=proposer / meta / fix` | `purpose=dr_stage_a / dr_stage_b / dr_stage_c / dr_stage_d` |
+| Used by | mutate / meta_summarize / fix / novelty embeddings | `orchestrator/scripts/deep_research.py` (DR Stage-C prompt) |
+| Cost separation | `purpose=mutate / meta / fix` | `purpose=deep_research` |
 
 Both endpoints' base_url is built by appending `/openai/v1` to the bare resource URL — same logic, two parallel functions (`_build_azure_base_url` and `_build_dr_base_url`).
 
@@ -81,21 +81,21 @@ Both endpoints' base_url is built by appending `/openai/v1` to the bare resource
 | `azure-text-embedding-3-small` | `text-embedding-3-small` | — | $0.02 per 1M tokens. Default for all tasks. |
 | `azure-text-embedding-3-large` | `text-embedding-3-large` | — | $0.13 per 1M tokens. Only when dedup looks lossy. |
 
-**Critical**: the bare name `text-embedding-3-small` (no `azure-` prefix) routes to the OpenAI provider and demands `OPENAI_API_KEY`. Always use `azure-text-embedding-3-small`. Verify deployments with `shinka_models --verbose`.
+**Critical**: the bare name `text-embedding-3-small` (no `azure-` prefix) routes to the OpenAI provider and demands `OPENAI_API_KEY`. Always use `azure-text-embedding-3-small`. Verify deployments with `python scripts/test_azure.py`.
 
 ### DR resource deployment
 
-- `o3-deep-research` deployment, underlying model version `2025-06-26`. Used by `DeepResearchSummarizer` Stage C via the dedicated `dr_client`. The framework default `evo.dr_model="o3-deep-research"` matches; override per task if you rename the deployment.
+- `o3-deep-research` deployment, underlying model version `2025-06-26`. Used by `orchestrator/scripts/deep_research.py` (Stage-C DR prompt) via the dedicated `dr_client`. Override the deployment name in that script if you rename it.
 
 ### Reasoning-effort gotcha
 
-Sampling `reasoning_efforts: [low, medium, high]` errors out for `azure-gpt-5.4-pro` (it rejects `low`). Use `[medium, high]` (or just `[medium]`) for any pool containing `gpt-5.4-pro`. The cheaper models support all three. For `meta_llm_models` and `novelty_llm_models` (typically `azure-gpt-5.4-mini`), `[low]` is fine and saves cost.
+Setting `reasoning_effort: low` errors out for `azure-gpt-5.4-pro` (it rejects `low`). Use `medium` (or `high`) for any pool containing `gpt-5.4-pro`. The cheaper models support all three. For the meta / novelty helper calls (typically `azure-gpt-5.4-mini`), `low` is fine and saves cost.
 
 ### Smoke tests
 
 ```bash
 conda activate shinka
-cd /Users/dantongli/GIthub/Shinka/shinkaevolve
+cd /Users/dantongli/GIthub/ShinkaEvolve
 python scripts/test_azure.py     # hits each main-resource deployment
 ```
 
@@ -141,11 +141,10 @@ Use the `shinka-setup` skill (scaffold from a description) or `shinka-convert` s
 Use the `shinka-inspect` skill — it loads top programs into agent context as a markdown bundle.
 
 ### Patching the framework
-Edit `shinka/...` directly (editable install). Commit on the current branch. To push:
+Edit `shinka/...` directly (no install needed — imported from this tree). Commit on the current branch. To push:
 
 ```bash
-git push -u fork <branch>          # fork = dtlics/ShinkaEvolve.git
-# Outer-repo: git add shinkaevolve && git commit -m "Bump shinkaevolve: ..."
+git push -u origin <branch>        # origin = dtlics/ShinkaEvolve.git
 ```
 
 ## Things future agents should NOT do

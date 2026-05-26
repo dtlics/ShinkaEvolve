@@ -48,15 +48,17 @@ Invoke this skill when the user:
      - `extra_data` (`dict`),
      - `text_feedback` (string, can be empty).
    - Confirm `correct.json` exists with `correct` (bool) and `error` (string) fields.
-7. Ask the user if they want to run the evolution themself or whether to use the `shinka-run` skill: 
-    - If the user wants to run evolution manually, add `run_evo.py` plus a `shinka.yaml` config with matching language + `init_program_path`.
-    - Ask the user if they want to use the `shinka-run` skill to perform optimization with the agent.
+7. Hand off to the **shinka-orchestrator** outer loop to run evolution: copy
+   `scripts/orchestrator_run.json`, set `task.eval_program_path` /
+   `task.init_program_path` to this task's `evaluate.py` / `initial.<ext>`, a
+   `task.language`, a `budget_usd`, and a precise `task_sys_msg`, then drive
+   `python orchestrator/harness/run_window.py --config <run>/run.json --until-decision`.
 
 ## What is ShinkaEvolve?
 A framework developed by SakanaAI that combines LLMs with evolutionary algorithms to propose program mutations, that are then evaluated and archived. The goal is to optimize for performance and discover novel scientific insights. 
 
 Repo and documentation: https://github.com/SakanaAI/ShinkaEvolve
-Paper: https://arxiv.org/abs/2212.04180
+Paper: https://arxiv.org/abs/2509.19349
 
 ### Evolution Flow
 1. Select parent(s) from archive/population
@@ -71,22 +73,14 @@ Paper: https://arxiv.org/abs/2212.04180
 |------|---------|
 | `initial.<ext>` | Starting solution in the chosen language with an evolve region that LLMs mutate |
 | `evaluate.py` | Scores candidates and emits metrics/correctness outputs that guide selection |
-| `run_evo.py` | (Optional) Launches the evolution loop |
-| `shinka.yaml` | (Optional) Config: generations, islands, LLM models, patch types, etc. |
 
-## Quick Install (if Shinka is not set up yet)
-Install once before creating/running tasks:
+(Only these two are the task contract. The run itself is configured by an
+`orchestrator_run.json` — see step 7 — not a per-task `run_evo.py`/`shinka.yaml`.)
 
-```bash
-# Check if shinka is available in workspace environment
-python -c "import shinka"
-
-# If not; install from PyPI
-pip install shinka-evolve
-
-# Or with uv
-uv pip install shinka-evolve
-```
+## Shinka availability
+In this repo `shinka` is the in-tree framework source — no install needed; the
+orchestrator forces the repo root onto `sys.path`. From the repo root,
+`python -c "import shinka"` resolves to this tree.
 
 ## Language Support (`initial.<ext>`)
 Shinka supports multiple candidate-program languages. Choose one, then keep extension/config/evaluator aligned.
@@ -224,13 +218,12 @@ if __name__ == "__main__":
     main(program_path=args.program_path, results_dir=args.results_dir)
 ```
 
-## (Optional) Template: `run_evo.py` (async)
+## Run config: `orchestrator_run.json`
 
-See `skills/shinka-setup/scripts/run_evo.py` for an example to edit.
-
-## (Optional) Template: `shinka.yaml`
-
-See `skills/shinka-setup/scripts/shinka.yaml` for an example to edit.
+See `skills/shinka-setup/scripts/orchestrator_run.json` for the run-config
+starter. Copy it next to your run, point `task.*` at this task's `evaluate.py` +
+`initial.<ext>`, set `budget_usd` + the Azure `evo.llm_models`, and drive it with
+the **shinka-orchestrator** outer loop (`orchestrator/SKILL.md`).
 
 ## Notes
 - Keep evolve markers tight; only code inside the region should evolve.

@@ -72,12 +72,14 @@ improvements — all green). We followed the EvoX protocol (window → J → sta
   PYTHONPATH); it can be removed without affecting the orchestrator.
 
 ## Still deferred (revisit after live runs prove the basics)
-- **`meta_summarize.py` not extracted.** Shinka's 3-step meta cycle
-  (`shinka/core/summarizer.py`) stays harness-internal to avoid over-fragmenting;
-  the harness passes `evo.meta_recommendations` into `construct_mutation_prompt`.
-  Extract it as a mutable script if meta becomes a frequent rewrite target.
-- **Prompt evolution** (`shinka/core/prompt_evolver.py`) stays in the original
-  tree, off by default — the orchestrator subsumes that role for strategy code.
+- **Richer multi-step meta.** `meta_summarize.py` is the extracted, mutable "meta
+  round" — a single Azure call proposing directions → `evo.meta_recommendations` →
+  `construct_mutation_prompt`. Shinka's original 3-step cycle
+  (drift→cache→summarize, `shinka/core/summarizer.py`) was pruned; re-introduce the
+  extra stages inside `meta_summarize.py` only if a single call proves too shallow.
+- **Prompt evolution** (upstream `shinka/core/prompt_evolver.py`, pruned here) —
+  the orchestrator subsumes that role for strategy code; re-introduce a mutable
+  task-prompt evolver only if evolving the prompt (not just the code) proves worth it.
 - **Reasoning-effort as a bandit arm.** `mutate` takes a single `reasoning_effort`
   from config; shinka's `sample_model_kwargs` treats it as a sampled dimension.
   Promote it to a bandit dimension if effort selection matters.

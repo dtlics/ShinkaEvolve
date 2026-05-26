@@ -24,8 +24,8 @@ def _get_google_embeddings_and_cost(
 ) -> Tuple[List[List[float]], float]:
     """Embed texts with Gemini and bill using Gemini token counts when available."""
     # Dead path in the Azure-only fork (resolve_embedding_backend never returns
-    # provider="google"); kept inert. The vertexai auth-mode branch was removed
-    # with shinka.google_genai.
+    # provider="google"); kept inert. The non-Azure embedding backends were
+    # removed in the Azure-only prune.
     embeddings = []
     total_tokens = 0
     model = f"models/{model_name}"

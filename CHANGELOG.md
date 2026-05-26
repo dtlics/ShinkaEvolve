@@ -6,6 +6,24 @@ CHANGELOG](https://github.com/SakanaAI/ShinkaEvolve/blob/main/CHANGELOG.md).
 
 ## Fork branches (most recent first)
 
+### `main` — Claude-as-orchestrator rewrite + Azure-only prune
+Recast the system so **Claude Code is the outer-loop orchestrator**: the inner
+loop (`orchestrator/harness/run_window.py`) runs W-iteration windows and returns a
+diagnostics JSON; the agent reads it between windows and rewrites mutable strategy
+CODE (`orchestrator/scripts/*`) on stagnation via validate → deploy → measure →
+rollback. EvoX-faithful stagnation (trigger Δ<τ; J kept for rollback). Inner-loop
+LLM calls run on Azure in background-poll mode (never the agent's own tokens); a
+single cost ledger (`journal`) hard-stops at `budget_usd`.
+
+**Azure-only prune** — removed `async_runner`, the agentic-proposer layer,
+`summarizer`/`novelty_judge`/`prompt_evolver`/`deep_research_summarizer`, the async
+DB + prompt DB, all non-Azure providers, `plots/`/`webui/`/`docs/`/`cli/`, the
+`shinka_run` launch path, and the legacy `tests/` suite. Kept the authoring skills
+(setup/convert/inspect) + the cnot task so the repo stays reusable. `pip install -e .`
+is no longer required — `import shinka` is path-forced to this tree. See
+[orchestrator/SKILL.md](orchestrator/SKILL.md) + [orchestrator/NOTES.md](orchestrator/NOTES.md);
+design map in [AUDIT.md](AUDIT.md) + [taxonomy.md](taxonomy.md).
+
 ### `collapsed-agent`
 Collapsed the outer `Shinka` repo into this submodule. `tasks/`, `configs/`,
 `scripts/`, `.env`, `CLAUDE.md`, and `.claude/skills/` symlinks all live
@@ -89,7 +107,7 @@ into the agent loop with cache-and-skip on the downstream eval pipeline.
 `PatchProposalOutput` Pydantic structured output. `ShinkaAgentHooks` for
 tool telemetry. Cleanup F.1 removed `RobustRunner` (the OpenAI SDK's
 built-in retry is sufficient once background mode addresses the long-idle
-TCP failure mode). Full plan: [AGENTIC_REWRITE.md](AGENTIC_REWRITE.md).
+TCP failure mode). Full plan: `AGENTIC_REWRITE.md` (removed in the orchestrator rewrite).
 
 ### `shinka-azure-v1-fix`
 Made Azure OpenAI work with the responses API:

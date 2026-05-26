@@ -1,4 +1,6 @@
 model_name,provider,input_price,output_price,input_price_tier2,output_price_tier2,tier_threshold,is_reasoning,think_temp_fixed,requires_reasoning
+o3-deep-research,openai,10.0,40.0,,,,True,1,1
+o3-deep-research-2025-06-26,openai,10.0,40.0,,,,True,1,1
 claude-3-5-haiku-20241022,anthropic,0.8,4.0,,,," False"," 0"," 0"
 anthropic.claude-3-5-haiku-20241022-v1:0,bedrock,0.8,4.0,,,," False"," 0"," 0"
 claude-3-5-sonnet-20241022,anthropic,3.0,15.0,,,," False"," 0"," 0"

@@ -8,8 +8,6 @@ import rich.box
 import pickle
 from pathlib import Path
 
-from shinka.local_openai_config import parse_local_openai_model
-
 Arm = Union[int, str]
 Subset = Optional[Union[np.ndarray, Sequence[Arm]]]
 
@@ -52,18 +50,8 @@ def _format_arm_display_name(name: Arm, max_width: int) -> str:
     if not isinstance(name, str):
         return _truncate_middle(text, max_width)
 
-    try:
-        local_match = parse_local_openai_model(name)
-    except ValueError:
-        local_match = None
-
-    if local_match is not None:
-        text = f"local/{local_match.api_model_name}"
-    elif name.startswith("openrouter/"):
-        text = name
-    else:
-        text = name.split("/")[-1]
-
+    # Azure-only: arm names are model ids like "azure-gpt-5.4-mini".
+    text = name.split("/")[-1]
     return _truncate_middle(text, max_width)
 
 

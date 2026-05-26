@@ -8,6 +8,43 @@ Personal working repo for evolutionary code optimization with [ShinkaEvolve](htt
 
 The outer `Shinka` repo at `/Users/dantongli/GIthub/Shinka/` is a thin shim that initializes this submodule. **Daily work happens here, in `shinkaevolve/`.**
 
+## Your standing role: the evolutionary orchestrator
+
+When asked to run, optimize, evolve, or improve a program in this repo, **you are
+the orchestrator / outer loop** of the evolutionary system in [`orchestrator/`](orchestrator/).
+Read [`orchestrator/SKILL.md`](orchestrator/SKILL.md) — it is your operating
+playbook — before acting. In short:
+
+- **You drive windows, not mutations.** The inner loop (`orchestrator/harness/run_window.py`)
+  runs W iterations per call and returns a diagnostics JSON. You read it between
+  windows and decide whether to intervene.
+- **Inner-loop LLM calls go to Azure, never to you.** Mutations/fixes/judges are
+  made by `orchestrator/scripts/*` calling Azure in background-poll mode. Never
+  simulate a mutation in your own context — that breaks the 100× cost asymmetry.
+  Your tokens are for window-level reasoning only.
+- **Your power is rewriting strategy CODE.** When the search stagnates, you
+  rewrite the mutable policy files in `orchestrator/scripts/` (sampling, novelty,
+  bandit, reward, prompt, stagnation, island, fix, record policies) — as whole
+  *concerns* (generation + consumption together), via the validate → deploy →
+  measure → rollback protocol. You must NOT touch the **foundation** (sqlite
+  schema, the JSON contract, the evaluator, the user's `evaluate.py`/`initial.*`).
+  Defer foundation ideas to the end-of-run `RUN_SUMMARY.md`.
+- **Do not stop until a termination criterion is met.** A run is one long
+  consecutive process; keep invoking windows. The healthiest run is fifty
+  windows read with no intervention.
+- **The budget is hard-capped in code.** Set `budget_usd` in the run config; the
+  harness keeps a cost ledger (`journal/run.json` → `total_cost`) summing every
+  LLM call (mutation/meta/deep-research/embeddings) + your logged interventions,
+  and `run_window` hard-stops at the cap (`return_reason="budget_exhausted"`).
+  Before any discretionary `meta_summarize`/`deep_research` call, check
+  `journal.budget_remaining(...)` and log its cost.
+- **This repo's shinka is the only one used.** `run_window` asserts `shinka`
+  resolves to this worktree at startup; the orchestrator scripts force it onto
+  `sys.path` first and the eval subprocess inherits a repo-root `PYTHONPATH`, so
+  the editable install is not required and an original checkout can't leak in.
+
+The Azure/deployment/env details below are your toolbox for live runs.
+
 ## Environment
 
 - **Conda env**: `shinka` (Python 3.11). Never let pip install into `base` or any other env on this machine — others must stay clean (`coc`, `couple_therapy`, `efficient_cs`, `pl_ht`, `supercollider`).
@@ -60,55 +97,40 @@ Sampling `reasoning_efforts: [low, medium, high]` errors out for `azure-gpt-5.4-
 conda activate shinka
 cd /Users/dantongli/GIthub/Shinka/shinkaevolve
 python scripts/test_azure.py     # hits each main-resource deployment
-python scripts/test_agentic.py   # exercises the agentic proposer end-to-end
 ```
 
-## Running a task
+## Running a task (you are the orchestrator)
+
+Read [`orchestrator/SKILL.md`](orchestrator/SKILL.md) — the full playbook. In
+short: author a run config (`orchestrator/SKILL.md` documents the schema; the
+`shinka-setup`/`shinka-convert` skills emit a `scripts/orchestrator_run.json`
+starter) pointing at the task's `evaluate.py` + `initial.<ext>`, then drive
+windows:
 
 ```bash
-cd /Users/dantongli/GIthub/Shinka/shinkaevolve
-shinka_run --task-dir tasks/<name> --results-dir tasks/<name>/results ...
+python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
 ```
 
-Per-task results live inside `tasks/<name>/results/` (gitignored). Cross-task `results/` at the repo root also gitignored.
+The inner loop runs windows autonomously and returns to you only on stagnation
+(or a window cap). You read the diagnostics, optionally rewrite a mutable
+strategy file via the validate → deploy → measure → rollback protocol, and
+continue until a termination criterion is met. Per-run artifacts (the archive
+`programs.sqlite`, `journal/`, per-strategy snapshots in
+`orchestrator/strategy_history/`) live under the run's `results_dir`
+(gitignored). The old `shinka_run` CLI was removed in the Azure-only prune.
 
 ### Active user task
 
-[`tasks/cnot_grid_synth/`](tasks/cnot_grid_synth/) — CNOT-equivalent linear-function synthesis on a 2D L×L grid. EVOLVE-BLOCK in [initial.py](tasks/cnot_grid_synth/initial.py); scoring + baseline-cache + adjacency/Clifford gates in [evaluate.py](tasks/cnot_grid_synth/evaluate.py); launcher with the Azure model pool in [run_evo.py](tasks/cnot_grid_synth/run_evo.py). Read [tasks/cnot_grid_synth/README.md](tasks/cnot_grid_synth/README.md) for problem statement, depth metric, and score targets. Upstream working examples are in [examples/](examples/) — `circle_packing`, `game_2048`, `julia_prime_counting`, `novelty_generator` — same calling convention, smaller scope.
+[`tasks/cnot_grid_synth/`](tasks/cnot_grid_synth/) — CNOT-equivalent linear-function synthesis on a 2D L×L grid. EVOLVE-BLOCK in [initial.py](tasks/cnot_grid_synth/initial.py); scoring + adjacency/Clifford gates in [evaluate.py](tasks/cnot_grid_synth/evaluate.py). Read [tasks/cnot_grid_synth/README.md](tasks/cnot_grid_synth/README.md) for the problem statement and score targets. [`examples/circle_packing/`](examples/circle_packing/) is a smaller reference task (its `evaluate.py`/`initial.py` drive the orchestrator smoke test).
 
-### Enabling the research-grounding features
-
-Each is opt-in via Hydra `--set`. The agent loop benefits from `max_patch_attempts=2`+ so it has multiple turns to apply a fix after seeing an eval failure:
-
-```bash
-shinka_run --task-dir tasks/<name> --results-dir tasks/<name>/results \
-  --num_generations 30 \
-  --set evo.use_agentic_proposer=true \
-  --set evo.max_patch_attempts=2 \
-  --set evo.enable_deep_research=true \
-  --set evo.enable_literature_grounded=true
-```
-
-What each flag turns on:
-
-- **`use_agentic_proposer=true`** — `_run_agent_proposal` instead of `_run_patch_async`. The agent emits `apply_patch` tool calls; **each successful apply automatically runs the evaluator and returns the score in the tool response** (doom-remediation Fix 1). The agent's loop is `apply_patch → see apply+eval result → fix-apply (if correct=False) → ... → emit final structured output on success`. One `Runner.run` per generation with `max_turns = max_patch_attempts × 3` LLM rounds.
-- **`enable_deep_research=true`** — every `dr_meta_interval` (default 20) programs, run Stage A (drift judge) → Stage B (novelty cache lookup) → Stage C (o3-deep-research call) → Stage D (per-item web_search grounding). Per-island briefs; the freeform meta cycle keeps running at its own cadence (`meta_rec_interval`, default 10). DR cost (Stages A+C+D) is summed into `total_api_cost` so `max_api_costs` covers it.
-- **`enable_literature_grounded=true`** — adds a fourth mutation type that picks one **confirmed** BriefItem from the parent's island brief and asks the agent to apply it, with `web_search` enabled for that one call. Suppressed for islands with no confirmed eligible brief item.
-
-The schema column `error_traceback` (truncated stderr/traceback when correct=False) and the in-loop `Program.metadata.fix_telemetry` dict (`{apply_attempts, eval_attempts, had_failure_then_success, final_correct}`) are written on every agentic run — they don't need flags. Query them after a run for fix-skill diagnostics. `stderr_log` is capped at ~16KB head+tail at load (chatty evaluators can't flood the agent's context).
-
-## Agentic architecture (one screen)
-
-`AgentLLMClient` (in `shinka/llm/agent/client.py`) wraps the `openai-agents` SDK. Each generation:
-
-1. `_run_agent_proposal` builds a `ShinkaToolContext` with the parent's code, the patch dir, the **pre-bound evaluator closure** (`_make_agent_evaluator`), and the per-island brief.
-2. It picks tools from `evo_config.agentic_tools` (default `["apply_patch"]` — just one tool, since apply_patch auto-evaluates). For the `literature_grounded` arm it forces in `web_search` for that single call.
-3. `AgentLLMClient.run_agent` constructs a fresh `Agent` + `BackgroundOpenAIResponsesModel` + `AsyncAzureOpenAI` client per call, calls `Runner.run`, parses the `PatchProposalOutput` Pydantic structured output (name + description).
-4. The agent's loop: emit `apply_patch` → framework runs `apply_patch_async` AND `ctx.evaluator()` → tool returns `"OK: applied ... \nEVAL: OK|FAILED: ..."`. If eval says `correct=True`, the LLM emits its final structured output and the SDK terminates. If `correct=False`, the LLM emits another `apply_patch` as a fix attempt. Continues until success or `max_turns` exhausted.
-5. After the run, `tool_ctx` carries: `last_successful_patch_text`, `last_successful_num_applied`, `last_eval_result` (structurally fresh — always paired with the latest applied code), `tool_call_trace`. The orchestrator either short-circuits with the cached eval result (no double-evaluation) or, if no apply ever succeeded, persists a failed Program row.
-6. Bandit update happens once on the program's final `combined_score`. `abort_reason="insufficient_reference"` (literature_grounded clean abort) skips the update to preserve the "aborts ≠ low-score" invariant.
-
-Five agent tools registered in `shinka/llm/agent/tools/`: `apply_patch` (default — auto-evaluates), `evaluate` (registered but **not in default** — manual re-eval for edge cases like different seeds), `web_search` (opt-in, server-side via `agents.WebSearchTool`), `query_evolution_db`, `read_host_file`. Web search is enabled per-call only — never set as a global default (each call costs $0.01–0.03 plus content tokens).
+> The pre-prune `shinka_run` research-grounding flags (`use_agentic_proposer`,
+> `enable_deep_research`, `enable_literature_grounded`) and the `AgentLLMClient`
+> per-generation agentic architecture were **removed** in the orchestrator
+> rewrite + Azure-only prune. The inner-loop mutation is now the stateless
+> Azure background-poll call in `orchestrator/scripts/mutate.py`; deep research
+> is `orchestrator/scripts/deep_research.py` (called deliberately by the
+> orchestrator, not on a fixed cadence). Truncation still applies: `error_traceback`
+> ~8KB and `stderr_log` ~16KB (head+tail). See `orchestrator/SKILL.md`.
 
 ## Working in this repo
 
@@ -131,5 +153,6 @@ git push -u fork <branch>          # fork = dtlics/ShinkaEvolve.git
 - Do not `pip install` into anything other than the `shinka` conda env.
 - Do not commit `.env`, `tasks/*/results/`, or `evolution_db.sqlite` (gitignored).
 - Do not install the shinka skills into `~/.claude/skills/` (global). They live at `.claude/skills/` in this repo and track this branch.
-- Do not add `web_search` to the global `agentic_tools` list — it's per-call only.
 - Do not edit `dr_client.py` to share env vars with the main endpoint — they're separate resources by design.
+- Do not re-add non-Azure providers or the old `shinka_run` / agentic-proposer code — this fork is Azure-only and orchestrator-driven.
+- Do not touch the FOUNDATION mid-run (sqlite schema, the scripts' JSON contract, `evaluate.py`, the user's `evaluate.py`/`initial.*`). Defer foundation ideas to `RUN_SUMMARY.md`.

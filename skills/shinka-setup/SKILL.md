@@ -4,7 +4,16 @@ description: Create ShinkaEvolve task scaffolds from a target directory and task
 ---
 
 # Shinka Task Setup Skill
-Create a setup scaffold consisting of an evaluation script and initial solution for an optimization problem given a user's task description. Both ingredients will be used within ShinkaEvolve, a framework combining LLMs with evolutionary algorithms to drive code optimization. 
+Create a setup scaffold consisting of an evaluation script and initial solution for an optimization problem given a user's task description. Both ingredients will be used within ShinkaEvolve, a framework combining LLMs with evolutionary algorithms to drive code optimization.
+
+> **This repo is orchestrator-driven (Azure-only).** Your deliverables are
+> `evaluate.py` (calling `shinka.core.run_shinka_eval`) and `initial.<ext>` (with
+> an `EVOLVE-BLOCK`). Do **not** generate `run_evo.py` / `shinka.yaml` or use
+> `shinka_run` — that launch path was removed. To RUN evolution, the
+> **shinka-orchestrator** outer loop (`orchestrator/SKILL.md`) points a run
+> config at this task's `evaluate.py` + `initial.<ext>` and drives
+> `orchestrator/harness/run_window.py`. Use `scripts/orchestrator_run.json` as
+> the run-config starter.
 
 # When to Use
 Invoke this skill when the user:

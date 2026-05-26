@@ -1,21 +1,18 @@
-"""Agentic LLM layer built on top of the openai-agents SDK.
+"""Azure background-mode transport for long reasoning calls.
 
-This package replaces the bespoke per-provider query loop in
-``shinka.llm.providers`` for OpenAI / Azure OpenAI calls. Non-OpenAI
-providers continue to use the legacy path. See ``AGENTIC_REWRITE.md``
-at the repo root for the full migration plan.
+Slimmed to what the orchestrator's deep-research path needs: the
+``BackgroundOpenAIResponsesModel`` (submit + poll, resilient to Azure
+long-idle-TCP kills) and the DR client. The old agentic proposer
+(`AgentLLMClient` + tools) was removed in the orchestrator rewrite — the inner
+loop's mutation call lives in `orchestrator/scripts/mutate.py`.
 """
 
 from .background_model import (
     BackgroundOpenAIResponsesModel,
     BackgroundPollTimeout,
 )
-from .client import AgentLLMClient
-from .types import PatchProposalOutput
 
 __all__ = [
-    "AgentLLMClient",
     "BackgroundOpenAIResponsesModel",
     "BackgroundPollTimeout",
-    "PatchProposalOutput",
 ]

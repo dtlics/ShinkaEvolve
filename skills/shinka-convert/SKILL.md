@@ -10,6 +10,15 @@ This is the alternative starting point to `shinka-setup`:
 - `shinka-setup`: new task from natural-language task description
 - `shinka-convert`: existing codebase to Shinka task conversion
 
+> **This repo is orchestrator-driven (Azure-only).** Your deliverables are the
+> snapshotted code with `EVOLVE-BLOCK`s, `initial.<ext>`, and `evaluate.py`
+> (calling `shinka.core.run_shinka_eval`). Do **not** generate `run_evo.py` /
+> `shinka.yaml` or use `shinka_run` — that launch path was removed. To RUN, the
+> **shinka-orchestrator** outer loop (`orchestrator/SKILL.md`) points a run
+> config at `evaluate.py` + `initial.<ext>` and drives
+> `orchestrator/harness/run_window.py`. Use `scripts/orchestrator_run.json` as
+> the run-config starter.
+
 After conversion, the user should still be able to use `shinka-run`.
 
 ## When to Use

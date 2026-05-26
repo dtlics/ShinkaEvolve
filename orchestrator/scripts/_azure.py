@@ -1,0 +1,105 @@
+"""Shared Azure background-mode LLM call (submit + poll), with cost.
+
+Used by the inner-loop LLM subroutines (`mutate.py`, `meta_summarize.py`). This
+is the resilient transport for long Azure reasoning calls: `responses.create(
+background=True)` + poll, so a long-idle TCP connection can't be silently killed.
+Cost is computed from `usage` via shinka's pricing.
+
+IMMUTABLE plumbing — do not rewrite as part of a strategy rewrite. (The *prompts*
+sent through it are mutable; this transport is not.)
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any, Dict, Optional, Tuple
+
+_POLL_INTERVAL_SEC = 3.0
+_POLL_TIMEOUT_SEC = 1800.0
+_TERMINAL = {"completed", "failed", "incomplete", "cancelled", "expired"}
+
+
+def _extract_text(response: Any) -> str:
+    text = getattr(response, "output_text", None)
+    if text:
+        return text
+    for item in getattr(response, "output", None) or []:
+        for c in getattr(item, "content", None) or []:
+            t = getattr(c, "text", None)
+            if t:
+                return t
+    return ""
+
+
+def _usage_cost(response: Any, api_model_name: str) -> float:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return 0.0
+    in_tok = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0) or 0
+    out_tok = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", 0) or 0
+    try:
+        from shinka.llm.providers.pricing import calculate_cost
+
+        ic, oc = calculate_cost(api_model_name, int(in_tok), int(out_tok))
+        return float(ic) + float(oc)
+    except Exception:
+        return 0.0
+
+
+async def _bg_call(
+    client, api_model_name, system_msg, user_msg, reasoning_effort, call_metadata,
+    poll_interval, poll_timeout,
+) -> Tuple[str, float]:
+    create_kwargs: Dict[str, Any] = {
+        "model": api_model_name,
+        "instructions": system_msg,
+        "input": user_msg,
+        "background": True,
+    }
+    if reasoning_effort and reasoning_effort != "disabled":
+        create_kwargs["reasoning"] = {"effort": reasoning_effort}
+    if call_metadata:
+        create_kwargs["metadata"] = {str(k): str(v) for k, v in call_metadata.items()}
+
+    submitted = await client.responses.create(**create_kwargs)
+    rid = getattr(submitted, "id", None)
+    if rid is None:
+        raise RuntimeError("Azure submission returned no response id")
+    status = getattr(submitted, "status", "unknown") or "unknown"
+    response = submitted
+    elapsed = 0.0
+    while status not in _TERMINAL:
+        if elapsed > poll_timeout:
+            raise TimeoutError(f"Azure response {rid} stuck at {status!r} after {elapsed:.0f}s")
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+        response = await client.responses.retrieve(rid)
+        status = getattr(response, "status", "unknown") or "unknown"
+    if status != "completed":
+        raise RuntimeError(f"Azure response {rid} terminal status={status!r}")
+    return _extract_text(response), _usage_cost(response, api_model_name)
+
+
+def bg_query(
+    model_name: str,
+    system_msg: str,
+    user_msg: str,
+    reasoning_effort: Optional[str] = None,
+    call_metadata: Optional[Dict[str, Any]] = None,
+    poll_interval: float = _POLL_INTERVAL_SEC,
+    poll_timeout: float = _POLL_TIMEOUT_SEC,
+) -> Tuple[str, float]:
+    """One Azure background-mode call. Returns (text, cost). Azure/OpenAI only."""
+    from shinka.llm.client import get_async_client_llm
+    from shinka.llm.providers.model_resolver import resolve_model_backend
+
+    provider = resolve_model_backend(model_name).provider
+    if provider not in ("azure_openai", "openai"):
+        raise ValueError(f"bg_query is Azure/OpenAI-only (got provider={provider!r}).")
+    client, api_model_name, _ = get_async_client_llm(model_name)
+    return asyncio.run(
+        _bg_call(
+            client, api_model_name, system_msg, user_msg,
+            reasoning_effort, call_metadata, poll_interval, poll_timeout,
+        )
+    )

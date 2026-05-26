@@ -43,19 +43,6 @@ from .prompts_literature import (
     LIT_GROUNDED_SYS_FORMAT,
     LIT_GROUNDED_ITER_MSG,
 )
-from .prompts_prompt_evo import (
-    PROMPT_EVO_DIFF_SYSTEM,
-    PROMPT_EVO_DIFF_USER,
-    PROMPT_EVO_FULL_SYSTEM,
-    PROMPT_EVO_FULL_USER,
-    PROMPT_EVO_SYSTEM_BASE,
-    construct_diff_evolution_prompt,
-    construct_full_evolution_prompt,
-    construct_prompt_evolution_context,
-    format_top_programs,
-    format_prompt_for_evolution,
-    format_inspiration_prompts,
-)
 
 __all__ = [
     "construct_eval_history_msg",
@@ -94,16 +81,4 @@ __all__ = [
     # literature_grounded mutation prompts (phase 3 of research-grounding)
     "LIT_GROUNDED_SYS_FORMAT",
     "LIT_GROUNDED_ITER_MSG",
-    # Prompt evolution prompts
-    "PROMPT_EVO_DIFF_SYSTEM",
-    "PROMPT_EVO_DIFF_USER",
-    "PROMPT_EVO_FULL_SYSTEM",
-    "PROMPT_EVO_FULL_USER",
-    "PROMPT_EVO_SYSTEM_BASE",
-    "construct_diff_evolution_prompt",
-    "construct_full_evolution_prompt",
-    "construct_prompt_evolution_context",
-    "format_top_programs",
-    "format_prompt_for_evolution",
-    "format_inspiration_prompts",
 ]

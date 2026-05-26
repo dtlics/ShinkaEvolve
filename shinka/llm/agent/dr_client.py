@@ -231,12 +231,23 @@ async def run_dr_call(
     if not text:
         text = ""
 
+    # Token cost from usage × pricing.csv (o3-deep-research is priced there).
+    # output_tokens includes the model's reasoning/thinking tokens (Responses
+    # API), so this captures the full billable token cost. The web_search tool
+    # cost is NOT in usage; the caller (deep_research.py) adds a surcharge.
     cost = 0.0
     usage = getattr(response, "usage", None)
     if usage is not None:
-        # Best-effort cost estimate — actual DR pricing lives outside
-        # this module and is captured by the Azure dashboard.
-        cost = 0.0
+        in_tok = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0) or 0
+        out_tok = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", 0) or 0
+        try:
+            from shinka.llm.providers.pricing import calculate_cost
+
+            ic, oc = calculate_cost(model, int(in_tok), int(out_tok))
+            cost = float(ic) + float(oc)
+        except Exception as exc:
+            logger.warning("DR cost computation failed for %s: %s", model, exc)
+            cost = 0.0
     return text, cost
 
 

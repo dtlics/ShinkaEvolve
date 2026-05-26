@@ -1,70 +1,54 @@
-# Shinka — personal working repo
+# Shinka — Azure-only, orchestrator-driven evolutionary code optimization
 
-Personal fork of [ShinkaEvolve](https://github.com/SakanaAI/ShinkaEvolve) (Sakana AI's LLM-driven evolutionary code optimization), repurposed as a single self-contained working repo. The framework, user tasks, configs, credentials, smoke tests, and Claude Code skills all live here. The outer Shinka shell is a thin pointer.
+A pruned personal fork of [ShinkaEvolve](https://github.com/SakanaAI/ShinkaEvolve)
+(Sakana AI's LLM-driven evolutionary code optimization), reorganized so that
+**Claude Code is the outer-loop orchestrator** of the search and **Azure OpenAI**
+is the only LLM backend.
 
-## What's in this fork beyond upstream
+The inner loop (parent sampling → mutation → evaluation → archive update) runs at
+API-call speed against Azure. The orchestrator (you, via Claude Code) drives it
+one *window* at a time, reads diagnostics, and — when the search stagnates —
+rewrites the underlying **strategy code** via a validate → deploy → measure →
+rollback protocol. See [`orchestrator/SKILL.md`](orchestrator/SKILL.md).
 
-| Layer | What changed | Branch lineage |
-|---|---|---|
-| **Azure compat** | base_url to /openai/v1 for the Responses API, split embedding api-version, raise LLM timeout to 60 min, disable inner @backoff retry storm | `shinka-azure-v1-fix` |
-| **Agentic rewrite** | LLM call layer on the `openai-agents` SDK with `background=True` + polling transport; six agent-callable tools (apply_patch, evaluate, web_search, query_evolution_db, read_host_file, plus the SDK's web_search built-in); `_run_agent_proposal` orchestrator path | `agentic-rewrite` |
-| **Research grounding** | error_traceback persistence + fix telemetry from the tool trace; Azure-aware call kwargs (prompt_cache_key, metadata, store, safety_identifier); per-island DR meta cycle calling `o3-deep-research` (Stage A drift → Stage B novelty cache → Stage C DR → Stage D code grounding); `literature_grounded` mutation arm that grounds in a DR brief item with bounded `web_search` | `agent-research-grounding` |
-| **Collapse + doom-remediation** | outer Shinka repo merged into this submodule (tasks/, configs/, scripts/, .env, CLAUDE.md, .claude/skills/); plus five fixes from the always-on workflow walkthrough — `apply_patch` auto-evaluates so the LLM never has to call evaluate (default `agentic_tools=["apply_patch"]`); DR cost summed into `total_api_cost`; placeholder DR briefs don't poison the prompt; `stderr_log` head+tail truncated at load; `BriefItem.confirmed` flag filters unverified lit_grounded references | `collapsed-agent` (current) |
+## What's here
 
-If upstream Sakana merges equivalent Azure-compat fixes, those branches can be deleted; the agentic-rewrite and research-grounding work would still live as a stand-alone fork.
+```
+orchestrator/        the outer loop
+  SKILL.md           the operating playbook (start here to run a task)
+  scripts/           JSON-contract subroutines — mutable strategy policies
+                     (sample_parent, novelty_check, select_llm, compute_reward,
+                     record_policy, stagnation_detector, island_policy,
+                     construct_mutation_prompt, mutate) + immutable foundation
+                     (evaluate, archive_record, archive_query, diagnostics,
+                     deep_research, _common)
+  harness/           run_window (inner loop), validate_strategy, strategy_store, journal
+  strategy_history/  append-only audit of every deployed strategy version
+  subagents/         debug-agent, archive-analyst
+  tests/             parity / improvements / smoke (offline, no API)
+shinka/              slimmed framework source (Azure-only) — pip install -e .
+tasks/               user tasks (evaluate.py + initial.<ext>)
+examples/circle_packing/  reference task used by the smoke test
+skills/              Claude Code skills: shinka-orchestrator (the outer loop),
+                     shinka-setup / shinka-convert / shinka-inspect (authoring)
+scripts/test_azure.py     Azure deployment smoke test
+AUDIT.md, taxonomy.md     design map of the rewrite
+```
 
 ## Quick start
 
 ```bash
-# Conda env (one-time)
-conda activate shinka                             # python 3.11
-pip install -e .                                  # editable install of this package
+conda activate shinka                 # python 3.11
+pip install -e .                      # editable install
+cp .env.example .env                  # fill in the two Azure resources' keys
+python scripts/test_azure.py          # smoke-test the main endpoint
 
-# Credentials (one-time)
-cp .env.example .env                              # fill in keys; never commit
-python scripts/test_azure.py                      # smoke-test main endpoint
-
-# Run a task
-shinka_run --task-dir tasks/cnot_grid_synth \
-  --results-dir tasks/cnot_grid_synth/results \
-  --num_generations 30 \
-  --set evo.use_agentic_proposer=true \
-  --set evo.enable_deep_research=true \
-  --set evo.enable_literature_grounded=true
-
-# Inspect — use the shinka-inspect skill in Claude Code
+# Run a task as the orchestrator (see orchestrator/SKILL.md):
+python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
 ```
 
-Full operating guide for AI agents (and humans) is in [CLAUDE.md](CLAUDE.md). Architecture for the agentic rewrite is in [AGENTIC_REWRITE.md](AGENTIC_REWRITE.md).
-
-## Layout
-
-```
-shinkaevolve/
-├── shinka/             # framework source — pip install -e .
-├── examples/           # upstream example tasks (circle_packing, game_2048, ...)
-├── tasks/              # user tasks (initial.<ext>, evaluate.py, ...)
-├── configs/            # shared Hydra overrides
-├── scripts/            # smoke tests (test_azure.py, test_agentic.py)
-├── skills/             # Claude Code / Codex skills, exposed via .claude/skills/
-├── tests/              # pytest suite — 538 tests
-├── docs/               # mkdocs reference site (framework features)
-├── .env                # credentials — gitignored
-├── .env.example        # template with both Azure resources documented
-└── pyproject.toml
-```
-
-## Reference
-
-- Framework source: [shinka/](shinka/)
-- Working examples: [examples/](examples/) — circle_packing, game_2048, julia_prime_counting, novelty_generator
-- User tasks: [tasks/](tasks/)
-- Main Azure client: [shinka/llm/client.py](shinka/llm/client.py) (`_build_azure_base_url`)
-- DR client: [shinka/llm/agent/dr_client.py](shinka/llm/agent/dr_client.py)
-- Agentic proposer: [shinka/core/async_runner.py](shinka/core/async_runner.py) (`_run_agent_proposal`)
-- DR summarizer: [shinka/core/deep_research_summarizer.py](shinka/core/deep_research_summarizer.py)
-- Bundled Hydra config defaults: [shinka/configs/](shinka/configs/)
-- Shared user overrides: [configs/azure_default.yaml](configs/azure_default.yaml)
+Operating guide for AI agents (and humans): [CLAUDE.md](CLAUDE.md). The
+orchestrator playbook: [orchestrator/SKILL.md](orchestrator/SKILL.md).
 
 ## Citation (upstream)
 

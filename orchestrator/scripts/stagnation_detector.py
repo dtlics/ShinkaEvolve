@@ -5,28 +5,38 @@ the J formula and the threshold logic are tuning surfaces. It embeds NO LLM call
 This is NEW code: shinka has no window/J-score concept (its only "stagnation" is
 per-island generations-since-best-improved → island spawn, a different thing).
 
-Two distinct quantities (EvoX, arXiv:2602.23413 §6 / Eq. 2):
-  * J = (s_end − s_start) · log(1 + s_start) / √W — the strategy-EVALUATION scalar.
-    Δ is the best-score gain across the window; √W normalizes for window length;
-    the log term upweights gains from higher starting scores. J is what the
-    orchestrator compares for ROLLBACK (a new strategy's window-J vs the prior
-    strategy's). When s_start ≤ 0 the log term is not meaningful → Δ/√W.
-  * The intervention TRIGGER is Δ < τ (EvoX: "If Δ falls below a stagnation
-    threshold τ, EvoX triggers a strategy update"). τ is on the raw Δ, so set it
-    relative to the task's score scale. ``trigger_metric`` may be switched to
-    "J" (scale-free) since this file is mutable.
+Two distinct quantities:
+  * J = Δ / √W — a monotone, continuous progress scalar (Δ = best-score gain over
+    the window; √W normalizes for window length). This REPLACES the earlier
+    EvoX `Δ·log1p(s_start)/√W` form, whose `log1p(s_start)` scale term was
+    discontinuous and non-monotonic around s_start=0 (for the same Δ, J could
+    collapse ~200× the instant the score went positive) and dominated Δ on
+    small-score tasks — making J useless for cross-window comparison (was F16).
+    Rollback no longer keys on J (see ``rollback_decision.py``); J is now purely
+    an informational progress reading.
+  * The intervention TRIGGER is a **hybrid threshold**: a window is "low" when
 
-Stagnation fires when the trigger metric is below τ for ``consecutive_required``
-(default 2) consecutive windows — demand-driven, not on a fixed schedule.
+        Δ ≤ max(abs_floor, rel_frac · max(s_start, 0))
+
+    The ``rel_frac`` term makes the trigger SCALE-FREE once a score exists
+    (equivalent to "relative improvement < rel_frac"), while ``abs_floor`` gives
+    a sensible absolute bar during the opening phase when s_start ≈ 0 (where a
+    pure relative test would divide by ~0). This fixes the old `Δ < τ=0.05`
+    default that flagged stagnation even on a window that tripled the score
+    (gains here are ~0.01 ≪ 0.05) — was F12.
+
+Stagnation fires when the trigger is "low" for ``consecutive_required`` (default
+2) consecutive windows — demand-driven, not on a fixed schedule.
 
 INPUT (stdin JSON):
   {
     "best_score_start": float,
     "best_score_end": float,
-    "window_size": int,             # EvoX uses W ≈ 10% of the total iteration budget
-    "tau": 0.0,                     # threshold on Δ (default) — task-scale-relative
-    "trigger_metric": "delta",      # "delta" (EvoX default) | "J" (scale-free)
-    "prior_low_streak": 0,          # consecutive low windows BEFORE this one
+    "window_size": int,
+    "stagnation_abs_floor": float,  # absolute min gain to count as progress
+    "stagnation_rel_frac": float,   # relative fraction of best_start (default 0.05)
+    "tau": float,                   # DEPRECATED alias for stagnation_abs_floor
+    "prior_low_streak": 0,
     "consecutive_required": 2
   }
 
@@ -34,6 +44,7 @@ OUTPUT (stdout JSON):
   {
     "ok": true, "J_score": float, "delta": float,
     "stagnation_flag": bool, "low_streak": int,
+    "threshold": float, "abs_floor": float, "rel_frac": float,
     "tau": float, "trigger_metric": str, "formula": str
   }
 """
@@ -48,38 +59,44 @@ try:
 except ImportError:
     import _common  # type: ignore
 
+_DEFAULT_ABS_FLOOR = 1e-3
+_DEFAULT_REL_FRAC = 0.05
+
 
 def compute_J(best_score_start: float, best_score_end: float, window_size: int) -> float:
+    """Monotone, continuous progress scalar: Δ / √W (no log scale term)."""
     delta = float(best_score_end) - float(best_score_start)
     w = max(int(window_size), 1)
-    sqrt_w = math.sqrt(w)
-    if best_score_start > 0:
-        scale = math.log1p(best_score_start)
-    else:
-        scale = 1.0  # log term undefined/zero for non-positive scores; use Δ/√W
-    return delta * scale / sqrt_w
+    return delta / math.sqrt(w)
+
+
+def stagnation_threshold(best_score_start: float, abs_floor: float, rel_frac: float) -> float:
+    """The hybrid 'is this window low' bar: max(abs_floor, rel_frac·max(s_start,0))."""
+    return max(float(abs_floor), float(rel_frac) * max(float(best_score_start), 0.0))
 
 
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     best_start = float(payload.get("best_score_start", 0.0) or 0.0)
     best_end = float(payload.get("best_score_end", 0.0) or 0.0)
     window_size = int(payload.get("window_size", 1) or 1)
-    tau = float(payload.get("tau", 0.0) or 0.0)
+    # abs_floor: prefer the explicit knob; fall back to the deprecated `tau`
+    # alias; else a small default. (Old configs that set tau still work.)
+    abs_floor = payload.get("stagnation_abs_floor")
+    if abs_floor is None:
+        abs_floor = payload.get("tau")
+    abs_floor = _DEFAULT_ABS_FLOOR if abs_floor is None else float(abs_floor)
+    rel_frac = payload.get("stagnation_rel_frac")
+    rel_frac = _DEFAULT_REL_FRAC if rel_frac is None else float(rel_frac)
     prior_low_streak = int(payload.get("prior_low_streak", 0) or 0)
     consecutive_required = int(payload.get("consecutive_required", 2) or 2)
 
     delta = best_end - best_start
     j = compute_J(best_start, best_end, window_size)
+    threshold = stagnation_threshold(best_start, abs_floor, rel_frac)
 
-    # EvoX faithfulness: the intervention TRIGGER is Δ < τ (raw best-score gain
-    # over the window — EvoX §"If Δ falls below a stagnation threshold τ..."),
-    # while J (Eq. 2) is the strategy-EVALUATION scalar the orchestrator compares
-    # for rollback (new strategy's window-J vs the prior strategy's). They differ:
-    # τ on Δ is relative to the task's score scale; J is scale-normalized. The
-    # trigger metric is a knob since this file is mutable.
-    trigger_metric = payload.get("trigger_metric", "delta")
-    trigger_value = delta if trigger_metric == "delta" else j
-    low_streak = prior_low_streak + 1 if trigger_value < tau else 0
+    # "Low" window: best-score gain did not clear the hybrid bar.
+    low = delta <= threshold
+    low_streak = prior_low_streak + 1 if low else 0
     stagnation_flag = low_streak >= consecutive_required
 
     return {
@@ -87,9 +104,12 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "delta": delta,
         "stagnation_flag": bool(stagnation_flag),
         "low_streak": low_streak,
-        "tau": tau,
-        "trigger_metric": trigger_metric,
-        "formula": "J = delta * log1p(max(s_start,0) or 1) / sqrt(W)  [EvoX Eq.2]; trigger: Δ < τ",
+        "threshold": threshold,
+        "abs_floor": abs_floor,
+        "rel_frac": rel_frac,
+        "tau": abs_floor,  # back-compat echo (now == abs_floor)
+        "trigger_metric": "hybrid",
+        "formula": "J = Δ/√W; trigger low when Δ ≤ max(abs_floor, rel_frac·max(s_start,0))",
     }
 
 

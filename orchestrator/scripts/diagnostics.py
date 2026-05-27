@@ -36,10 +36,12 @@ try:
     from . import _common
     from . import stagnation_detector
     from . import archive_query
+    from . import island_policy
 except ImportError:
     import _common  # type: ignore
     import stagnation_detector  # type: ignore
     import archive_query  # type: ignore
+    import island_policy  # type: ignore
 
 
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -66,7 +68,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "best_score_start": best_start,
             "best_score_end": best_end,
             "window_size": window_size,
-            "tau": payload.get("tau", 0.0),
+            "tau": payload.get("tau", 0.0),  # deprecated abs_floor alias
+            "stagnation_abs_floor": payload.get("stagnation_abs_floor"),
+            "stagnation_rel_frac": payload.get("stagnation_rel_frac"),
             "prior_low_streak": payload.get("prior_low_streak", 0),
             "consecutive_required": payload.get("consecutive_required", 2),
         }
@@ -85,20 +89,16 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     fix_count = int(payload.get("fix_count", 0) or 0)
     fix_rate = (fix_count / iters) if iters else 0.0
 
-    # Island health. Shinka exposes per-island count + best; diversity and
-    # stagnation_count are not first-class on the archive read, so we surface
-    # count as the diversity proxy and leave stagnation_count to the orchestrator
-    # to track across windows (documented approximation).
-    island_health = []
-    for isl in summary.get("islands", []):
-        island_health.append(
-            {
-                "id": isl.get("island_idx"),
-                "best": isl.get("best"),
-                "diversity": isl.get("count"),
-                "stagnation_count": None,
-            }
-        )
+    # Island health. The metric DEFINITION lives in the MUTABLE island_policy
+    # (F10) so the orchestrator can later evolve "diversity"/"stagnation_count"
+    # beyond the toy count default — the sensor (this file) just calls it, the
+    # same way it delegates J/flag to the mutable stagnation_detector.
+    island_health = island_policy.island_health(
+        summary.get("islands", []),
+        db_path=db_path,
+        db_config=db_config,
+        embedding_model=embedding_model,
+    )
 
     return {
         "window_index": int(payload.get("window_index", 0) or 0),
@@ -107,11 +107,15 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "best_score_end": float(best_end),
         "delta": stag["delta"],
         "J_score": stag["J_score"],
-        "current_strategy_hash": payload.get("current_strategy_hash"),
+        "threshold": stag.get("threshold"),
+        "current_strategy_hash": payload.get("current_strategy_hash"),  # deprecated
+        "strategy_fingerprint": payload.get("strategy_fingerprint", {}),
         "novelty_acceptance_rate": novelty_acceptance_rate,
+        "novelty_rejected_cost": float(payload.get("novelty_rejected_cost", 0.0) or 0.0),
         "evaluation_failure_rate": evaluation_failure_rate,
         "fix_rate": fix_rate,
         "llm_bandit_weights": payload.get("llm_bandit_weights", {}),
+        "llm_bandit_counts": payload.get("llm_bandit_counts", {}),
         "island_health": island_health,
         "stagnation_flag": stag["stagnation_flag"],
         "low_streak": stag["low_streak"],

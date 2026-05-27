@@ -65,22 +65,38 @@ on stagnation or after `cadence.max_windows_per_call` windows — the normal mod
 (Use `--windows 1` to step one window at a time when debugging.) Fresh subprocess
 each call — that is how a code rewrite takes effect: deploy the new file, the next
 invocation imports it. Diagnostics print to stdout and append to the run journal.
+
+**Idle-sleep safety.** `run_window` self-caffeinates on macOS (holds
+`PreventUserIdleSystemSleep` for its lifetime, auto-released on exit) so a long
+run is not reaped by a host idle-sleep. For unattended runs that must also survive
+the agent shell ending, launch via `python orchestrator/harness/run_detached.py
+--config <run>/run.json --until-decision [--resume]` (detaches into its own
+session, returns immediately; monitor the journal, recover with `--resume`). A
+closed laptop lid still forces hardware sleep caffeinate can't override.
+
 Diagnostics shape:
 
 ```
 { window_index, iters_completed, best_score_start, best_score_end, delta,
-  J_score, current_strategy_hash, novelty_acceptance_rate,
-  evaluation_failure_rate, fix_rate, llm_bandit_weights,
+  J_score, strategy_fingerprint, novelty_acceptance_rate, novelty_rejected_cost,
+  evaluation_failure_rate, fix_rate, llm_bandit_weights, llm_bandit_counts,
   island_health:[{id,best,diversity,stagnation_count}],
-  stagnation_flag, low_streak, exhausted_retry_slots, total_programs,
+  stagnation_flag, low_streak, threshold, exhausted_retry_slots, total_programs,
   window_cost, total_cost, budget_remaining, budget_hit, return_reason }
 ```
 
-`stagnation_flag` fires automatically when the trigger metric (Δ by default, the
-EvoX trigger) < `tau` for `consecutive_required` windows; `J_score` is the EvoX
-Eq.2 scalar used separately for rollback comparison. Carry `low_streak` → next
-config's `window_state.prior_low_streak`, and
-bump `window_state.window_index`.
+`stagnation_flag` fires automatically when a window is "low" for
+`consecutive_required` windows. A window is **low** when the best-score gain
+doesn't clear a hybrid bar: `Δ ≤ max(stagnation_abs_floor, stagnation_rel_frac ·
+max(s_start,0))` — the `rel_frac` term is scale-free (relative improvement)
+once a score exists, while `abs_floor` is the opening-phase bar when s_start≈0.
+`iters_completed` is the count of candidates actually attempted (may be < W on a
+budget break). `J_score = Δ/√W` is now a monotone, informational progress
+reading only — rollback no longer keys on J (it uses the multi-signal
+`rollback_decision.py`; see the rewrite protocol). `llm_bandit_weights` /
+`llm_bandit_counts` carry the live bandit posterior + per-arm tallies (read from
+`bandit_state.pkl`). Carry `low_streak` → next config's
+`window_state.prior_low_streak`, and bump `window_state.window_index`.
 
 ## What you may change, and what you must not (tiered mutability)
 
@@ -142,9 +158,11 @@ Invoke `run_window.py --windows 1`. Read diagnostics. Healthy window
 do nothing, invoke the next window. **Then keep going** (rule 2).
 
 ### Meta check (escalation ladder)
-`stagnation_flag` fires when the EvoX trigger Δ < τ holds for `consecutive_required`
-windows (Δ = best-score gain over the window; `J_score` is the separate EvoX
-scalar used for rollback comparison, not the trigger).
+`stagnation_flag` fires when a window stays "low" for `consecutive_required`
+windows — low = `Δ ≤ max(stagnation_abs_floor, stagnation_rel_frac·max(s_start,0))`
+(Δ = best-score gain; the hybrid bar is scale-free above the floor, so it does
+NOT false-fire on a small-but-real gain the way a fixed `tau` did). `J_score`
+(=Δ/√W) is informational only — rollback uses the multi-signal basket below.
 
 **Two hard rules for what you do on stagnation:**
 - You rewrite **mutable framework code only** (`scripts/*.py` flagged MUTABLE).
@@ -189,15 +207,27 @@ Helpers: `harness/strategy_store.py`, `harness/validate_strategy.py`.
    strategy_history/candidate_<target>.py <target>.py`. Mechanical error → fix,
    retry ≤2. Structural → abandon, try another rung.
 4. **Deploy.** Single file: `strategy_store.deploy(candidate, target, reason,
-   window_index, prior_J)`. A whole concern (multiple files): `validate_bundle`
-   then `strategy_store.deploy_bundle([{candidate_path,target},...], reason,
-   window_index, prior_J)`. Update `run.json`'s `strategy_hash`. Log it:
-   `journal.append_intervention(...)`.
-5. **Measure**: run one window; read its `J_score`.
-6. **Roll back or accept.** If `new_J < prior_J * 0.8`: `strategy_store.rollback`
-   / `rollback_bundle` + `record_outcome`/`record_bundle_outcome(accepted=False)`.
-   Else `record_outcome(accepted=True)`. **Rollback is the step that prevents a
-   bad rewrite from poisoning the rest of the run — never skip it.**
+   window_index, prior_J, concern="<concern>")`. A whole concern (multiple files):
+   `validate_bundle` then `strategy_store.deploy_bundle([{candidate_path,target},
+   ...], reason, window_index, prior_J, concern=...)`. Pass `concern` so the index
+   narrates the change. You do NOT hand-maintain a strategy hash — the harness
+   stamps the full `strategy_fingerprint` ({target: hash} over all mutable files)
+   into every window automatically (F4). Log it: `journal.append_intervention(...)`.
+5. **Measure**: run one window; capture its diagnostics.
+6. **Roll back or accept** via the multi-signal basket, NOT a J comparison.
+   Call `rollback_decision.decide(prior_window_diag, measure_window_diag)` (or pipe
+   JSON to `harness/rollback_decision.py`): it flags a regression if the rewrite
+   collapsed correctness (eval-success dropped/floored), collapsed diversity
+   (novelty-acceptance dropped), or regressed score while the prior window was
+   genuinely progressing. Crucially it fires **even when Δ≈0** (early/flat phase),
+   which the old `new_J < prior_J·0.8` guard could not. If `regressed`:
+   `strategy_store.rollback` / `rollback_bundle` +
+   `record_outcome`/`record_bundle_outcome(accepted=False, decision=<the decide()
+   result>, measure_diagnostics=<measure window>)`. Else
+   `record_outcome(accepted=True, decision=..., measure_diagnostics=...)`. Always
+   pass `decision` + `measure_diagnostics` so the index records WHY and the
+   evidence (F4). **Rollback is the step that prevents a bad rewrite from poisoning
+   the rest of the run — never skip it.**
 
 The archive is NEVER reset across strategy changes.
 
@@ -211,8 +241,8 @@ act on its one recommendation, forget the detail. For periodic structural reads,
 spawn `subagents/archive-analyst.md` (write to `strategy_history/analyst_<w>.md`).
 
 ### Termination
-Stop when: budget exhausted; `J_score` < `tau` for five straight windows after
-deep research + ≥2 rewrites; target score reached; or user says stop. Then write
+Stop when: budget exhausted; `stagnation_flag` true for five straight windows
+after deep research + ≥2 rewrites; target score reached; or user says stop. Then write
 `RUN_SUMMARY.md` to the run dir (you can seed it from
 `journal.build_run_summary(results_dir)`): final best program, J trajectory,
 every rewrite (hash, motive, outcome — from `strategy_history/index.json`), every
@@ -267,10 +297,10 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
           "llm_models": ["azure-gpt-5.4-mini","azure-gpt-5.5"], "llm_dynamic_selection_kwargs": {"cost_aware_coef": 0.5},
           "reasoning_effort": "medium", "max_patch_attempts": 3, "reward_mode": "absolute",
           "embedding_model": "azure-text-embedding-3-small", "enable_novelty": true,
-          "code_embed_sim_threshold": 0.99, "tau": 0.05, "consecutive_required": 2,
-          "trigger_metric": "delta"},
+          "code_embed_sim_threshold": 0.99, "stagnation_abs_floor": 0.001,
+          "stagnation_rel_frac": 0.05, "consecutive_required": 2},
   "cadence": {"mode": "until_decision", "max_windows_per_call": 3},
-  "strategy_hash": "<from strategy_store.current_hash>",
+  "strategy_hash": null,  // deprecated; the harness auto-stamps strategy_fingerprint
   "window_state": {"window_index": 0, "prior_low_streak": 0} }
 ```
 `llm_models` set → bandit picks per candidate; `enable_novelty` → embedding gate.

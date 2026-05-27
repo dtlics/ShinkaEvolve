@@ -60,6 +60,7 @@ import compute_reward as compute_reward_script  # noqa: E402
 import record_policy as record_policy_script  # noqa: E402
 import cadence_policy as cadence_policy_script  # noqa: E402
 import journal  # noqa: E402  (harness sibling)
+import strategy_store  # noqa: E402  (harness sibling — for the strategy fingerprint)
 
 FOLDER_PREFIX = "gen"
 
@@ -171,11 +172,16 @@ def _evaluate_candidate(
     )
 
 
-def _bootstrap_initial(cfg: Dict[str, Any]) -> None:
-    """If the archive is empty, evaluate the seed program and record it as gen 0."""
+def _bootstrap_initial(cfg: Dict[str, Any]) -> float:
+    """If the archive is empty, evaluate the seed program and record it as gen 0.
+
+    Returns the embedding cost incurred (0.0 when novelty is off or the archive
+    was already bootstrapped) so the caller can fold it into the ledger once the
+    journal exists (bootstrap runs before journal.init_run)."""
     db_path = cfg["db_path"]
     db_config = cfg["db_config"]
-    embedding_model = cfg["evo"].get("embedding_model", "text-embedding-3-small")
+    evo = cfg["evo"]
+    embedding_model = evo.get("embedding_model", "text-embedding-3-small")
     # A missing DB file means an empty archive (the first archive_record creates
     # it). Only query the count when the file already exists, since archive_query
     # opens read-only and read-only refuses to create a missing DB.
@@ -189,7 +195,7 @@ def _bootstrap_initial(cfg: Dict[str, Any]) -> None:
             }
         )["result"]
         if count["total"] > 0:
-            return
+            return 0.0
 
     task = cfg["task"]
     init_path = task["init_program_path"]
@@ -197,25 +203,37 @@ def _bootstrap_initial(cfg: Dict[str, Any]) -> None:
     results_dir = os.path.join(gen_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
     ev = _evaluate_candidate(cfg, init_path, results_dir, 0, generation=0)
+    seed_code = _read_code(init_path)
+    program_fields: Dict[str, Any] = {
+        "code": seed_code,
+        "language": task.get("language", "python"),
+        "generation": 0,
+        "parent_id": None,
+        "combined_score": ev["combined_score"],
+        "correct": ev["correct"],
+        "public_metrics": ev["public_metrics"],
+        "private_metrics": ev["private_metrics"],
+        "error_traceback": ev.get("error_traceback"),
+        "metadata": {"bootstrap": True},
+    }
+    # F7: embed the seed so the FIRST mutations have a baseline to compare against.
+    # Without this the novelty gate is a no-op (novelty_n_compared=0) until a few
+    # embedded candidates accrue per island, letting near-duplicate early mutants
+    # through uncounted.
+    embed_cost = 0.0
+    if evo.get("enable_novelty"):
+        seed_embedding, embed_cost = _embed(cfg, seed_code)
+        if seed_embedding is not None:
+            program_fields["embedding"] = seed_embedding
     archive_record.main(
         {
             "db_path": db_path,
             "db_config": db_config,
             "embedding_model": embedding_model,
-            "program": {
-                "code": _read_code(init_path),
-                "language": task.get("language", "python"),
-                "generation": 0,
-                "parent_id": None,
-                "combined_score": ev["combined_score"],
-                "correct": ev["correct"],
-                "public_metrics": ev["public_metrics"],
-                "private_metrics": ev["private_metrics"],
-                "error_traceback": ev.get("error_traceback"),
-                "metadata": {"bootstrap": True},
-            },
+            "program": program_fields,
         }
     )
+    return float(embed_cost or 0.0)
 
 
 def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str, int]) -> None:
@@ -336,15 +354,18 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     mut = mutate.main(mut_payload)
     # Account the mutation LLM cost immediately — it was incurred even if the
     # candidate is later rejected by novelty.
-    counters["cost"] = counters.get("cost", 0.0) + float(mut.get("cost", 0.0) or 0.0)
+    _mut_cost = float(mut.get("cost", 0.0) or 0.0)
+    counters["cost"] = counters.get("cost", 0.0) + _mut_cost
 
     # 3b. novelty check (MUTABLE policy) — gated; live runs enable it. On reject,
     # the slot is dropped before evaluation (matches shinka's rejection sampling).
     code_embedding: Optional[List[float]] = None
     nov: Dict[str, Any] = {}
+    _slot_embed_cost = 0.0
     if evo.get("enable_novelty"):
         code_embedding, _embed_cost = _embed(cfg, mut["candidate_code"])
-        counters["cost"] = counters.get("cost", 0.0) + float(_embed_cost or 0.0)
+        _slot_embed_cost = float(_embed_cost or 0.0)
+        counters["cost"] = counters.get("cost", 0.0) + _slot_embed_cost
         nov = novelty_check_script.main(
             {
                 "db_path": db_path, "db_config": db_config,
@@ -356,6 +377,10 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         )
         if not nov.get("accept"):
             counters["novelty_rejects"] += 1
+            # F13: this slot's spend produced nothing to evaluate — record it as
+            # waste so diagnostics can surface it and the orchestrator can react
+            # (e.g. rewrite the prompt or the novelty threshold).
+            counters["rejected_cost"] = counters.get("rejected_cost", 0.0) + _mut_cost + _slot_embed_cost
             return  # drop this slot; no eval, no record, no bandit update
 
     # 4. evaluate (IMMUTABLE plumbing)
@@ -451,7 +476,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     num_windows = int(cfg.get("windows", 1))
 
     os.makedirs(cfg["results_dir"], exist_ok=True)
-    _bootstrap_initial(cfg)
+    _boot_embed_cost = _bootstrap_initial(cfg)
 
     journal.init_run(
         cfg["results_dir"],
@@ -469,11 +494,20 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         },
     )
 
+    # Fold the bootstrap seed's embedding cost (F7) into the ledger now that the
+    # journal exists — bootstrap runs before init_run, so it couldn't account it.
+    if _boot_embed_cost:
+        journal.add_cost(cfg["results_dir"], _boot_embed_cost)
+
     window_state = cfg.get("window_state", {}) or {}
     window_index = int(window_state.get("window_index", 0))
     prior_low_streak = int(window_state.get("prior_low_streak", 0))
 
     budget = cfg.get("budget_usd")
+    # F4: the self-contained strategy pointer — {target: hash} over all mutable
+    # files, computed from the live scripts/. Stamped into every window so the log
+    # pins the exact strategy version (all files) that produced each window.
+    strategy_fingerprint = strategy_store.current_fingerprint()
 
     def _one_window(widx: int, prior_streak: int) -> Dict[str, Any]:
         best_start = _best_score(db_path, db_config, embedding_model)
@@ -481,6 +515,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         counters = {
             "iter_index": 0, "eval_total": 0, "eval_failures": 0,
             "novelty_accepts": 0, "novelty_rejects": 0, "fix_count": 0, "cost": 0.0,
+            "rejected_cost": 0.0,  # F13: spend on novelty-rejected (un-evaluated) slots
         }
         # HARD budget railguard (immutable safety, NOT a strategy knob): stop
         # starting candidates once cumulative spend (this window so far + all
@@ -488,28 +523,59 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         # the budget. Overshoot is at most one candidate's cost.
         prior_total = journal.total_cost(cfg["results_dir"])
         budget_hit = False
+        iters_run = 0  # actual candidates attempted (may be < window_size on budget break)
         for i in range(window_size):
             if budget is not None and (prior_total + counters["cost"]) >= float(budget):
                 budget_hit = True
                 break
             counters["iter_index"] = i
             _run_one_candidate(cfg, next_gen + i, counters)
+            iters_run += 1
+
+        # F9: read the REAL bandit posterior (+ per-arm tallies) for diagnostics,
+        # so `llm_bandit_weights` reflects bandit_state.pkl instead of an empty
+        # config field. Read-only "weights" mode — never perturbs the bandit.
+        bandit_weights: Dict[str, Any] = {}
+        bandit_counts: Dict[str, Any] = {}
+        if evo.get("llm_models"):
+            try:
+                peek = select_llm_script.main(
+                    {
+                        "mode": "weights",
+                        "models": evo.get("llm_models"),
+                        "state_path": os.path.join(cfg["results_dir"], "bandit_state.pkl"),
+                        "bandit_kwargs": evo.get("llm_dynamic_selection_kwargs", {}),
+                    }
+                )
+                bandit_weights = peek.get("weights", {}) or {}
+                bandit_counts = peek.get("counts", {}) or {}
+            except Exception:
+                pass
+
         diag = diagnostics_script.main(
             {
                 "db_path": db_path, "db_config": db_config,
                 "embedding_model": embedding_model,
-                "window_index": widx, "iters_completed": window_size,
+                # F8: report the ACTUAL number of candidates attempted, not the
+                # constant window_size (they differ on a budget/early break).
+                "window_index": widx, "iters_completed": iters_run,
                 "best_score_start": best_start, "window_size": window_size,
-                "current_strategy_hash": cfg.get("strategy_hash"),
-                "tau": evo.get("tau", 0.0), "prior_low_streak": prior_streak,
+                "current_strategy_hash": cfg.get("strategy_hash"),  # deprecated
+                "strategy_fingerprint": strategy_fingerprint,
+                "tau": evo.get("tau", 0.0),  # deprecated abs_floor alias
+                "stagnation_abs_floor": evo.get("stagnation_abs_floor"),
+                "stagnation_rel_frac": evo.get("stagnation_rel_frac"),
+                "prior_low_streak": prior_streak,
                 "consecutive_required": evo.get("consecutive_required", 2),
                 "trigger_metric": evo.get("trigger_metric", "delta"),
                 "novelty_accepts": counters["novelty_accepts"],
                 "novelty_rejects": counters["novelty_rejects"],
+                "novelty_rejected_cost": counters["rejected_cost"],
                 "eval_failures": counters["eval_failures"],
                 "eval_total": counters["eval_total"],
                 "fix_count": counters["fix_count"],
-                "llm_bandit_weights": cfg.get("llm_bandit_weights", {}),
+                "llm_bandit_weights": bandit_weights,
+                "llm_bandit_counts": bandit_counts,
                 "exhausted_retry_slots": [],
             }
         )
@@ -568,7 +634,45 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     return last_diag
 
 
+def _hold_no_idle_sleep():
+    """Keep the host awake for THIS process's lifetime so a long run is never
+    reaped by a macOS idle-sleep.
+
+    Root cause of earlier mid-run kills (2026-05-27): on macOS the system
+    idle-slept (battery AND, per `pmset`, even on AC where `sleep`=1 min) during
+    long gaps, and the run_window process got reaped across that sleep. We spawn
+    `caffeinate -i -m -w <our pid>`, which asserts PreventUserIdleSystemSleep until
+    THIS process exits and then auto-exits (it watches our PID) — so it self-cleans
+    even if run_window is SIGKILLed, and there is no orphaned assertion.
+
+    Best-effort and self-disabling: no-op off macOS, if `/usr/bin/caffeinate` is
+    absent, or if an outer wrapper already set ``SHINKA_CAFFEINATED`` (e.g.
+    run_detached.py). Lives in the CLI path only, so imported/test calls of
+    ``main()`` never spawn caffeinate. NOTE: caffeinate cannot override a
+    closed-lid (clamshell) sleep on a laptop — keep the lid open for unattended runs.
+    """
+    if sys.platform != "darwin" or os.environ.get("SHINKA_CAFFEINATED") == "1":
+        return None
+    if not os.path.exists("/usr/bin/caffeinate"):
+        return None
+    try:
+        import subprocess
+
+        proc = subprocess.Popen(
+            ["/usr/bin/caffeinate", "-i", "-m", "-w", str(os.getpid())],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        os.environ["SHINKA_CAFFEINATED"] = "1"
+        return proc
+    except Exception:
+        return None
+
+
 def _cli() -> None:
+    # Self-protect against host idle-sleep reaping a long run (see docstring).
+    _caffeinate_proc = _hold_no_idle_sleep()  # noqa: F841 (kept alive for the run)
     ap = argparse.ArgumentParser(description="Run W iterations under the current strategy.")
     ap.add_argument("--config", required=True, help="path to run config JSON")
     ap.add_argument("--windows", type=int, default=None)
@@ -578,17 +682,41 @@ def _cli() -> None:
         help="run windows autonomously; return only on stagnation or the window cap",
     )
     ap.add_argument("--max-windows-per-call", type=int, default=None)
+    ap.add_argument(
+        "--resume", action="store_true",
+        help="resume window_state (window_index + prior_low_streak) from the "
+             "journal's last window instead of the hand-maintained config (F15) — "
+             "removes the cross-invocation bookkeeping footgun",
+    )
     args = ap.parse_args()
     with open(args.config) as f:
         cfg = json.load(f)
     if args.windows is not None:
         cfg["windows"] = args.windows
+        # F5: an explicit --windows means "run exactly N bounded windows". Force
+        # the bounded branch so it isn't silently ignored when the config file
+        # sets cadence.mode=until_decision. (--until-decision below still wins if
+        # the user passes it explicitly alongside --windows.)
+        cfg.setdefault("cadence", {})["mode"] = "bounded"
     if args.iters is not None:
         cfg["iters"] = args.iters
     if args.until_decision:
         cfg.setdefault("cadence", {})["mode"] = "until_decision"
     if args.max_windows_per_call is not None:
         cfg.setdefault("cadence", {})["max_windows_per_call"] = args.max_windows_per_call
+    if args.resume:
+        # Read the last window's state from the journal so the orchestrator need
+        # not hand-edit window_index / prior_low_streak between calls (F15).
+        _last = journal.read_windows(cfg["results_dir"], last_n=1)
+        if _last:
+            _w = _last[-1]
+            ws = cfg.setdefault("window_state", {})
+            ws["window_index"] = int(_w.get("window_index", 0) or 0) + 1
+            ws["prior_low_streak"] = int(_w.get("low_streak", 0) or 0)
+            sys.stderr.write(
+                f"[resume] window_index→{ws['window_index']} "
+                f"prior_low_streak→{ws['prior_low_streak']}\n"
+            )
     result = main(cfg)
     sys.stdout.write(_common.dumps(result))
     sys.stdout.flush()

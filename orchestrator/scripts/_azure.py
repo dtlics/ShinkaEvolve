@@ -12,6 +12,7 @@ sent through it are mutable; this transport is not.)
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any, Dict, Optional, Tuple
 
 _POLL_INTERVAL_SEC = 3.0
@@ -61,23 +62,37 @@ async def _bg_call(
     if call_metadata:
         create_kwargs["metadata"] = {str(k): str(v) for k, v in call_metadata.items()}
 
-    submitted = await client.responses.create(**create_kwargs)
-    rid = getattr(submitted, "id", None)
-    if rid is None:
-        raise RuntimeError("Azure submission returned no response id")
-    status = getattr(submitted, "status", "unknown") or "unknown"
-    response = submitted
-    elapsed = 0.0
-    while status not in _TERMINAL:
-        if elapsed > poll_timeout:
-            raise TimeoutError(f"Azure response {rid} stuck at {status!r} after {elapsed:.0f}s")
-        await asyncio.sleep(poll_interval)
-        elapsed += poll_interval
-        response = await client.responses.retrieve(rid)
-        status = getattr(response, "status", "unknown") or "unknown"
-    if status != "completed":
-        raise RuntimeError(f"Azure response {rid} terminal status={status!r}")
-    return _extract_text(response), _usage_cost(response, api_model_name)
+    try:
+        submitted = await client.responses.create(**create_kwargs)
+        rid = getattr(submitted, "id", None)
+        if rid is None:
+            raise RuntimeError("Azure submission returned no response id")
+        status = getattr(submitted, "status", "unknown") or "unknown"
+        response = submitted
+        elapsed = 0.0
+        while status not in _TERMINAL:
+            if elapsed > poll_timeout:
+                raise TimeoutError(f"Azure response {rid} stuck at {status!r} after {elapsed:.0f}s")
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+            response = await client.responses.retrieve(rid)
+            status = getattr(response, "status", "unknown") or "unknown"
+        if status != "completed":
+            raise RuntimeError(f"Azure response {rid} terminal status={status!r}")
+        return _extract_text(response), _usage_cost(response, api_model_name)
+    finally:
+        # Close the async client WITHIN this event loop. Otherwise the underlying
+        # httpx AsyncClient is closed by its finalizer after asyncio.run() has torn
+        # the loop down, which raises a noisy "Event loop is closed" traceback to
+        # stderr on every call (harmless, but it buries real errors).
+        closer = getattr(client, "close", None) or getattr(client, "aclose", None)
+        if closer is not None:
+            try:
+                maybe = closer()
+                if inspect.isawaitable(maybe):
+                    await maybe
+            except Exception:
+                pass
 
 
 def bg_query(

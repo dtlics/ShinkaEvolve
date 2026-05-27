@@ -111,6 +111,22 @@ windows:
 python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
 ```
 
+**Long / unattended runs — avoid the idle-sleep kill.** `run_window` *self-caffeinates*
+on macOS (holds a `PreventUserIdleSystemSleep` assertion for its lifetime), so a
+direct invocation won't be reaped by a host idle-sleep mid-run (the cause of
+earlier mid-run kills — the Mac idle-slept on battery and even on AC where
+`pmset sleep`=1 min). For runs you'll leave unattended, launch via the detached
+wrapper so the run also survives the agent shell/turn ending:
+
+```bash
+python orchestrator/harness/run_detached.py --config <run>/run.json --until-decision [--resume]
+# returns immediately with {detached_pid, log, ...}; monitor via journal/run.json +
+# windows.jsonl; recover from any kill with `run_window.py --resume`.
+```
+
+Caveat caffeinate can't beat: a **closed laptop lid** (clamshell, no external
+display) forces hardware sleep — keep the lid open (or on AC) for long runs.
+
 The inner loop runs windows autonomously and returns to you only on stagnation
 (or a window cap). You read the diagnostics, optionally rewrite a mutable
 strategy file via the validate → deploy → measure → rollback protocol, and

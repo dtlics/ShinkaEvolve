@@ -29,8 +29,12 @@ INPUT (stdin JSON):
   }
 
 OUTPUT (stdout JSON):
-  select: { "ok": true, "model_name": str, "probs": [float], "models": [str] }
-  update: { "ok": true, "updated": true }
+  select:  { "ok": true, "model_name": str, "probs": [float], "models": [str] }
+  update:  { "ok": true, "updated": true }
+  weights: { "ok": true, "weights": {model: prob}, "counts": {model: {...}}, "models": [str] }
+           # read-only snapshot of the posterior + per-arm tallies for diagnostics
+           # (no selection, no update, no state write) — fixes the dead
+           # llm_bandit_weights sensor.
 """
 
 from __future__ import annotations
@@ -68,6 +72,32 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         np.random.seed(int(seed))
 
     bandit = _make_bandit(models, bandit_kwargs, state_path)
+
+    if mode == "weights":
+        # Read-only posterior snapshot for diagnostics. `posterior()` is
+        # deterministic (no RNG, unlike `select_llm`) and has no side effects, so
+        # this never perturbs the bandit. Returns per-arm selection probabilities
+        # plus cumulative submitted/completed/cost tallies (the better
+        # collapse-detector). Loads state but never writes it.
+        try:
+            probs = np.asarray(bandit.posterior(subset=payload.get("subset")), dtype=float)
+            weights = {m: float(probs[i]) for i, m in enumerate(models)}
+        except Exception:
+            weights = {m: 1.0 / len(models) for m in models} if models else {}
+        counts: Dict[str, Any] = {}
+        try:
+            st = bandit.get_state()
+            names = list(st.get("arm_names", models))
+            sub = st.get("n_submitted"); comp = st.get("n_completed"); tc = st.get("total_costs")
+            for i, m in enumerate(names):
+                counts[m] = {
+                    "submitted": float(sub[i]) if sub is not None else None,
+                    "completed": float(comp[i]) if comp is not None else None,
+                    "cost": float(tc[i]) if tc is not None else None,
+                }
+        except Exception:
+            pass
+        return {"weights": weights, "counts": counts, "models": models}
 
     if mode == "update":
         arm = payload["arm"]

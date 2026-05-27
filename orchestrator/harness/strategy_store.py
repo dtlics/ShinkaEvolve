@@ -122,11 +122,14 @@ def deploy(
     reason: str,
     window_index: Optional[int] = None,
     prior_J: Optional[float] = None,
+    concern: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Snapshot the current strategy, then deploy ``candidate_path`` over it.
 
     Returns ``{prior_hash, new_hash}``. The new file's snapshot is also written
     so it can be restored if a *later* rewrite needs to roll back to it.
+    ``concern`` records WHICH concern this rewrite targets (e.g. "prompt",
+    "scoring") so the index narrates the change without a snapshot lookup (F4).
     """
     prior_hash = snapshot(target, reason="pre-deploy snapshot")
     dst = scripts_dir() / target
@@ -136,6 +139,7 @@ def deploy(
     append_index(
         {
             "target": target,
+            "concern": concern,
             "prior_hash": prior_hash,
             "new_hash": new_hash,
             "reason": reason,
@@ -167,14 +171,43 @@ def rollback(target: str, prior_hash: str, reason: str = "J regression") -> Dict
     return {"restored_hash": prior_hash}
 
 
-def record_outcome(new_hash: str, J: float, accepted: bool) -> None:
-    """Attach the measured window J + accept/reject to the latest deploy of new_hash."""
+# Compact set of measure-window signals worth pinning into the index entry so a
+# later reader sees the outcome's evidence without re-reading windows.jsonl.
+_MEASURE_KEYS = (
+    "window_index", "delta", "J_score", "best_score_end", "novelty_acceptance_rate",
+    "evaluation_failure_rate", "novelty_rejected_cost", "stagnation_flag", "threshold",
+)
+
+
+def _measure_summary(diag: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not diag:
+        return None
+    return {k: diag.get(k) for k in _MEASURE_KEYS if k in diag}
+
+
+def record_outcome(
+    new_hash: str,
+    J: float,
+    accepted: bool,
+    decision: Optional[Dict[str, Any]] = None,
+    measure_diagnostics: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Attach the measured window J + accept/reject to the latest deploy of new_hash.
+
+    ``decision`` (the ``rollback_decision`` result: regressed/reasons/signals) and a
+    compact ``measure_diagnostics`` summary are stored on the entry so the index
+    records WHY the rewrite was accepted/rejected and the evidence behind it (F4)."""
     entries = read_index()
     for entry in reversed(entries):
         if entry.get("new_hash") == new_hash and entry.get("status") == "deployed":
             entry["J"] = J
             entry["status"] = "accepted" if accepted else "rejected"
             entry["outcome_timestamp"] = _now()
+            if decision is not None:
+                entry["decision"] = decision
+            ms = _measure_summary(measure_diagnostics)
+            if ms is not None:
+                entry["measure"] = ms
             break
     _write_index(entries)
     update_meta(new_hash, J=J, accepted=accepted)
@@ -182,6 +215,41 @@ def record_outcome(new_hash: str, J: float, accepted: bool) -> None:
 
 def current_hash(target: str) -> str:
     return file_hash(scripts_dir() / target)
+
+
+# The full set of orchestrator-mutable strategy files (the SKILL "MUTABLE" rows).
+# A fingerprint over ALL of them is what makes the per-window log self-contained:
+# a single `strategy_hash` can't say which of these was active (F4).
+MUTABLE_TARGETS = (
+    "sample_parent.py",
+    "novelty_check.py",
+    "select_llm.py",
+    "compute_reward.py",
+    "record_policy.py",
+    "stagnation_detector.py",
+    "island_policy.py",
+    "cadence_policy.py",
+    "construct_mutation_prompt.py",
+    "mutate.py",
+    "meta_summarize.py",
+)
+
+
+def current_fingerprint() -> Dict[str, str]:
+    """{target: content-hash} over every mutable strategy file present.
+
+    This is the self-contained pointer the harness stamps into each window's
+    diagnostics + run.json: it pins the EXACT version of every mutable file that
+    produced a window, and each hash resolves to a `strategy_history/<hash>/`
+    snapshot holding that file's full content. Replaces the ambiguous single
+    `strategy_hash` (F4)."""
+    sd = scripts_dir()
+    fp: Dict[str, str] = {}
+    for target in MUTABLE_TARGETS:
+        p = sd / target
+        if p.exists():
+            fp[target] = file_hash(p)
+    return fp
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +263,7 @@ def deploy_bundle(
     reason: str,
     window_index: Optional[int] = None,
     prior_J: Optional[float] = None,
+    concern: Optional[str] = None,
 ) -> Dict[str, Any]:
     """changes: [{"candidate_path":..., "target":...}, ...].
 
@@ -213,6 +282,7 @@ def deploy_bundle(
     append_index(
         {
             "type": "bundle",
+            "concern": concern,
             "targets": [ch["target"] for ch in changes],
             "prior_hashes": prior_hashes,
             "new_hashes": new_hashes,
@@ -246,13 +316,25 @@ def rollback_bundle(prior_hashes: Dict[str, str], reason: str = "J regression") 
     return {"restored_hashes": prior_hashes}
 
 
-def record_bundle_outcome(new_hashes: Dict[str, str], J: float, accepted: bool) -> None:
-    """Attach measured J + accept/reject to the latest matching bundle deploy."""
+def record_bundle_outcome(
+    new_hashes: Dict[str, str],
+    J: float,
+    accepted: bool,
+    decision: Optional[Dict[str, Any]] = None,
+    measure_diagnostics: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Attach measured J + accept/reject (+ decision/measure context, F4) to the
+    latest matching bundle deploy."""
     entries = read_index()
     for entry in reversed(entries):
         if entry.get("type") == "bundle" and entry.get("new_hashes") == new_hashes and entry.get("status") == "deployed":
             entry["J"] = J
             entry["status"] = "accepted" if accepted else "rejected"
             entry["outcome_timestamp"] = _now()
+            if decision is not None:
+                entry["decision"] = decision
+            ms = _measure_summary(measure_diagnostics)
+            if ms is not None:
+                entry["measure"] = ms
             break
     _write_index(entries)

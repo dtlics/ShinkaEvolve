@@ -115,6 +115,10 @@ def append_window(results_dir: str, diag: Dict[str, Any]) -> None:
     run["total_programs"] = diag.get("total_programs")
     run["last_window_index"] = diag.get("window_index")
     run["last_J"] = diag.get("J_score")
+    # F4: the active strategy fingerprint ({target: hash}) so run.json is
+    # self-contained about which strategy version is currently live.
+    if diag.get("strategy_fingerprint") is not None:
+        run["strategy_fingerprint"] = diag.get("strategy_fingerprint")
     run["total_cost"] = float(run.get("total_cost", 0.0)) + float(diag.get("window_cost", 0.0) or 0.0)
     run["updated_at"] = time.time()
     with open(_run_path(results_dir), "w") as f:

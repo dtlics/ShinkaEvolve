@@ -41,6 +41,40 @@ except ImportError:
     import archive_query  # type: ignore
 
 
+def island_health(
+    islands_summary,
+    db_path=None,
+    db_config=None,
+    embedding_model=None,
+):
+    """Per-island health rows for the window diagnostics. MUTABLE POLICY.
+
+    This is deliberately a **toy** default so the metric DEFINITION lives in a
+    mutable policy file rather than baked into the immutable sensor: `diversity`
+    is just the island's program count and `stagnation_count` is left None. The
+    orchestrator MAY rewrite this (e.g. compute real diversity as the embedding
+    spread within each island — the ``db_*`` params are threaded through so a
+    future version can query embeddings — and track a genuine per-island
+    generations-since-best stagnation count). Until then, downstream readers must
+    treat `diversity` as a population count, not a spread.
+
+    ``islands_summary`` is the per-island list from archive_query's "summary"
+    ({island_idx, best, count}). Returns a list of
+    {id, best, diversity, stagnation_count}.
+    """
+    out = []
+    for isl in islands_summary or []:
+        out.append(
+            {
+                "id": isl.get("island_idx"),
+                "best": isl.get("best"),
+                "diversity": isl.get("count"),  # TOY: count, not a spread metric
+                "stagnation_count": None,
+            }
+        )
+    return out
+
+
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     db_config = payload.get("db_config", {})
     programs = archive_query.main(

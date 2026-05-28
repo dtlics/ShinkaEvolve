@@ -159,6 +159,7 @@ async def run_dr_call(
     poll_interval_sec: float = DR_POLL_INTERVAL_SEC,
     poll_timeout_sec: float = DR_TIMEOUT,
     call_metadata: dict | None = None,
+    max_output_tokens: int | None = 200_000,
 ) -> tuple[str, float]:
     """Submit a single ``o3-deep-research`` call and return its text output.
 
@@ -189,6 +190,12 @@ async def run_dr_call(
         # the model grounds itself; callers may override via the `tools` arg.
         "tools": tools if tools is not None else [{"type": "web_search_preview"}],
     }
+    if max_output_tokens is not None:
+        # Cost guardrail. o3-deep-research at $40/1M output -> 200K caps a single
+        # call at ~$8 (worst case with full output); typical DR calls cost $1-2.
+        # The model returns status='incomplete' with reason='max_output_tokens' if
+        # exceeded, and the partial brief is still extractable.
+        create_kwargs["max_output_tokens"] = int(max_output_tokens)
     if call_metadata:
         create_kwargs["metadata"] = {
             str(k): str(v) for k, v in call_metadata.items()

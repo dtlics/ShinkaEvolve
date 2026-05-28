@@ -18,13 +18,32 @@ import time
 from typing import Any, Dict, Optional, Tuple
 
 _POLL_INTERVAL_SEC = 3.0
-# Per-call poll-wall cap. Lowered from 1800s after the 2026-05-27 run: codex/mini finish
-# a medium-reasoning mutation in ~3-4 min, so 12 min leaves ample margin while cutting off
-# genuinely-slow/stuck picks (gpt-5.5/pro at medium run 25-40 min) ~2.5x faster. Override
-# via SHINKA_BG_POLL_TIMEOUT_SEC. The latency-aware selection prior (select_llm.py) AVOIDS
-# slow picks; this just bounds the cost when one slips through (e.g. via the floor).
-_POLL_TIMEOUT_SEC = float(os.environ.get("SHINKA_BG_POLL_TIMEOUT_SEC", "720"))
+# Per-call poll-wall cap. 1 hour by design: bg+poll exists precisely to allow long
+# thinking time without TCP idle-kill, so the cap should only catch genuinely-stuck
+# requests (server-side hangs), not slow-but-progressing reasoning. Cost is bounded
+# by max_output_tokens (see `_MAX_OUTPUT_TOKENS_BY_MODEL` below), not by wall-clock.
+# Override via SHINKA_BG_POLL_TIMEOUT_SEC.
+_POLL_TIMEOUT_SEC = float(os.environ.get("SHINKA_BG_POLL_TIMEOUT_SEC", "3600"))
 _TERMINAL = {"completed", "failed", "incomplete", "cancelled", "expired"}
+
+# Per-model max output token caps. Sized so a single max-output call costs < $10
+# (output is the dominant cost; input is bounded by our prompt size). Pricing per
+# CLAUDE.md (Main resource deployments):
+#   azure-gpt-5.4-pro  : $180/1M out -> 50_000 tok  ~= $9.00 max
+#   azure-gpt-5.5      : $30 /1M out -> 200_000 tok ~= $6.00 max
+#   azure-gpt-5.3-codex: $14 /1M out -> 200_000 tok ~= $2.80 max
+#   azure-gpt-5.4-mini : $4.5/1M out -> 200_000 tok ~= $0.90 max
+# This is a guardrail for runaway malfunctions, not a throttle on normal use;
+# typical calls finish well under these caps. Callers may override via
+# `bg_query(..., max_output_tokens=...)`.
+_MAX_OUTPUT_TOKENS_BY_MODEL: Dict[str, int] = {
+    "azure-gpt-5.4-pro": 50_000,
+}
+_DEFAULT_MAX_OUTPUT_TOKENS = 200_000
+
+
+def _resolve_max_output_tokens(model_name: str) -> int:
+    return _MAX_OUTPUT_TOKENS_BY_MODEL.get(model_name, _DEFAULT_MAX_OUTPUT_TOKENS)
 
 
 def _extract_text(response: Any) -> str:
@@ -56,7 +75,7 @@ def _usage_cost(response: Any, api_model_name: str) -> float:
 
 async def _bg_call(
     client, api_model_name, system_msg, user_msg, reasoning_effort, call_metadata,
-    poll_interval, poll_timeout,
+    poll_interval, poll_timeout, max_output_tokens,
 ) -> Tuple[str, float]:
     create_kwargs: Dict[str, Any] = {
         "model": api_model_name,
@@ -68,6 +87,11 @@ async def _bg_call(
         create_kwargs["reasoning"] = {"effort": reasoning_effort}
     if call_metadata:
         create_kwargs["metadata"] = {str(k): str(v) for k, v in call_metadata.items()}
+    if max_output_tokens is not None:
+        # OpenAI Responses API: bounds the output token count. The model returns
+        # status='incomplete' with reason='max_output_tokens' if it would exceed
+        # this; the partial output is still extractable. Our cost guardrail.
+        create_kwargs["max_output_tokens"] = int(max_output_tokens)
 
     try:
         submitted = await client.responses.create(**create_kwargs)
@@ -113,18 +137,26 @@ def bg_query(
     call_metadata: Optional[Dict[str, Any]] = None,
     poll_interval: float = _POLL_INTERVAL_SEC,
     poll_timeout: float = _POLL_TIMEOUT_SEC,
+    max_output_tokens: Optional[int] = None,
 ) -> Tuple[str, float]:
-    """One Azure background-mode call. Returns (text, cost). Azure/OpenAI only."""
+    """One Azure background-mode call. Returns (text, cost). Azure/OpenAI only.
+
+    `max_output_tokens` defaults to a per-model cap (see _MAX_OUTPUT_TOKENS_BY_MODEL)
+    sized so a single max-output call costs < $10. Pass an explicit value to override.
+    """
     from shinka.llm.client import get_async_client_llm
     from shinka.llm.providers.model_resolver import resolve_model_backend
 
     provider = resolve_model_backend(model_name).provider
     if provider not in ("azure_openai", "openai"):
         raise ValueError(f"bg_query is Azure/OpenAI-only (got provider={provider!r}).")
+    if max_output_tokens is None:
+        max_output_tokens = _resolve_max_output_tokens(model_name)
     client, api_model_name, _ = get_async_client_llm(model_name)
     return asyncio.run(
         _bg_call(
             client, api_model_name, system_msg, user_msg,
             reasoning_effort, call_metadata, poll_interval, poll_timeout,
+            max_output_tokens,
         )
     )

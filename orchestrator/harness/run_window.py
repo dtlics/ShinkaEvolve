@@ -32,7 +32,6 @@ import argparse
 import json
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -352,9 +351,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         if seq is not None:
             mut_payload["mock_code"] = seq[counters["iter_index"] % len(seq)]
         # else identity copy of parent
-    _mut_t0 = time.time()
     mut = mutate.main(mut_payload)
-    _mut_latency = time.time() - _mut_t0  # wallclock the bandit is otherwise blind to
     # Account the mutation LLM cost immediately — it was incurred even if the
     # candidate is later rejected by novelty.
     _mut_cost = float(mut.get("cost", 0.0) or 0.0)
@@ -461,7 +458,6 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                 "reward": reward.get("reward"),
                 "baseline": reward.get("baseline", 0.0),
                 "cost": mut.get("cost", 0.0),
-                "latency_sec": _mut_latency,  # feeds the latency-aware selection prior
             }
         )
 

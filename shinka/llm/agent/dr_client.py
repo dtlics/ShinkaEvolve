@@ -55,7 +55,9 @@ logger = logging.getLogger(__name__)
 # from the main path (3600s) is plenty; we surface ``DR_TIMEOUT`` here
 # for the BackgroundOpenAIResponsesModel's poll-wall cap so the user
 # can tighten it if they want shorter individual stage timeouts.
-DR_TIMEOUT: float = 1800.0
+DR_TIMEOUT: float = float(os.environ.get("AZURE_DR_TIMEOUT_SEC", "3600.0"))  # 60 min:
+# with the web_search tool actually enabled, o3-deep-research routinely runs >30 min
+# (the old 1800s cap timed out mid-research with status still 'in_progress').
 
 # Initial backoff cadence. Polls start at 5s (DR jobs always need
 # more than that) and back off geometrically to 60s. The
@@ -153,6 +155,7 @@ async def run_dr_call(
     reasoning_effort: str = "medium",
     max_tool_calls: int = 20,
     background: bool = True,
+    tools: list | None = None,
     poll_interval_sec: float = DR_POLL_INTERVAL_SEC,
     poll_timeout_sec: float = DR_TIMEOUT,
     call_metadata: dict | None = None,
@@ -181,6 +184,10 @@ async def run_dr_call(
         "background": background,
         "reasoning": {"effort": reasoning_effort},
         "max_tool_calls": max_tool_calls,
+        # o3-deep-research REQUIRES at least one of web_search_preview / mcp /
+        # file_search tools (else HTTP 400). Default to the built-in web search so
+        # the model grounds itself; callers may override via the `tools` arg.
+        "tools": tools if tools is not None else [{"type": "web_search_preview"}],
     }
     if call_metadata:
         create_kwargs["metadata"] = {
@@ -207,11 +214,20 @@ async def run_dr_call(
         response = await client.responses.retrieve(response_id)
         last_status = getattr(response, "status", "unknown") or "unknown"
 
-    if last_status != "completed":
-        # DR finished but not with usable output. Caller decides
-        # whether to fall back to a placeholder.
+    if last_status not in ("completed", "incomplete"):
+        # failed / cancelled / expired → genuinely no usable output.
         raise RuntimeError(
             f"DR response {response_id} terminal status={last_status!r}"
+        )
+    if last_status == "incomplete":
+        # The model hit a cap (max_output_tokens / max_tool_calls / reasoning
+        # budget) but the partial output is normally still a usable brief — so we
+        # extract it instead of crashing the whole meta cycle. Log WHY so the cap
+        # can be raised if briefs come back truncated.
+        logger.warning(
+            "DR response %s ended 'incomplete' (%r) — returning partial output",
+            response_id,
+            getattr(response, "incomplete_details", None),
         )
 
     # Extract the model's final text output. Different SDK versions

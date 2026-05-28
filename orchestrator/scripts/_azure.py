@@ -13,10 +13,17 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
+import time
 from typing import Any, Dict, Optional, Tuple
 
 _POLL_INTERVAL_SEC = 3.0
-_POLL_TIMEOUT_SEC = 1800.0
+# Per-call poll-wall cap. Lowered from 1800s after the 2026-05-27 run: codex/mini finish
+# a medium-reasoning mutation in ~3-4 min, so 12 min leaves ample margin while cutting off
+# genuinely-slow/stuck picks (gpt-5.5/pro at medium run 25-40 min) ~2.5x faster. Override
+# via SHINKA_BG_POLL_TIMEOUT_SEC. The latency-aware selection prior (select_llm.py) AVOIDS
+# slow picks; this just bounds the cost when one slips through (e.g. via the floor).
+_POLL_TIMEOUT_SEC = float(os.environ.get("SHINKA_BG_POLL_TIMEOUT_SEC", "720"))
 _TERMINAL = {"completed", "failed", "incomplete", "cancelled", "expired"}
 
 
@@ -69,12 +76,15 @@ async def _bg_call(
             raise RuntimeError("Azure submission returned no response id")
         status = getattr(submitted, "status", "unknown") or "unknown"
         response = submitted
-        elapsed = 0.0
+        # WALL-CLOCK timeout (not summed poll_intervals): a slow/hanging retrieve()
+        # makes elapsed-by-interval badly undercount real time, so a "720s" cap could
+        # run 20+ min wall (observed). time.monotonic() bounds the true wall duration.
+        _t0 = time.monotonic()
         while status not in _TERMINAL:
+            elapsed = time.monotonic() - _t0
             if elapsed > poll_timeout:
-                raise TimeoutError(f"Azure response {rid} stuck at {status!r} after {elapsed:.0f}s")
+                raise TimeoutError(f"Azure response {rid} stuck at {status!r} after {elapsed:.0f}s (wall)")
             await asyncio.sleep(poll_interval)
-            elapsed += poll_interval
             response = await client.responses.retrieve(rid)
             status = getattr(response, "status", "unknown") or "unknown"
         if status != "completed":

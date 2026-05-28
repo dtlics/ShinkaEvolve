@@ -121,6 +121,14 @@ def test_novelty_check_cosine_parity():
 
 
 def test_select_llm_bandit_parity():
+    """Contract for the wrapper (latency-aware rewrite, post-run-20260527):
+
+    (a) INTERNAL state parity — `mode=weights` exposes the raw AsymmetricUCB
+        posterior unchanged, so the bandit's pickle stays portable.
+    (b) OUTPUT contract — `mode=select` applies a latency prior + `_MIN_PROB`
+        floor on top: every arm is reachable, but the bandit's winning arm
+        still has the highest blended probability when latency is uniform.
+    """
     from shinka.llm import AsymmetricUCB
     import numpy as np
 
@@ -141,12 +149,23 @@ def test_select_llm_bandit_parity():
         for arm, r in updates:
             select_llm.main({"mode": "update", "models": models, "state_path": state,
                              "arm": arm, "reward": r, "baseline": 0.0})
+        # (a) Raw posterior via `weights` mode is byte-for-byte the bandit's.
+        np.random.seed(0)
+        w = select_llm.main({"mode": "weights", "models": models, "state_path": state})
+        raw = [float(w["weights"][m]) for m in models]
+        assert len(raw) == len(ref_probs)
+        assert all(abs(a - b) < 1e-9 for a, b in zip(raw, ref_probs)), (raw, ref_probs)
+
+        # (b) `select` mode applies the floor + latency prior. Floor invariant
+        # and argmax preservation are the contract; pointwise equality is NOT.
         np.random.seed(0)
         out = select_llm.main({"mode": "select", "models": models, "state_path": state})
         probs = list(np.asarray(out["probs"], dtype=float))
-
-    assert len(probs) == len(ref_probs)
-    assert all(abs(a - b) < 1e-9 for a, b in zip(probs, ref_probs)), (probs, ref_probs)
+        from orchestrator.scripts.select_llm import _MIN_PROB
+        assert len(probs) == len(ref_probs)
+        assert all(p >= _MIN_PROB - 1e-9 for p in probs), probs
+        # bandit's winner stays the wrapper's winner (uniform latency seeds for m1/m2/m3).
+        assert int(np.argmax(probs)) == int(np.argmax(ref_probs)), (probs, ref_probs)
     return True
 
 

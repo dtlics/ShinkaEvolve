@@ -165,6 +165,66 @@ def test_budget_hardstop():
     return True
 
 
+def test_immediate_fix():
+    """WS1: an eval failure is repaired in-place by re-prompting the same model,
+    up to fix_retry_budget; fix_success counts only a RECOVERED candidate; the
+    budget railguard stops a fix attempt we can't afford."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    orig_cmp = run_window.construct_mutation_prompt.main
+    orig_mut = run_window.mutate.main
+    orig_eval = run_window._evaluate_candidate
+    try:
+        run_window.construct_mutation_prompt.main = lambda p: {
+            "patch_sys": "s", "patch_msg": "m", "patch_type": "fix"}
+        run_window.mutate.main = lambda p: {
+            "candidate_code": "fixed", "candidate_path": "/tmp/x.py",
+            "cost": 0.5, "applied": True, "name": "fix", "description": "d"}
+        ev0 = {"correct": False, "combined_score": 0.0, "error_traceback": "boom",
+               "stdout_log": "", "stderr_log": ""}
+        mut0 = {"candidate_code": "broken", "candidate_path": "/tmp/b.py", "cost": 0.0}
+
+        with tempfile.TemporaryDirectory() as td:
+            base_cfg = {"results_dir": td, "task": {"task_sys_msg": "g"},
+                        "evo": {"enable_novelty": False}}
+
+            # A: fail -> fix succeeds on attempt 1.
+            seq = iter([{"correct": True, "combined_score": 1.0, "stdout_log": "", "stderr_log": ""}])
+            run_window._evaluate_candidate = lambda *a, **k: next(seq)
+            counters = {"cost": 0.0, "iter_index": 0}
+            cfg = {**base_cfg, "budget_usd": None}
+            ev, mut, _fc = run_window._attempt_immediate_fixes(
+                cfg, dict(ev0), dict(mut0), None, "azure-x", td, td, 5, "python", 1, counters)
+            assert ev["correct"] is True and mut["candidate_code"] == "fixed", (ev, mut)
+            assert counters["fix_count"] == 1 and counters["fix_success"] == 1, counters
+            assert abs(counters["cost"] - 0.5) < 1e-9, counters  # fix cost folded
+
+            # B: fix keeps failing; budget=2 exhausts with no success.
+            run_window._evaluate_candidate = lambda *a, **k: {
+                "correct": False, "combined_score": 0.0, "error_traceback": "still",
+                "stdout_log": "", "stderr_log": ""}
+            counters = {"cost": 0.0, "iter_index": 0}
+            ev, mut, _fc = run_window._attempt_immediate_fixes(
+                cfg, dict(ev0), dict(mut0), None, "azure-x", td, td, 5, "python", 2, counters)
+            assert ev["correct"] is False and counters["fix_count"] == 2, counters
+            assert counters.get("fix_success", 0) == 0 and abs(counters["cost"] - 1.0) < 1e-9, counters
+
+            # C: budget railguard stops after the first attempt makes spend >= budget.
+            counters = {"cost": 0.0, "iter_index": 0}
+            cfg_b = {**base_cfg, "budget_usd": 0.4}
+            ev, mut, _fc = run_window._attempt_immediate_fixes(
+                cfg_b, dict(ev0), dict(mut0), None, "azure-x", td, td, 5, "python", 3, counters)
+            assert counters["fix_count"] == 1, counters  # 2nd attempt unaffordable -> stopped
+    finally:
+        run_window.construct_mutation_prompt.main = orig_cmp
+        run_window.mutate.main = orig_mut
+        run_window._evaluate_candidate = orig_eval
+    return True
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
@@ -173,6 +233,7 @@ if __name__ == "__main__":
         ("concern_bundle", test_concern_bundle),
         ("cadence_policy", test_cadence_policy),
         ("budget_hardstop", test_budget_hardstop),
+        ("immediate_fix", test_immediate_fix),
     ]
     ok = True
     for name, fn in tests:

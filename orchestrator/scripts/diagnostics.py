@@ -88,6 +88,13 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     iters = int(payload.get("iters_completed", 0) or 0)
     fix_count = int(payload.get("fix_count", 0) or 0)
     fix_rate = (fix_count / iters) if iters else 0.0
+    # WS1: with the IMMEDIATE-fix mechanism, fix_count = repair attempts made this
+    # window and fix_success = attempts that recovered correctness. fix_success_rate
+    # tells the orchestrator whether fixes actually WORK (SKILL ladder rung 5: a high
+    # fix_rate with a low fix_success_rate => rewrite the fix concern). None when no
+    # fix was attempted, so the orchestrator can distinguish "no fixes" from "0% worked".
+    fix_success = int(payload.get("fix_success", 0) or 0)
+    fix_success_rate = (fix_success / fix_count) if fix_count else None
 
     # Island health. The metric DEFINITION lives in the MUTABLE island_policy
     # (F10) so the orchestrator can later evolve "diversity"/"stagnation_count"
@@ -114,6 +121,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "novelty_rejected_cost": float(payload.get("novelty_rejected_cost", 0.0) or 0.0),
         "evaluation_failure_rate": evaluation_failure_rate,
         "fix_rate": fix_rate,
+        "fix_success_rate": fix_success_rate,
         "llm_bandit_weights": payload.get("llm_bandit_weights", {}),
         "llm_bandit_counts": payload.get("llm_bandit_counts", {}),
         "island_health": island_health,

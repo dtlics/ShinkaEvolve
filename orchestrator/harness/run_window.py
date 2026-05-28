@@ -236,6 +236,116 @@ def _bootstrap_initial(cfg: Dict[str, Any]) -> float:
     return float(embed_cost or 0.0)
 
 
+def _attempt_immediate_fixes(
+    cfg: Dict[str, Any],
+    ev: Dict[str, Any],
+    mut: Dict[str, Any],
+    learn_from: Optional[Dict[str, Any]],
+    model_name: Optional[str],
+    gen_dir: str,
+    results_dir: str,
+    generation: int,
+    language: str,
+    fix_budget: int,
+    counters: Dict[str, Any],
+    enable_web_search: bool = False,
+) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
+    """WS1 — IMMEDIATE correctness repair (MUTABLE fix concern).
+
+    Returns ``(ev, mut, fix_cost)`` — the final eval, the final mutation result,
+    and the total $ spent on fix-mutation calls (so the caller can attribute the
+    slot's whole model spend to the bandit arm; the ledger already has it).
+
+    On an eval FAILURE, re-prompt the SAME model with the just-failed code + its
+    error fed back (through the existing ``construct_mutation_prompt`` fix branch),
+    re-evaluate, up to ``fix_budget`` times. Returns the final ``(ev, mut)``.
+
+    Design (fits the window loop without side effects elsewhere):
+      * Correctness-only — does NOT re-run the novelty gate; the slot already
+        passed novelty, and a repair is meant to recover correctness, not change
+        the idea. (Caller re-embeds the repaired code so the archived embedding
+        still matches the stored code — novelty comparisons stay honest.)
+      * Every attempt's mutation cost is folded into ``counters["cost"]`` so the
+        per-window ledger + budget railguard account for it. A within-loop budget
+        check prevents *starting* an attempt we can't afford (overshoot ≤ 0).
+      * ``fix_budget`` is THE lever: 1 for ordinary gens (``evo.fix_retry_budget``),
+        3 when grounding a novel DR direction as a new island's first member (WS5).
+      * ``enable_web_search`` is OFF for ordinary fixes; WS4/WS5 turn it on only
+        when the repair is nailing a DR reference. Left mutable for future
+        outer-loops (one of the framework's policy switches, like novelty/bandit).
+    """
+    if ev.get("correct"):
+        return ev, mut, 0.0
+    evo = cfg["evo"]
+    task = cfg["task"]
+    budget = cfg.get("budget_usd")
+    # prior_total is stable within a window (append_window folds window cost only
+    # at window end; interventions land between windows), so reading it once here
+    # matches the inter-candidate railguard in _one_window.
+    prior_total = journal.total_cost(cfg["results_dir"])
+    fix_cost = 0.0
+    fix_used = 0
+    while (not ev.get("correct")) and fix_used < int(fix_budget):
+        if budget is not None and (prior_total + counters.get("cost", 0.0)) >= float(budget):
+            break  # railguard: don't start a fix attempt we can't afford
+        fix_used += 1
+        counters["fix_count"] = counters.get("fix_count", 0) + 1
+        # The just-failed candidate becomes the "incorrect program" to repair.
+        # sample_fix reads the error from metadata.stdout_log/stderr_log, so route
+        # error_traceback (carries the timeout reason + stderr tail) into stderr_log.
+        incorrect_program = {
+            "id": f"gen{generation}_fix{fix_used}",
+            "code": mut["candidate_code"],
+            "combined_score": ev.get("combined_score", 0.0) or 0.0,
+            "generation": generation,
+            "metadata": {
+                "stdout_log": ev.get("stdout_log", "") or "",
+                "stderr_log": ev.get("error_traceback") or ev.get("stderr_log") or "",
+            },
+        }
+        fix_prompt = construct_mutation_prompt.main(
+            {
+                "parent": incorrect_program,
+                "needs_fix": True,
+                # the correct ancestor to learn from (the sampled parent), if any.
+                "ancestor_inspirations": [learn_from] if learn_from else [],
+                "task_sys_msg": task.get("task_sys_msg"),
+                "language": language,
+                "seed": evo.get("seed"),
+            }
+        )
+        fix_payload: Dict[str, Any] = {
+            "parent_code": mut["candidate_code"],
+            "patch_sys": fix_prompt["patch_sys"],
+            "patch_msg": fix_prompt["patch_msg"],
+            "patch_type": fix_prompt["patch_type"],
+            "patch_dir": gen_dir,
+            "language": language,
+            "model_name": model_name,
+            "reasoning_effort": evo.get("reasoning_effort"),
+            "max_attempts": evo.get("max_patch_attempts", 3),
+            "run_id": cfg.get("run_id"),
+            "generation": generation,
+            "verbose": cfg.get("verbose", False),
+        }
+        if enable_web_search:
+            fix_payload["enable_web_search"] = True  # WS4 plumbs this into _azure
+        fix_mut = mutate.main(fix_payload)
+        _c = float(fix_mut.get("cost", 0.0) or 0.0)
+        fix_cost += _c
+        counters["cost"] = counters.get("cost", 0.0) + _c
+        mut = fix_mut
+        if not fix_mut.get("applied"):
+            continue  # patch didn't apply; spend counted, retry if budget remains
+        ev = _evaluate_candidate(
+            cfg, fix_mut["candidate_path"], results_dir, counters["iter_index"], generation
+        )
+        if ev.get("correct"):
+            counters["fix_success"] = counters.get("fix_success", 0) + 1
+            break
+    return ev, mut, fix_cost
+
+
 def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str, int]) -> None:
     db_path = cfg["db_path"]
     db_config = cfg["db_config"]
@@ -356,6 +466,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     # candidate is later rejected by novelty.
     _mut_cost = float(mut.get("cost", 0.0) or 0.0)
     counters["cost"] = counters.get("cost", 0.0) + _mut_cost
+    _slot_mut_cost = _mut_cost  # arm's total model spend for this slot (+= fix cost below)
 
     # 3b. novelty check (MUTABLE policy) — gated; live runs enable it. On reject,
     # the slot is dropped before evaluation (matches shinka's rejection sampling).
@@ -387,6 +498,27 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     ev = _evaluate_candidate(
         cfg, mut["candidate_path"], results_dir, counters["iter_index"], generation
     )
+    # 4a. IMMEDIATE FIX (WS1 — MUTABLE fix concern). On an eval failure, repair the
+    # candidate in-place by re-prompting the same model with the error, up to
+    # evo.fix_retry_budget times (default 1 for ordinary gens). Skipped in mock mode
+    # (offline tests don't make LLM calls). eval_total/eval_failures below count the
+    # FINAL post-fix state, so evaluation_failure_rate is the *un-repairable* rate.
+    if (
+        not ev["correct"]
+        and not (cfg.get("mock", {}) or {}).get("enabled")
+        and int(evo.get("fix_retry_budget", 1)) > 0
+    ):
+        _pre_fix_code = mut["candidate_code"]
+        ev, mut, _fix_cost = _attempt_immediate_fixes(
+            cfg, ev, mut, parent, model_name, gen_dir, results_dir,
+            generation, language, int(evo.get("fix_retry_budget", 1)), counters,
+        )
+        _slot_mut_cost += _fix_cost  # attribute the repair spend to the same arm
+        # Re-embed only if a fix actually changed the code, so the archived
+        # embedding matches the stored code (keeps the novelty gate honest).
+        if evo.get("enable_novelty") and mut["candidate_code"] != _pre_fix_code:
+            code_embedding, _re_embed_cost = _embed(cfg, mut["candidate_code"])
+            counters["cost"] = counters.get("cost", 0.0) + float(_re_embed_cost or 0.0)
     counters["eval_total"] += 1
     if not ev["correct"]:
         counters["eval_failures"] += 1
@@ -408,7 +540,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             "parent": {"combined_score": parent.get("combined_score", 0.0)},
             "mutation": {
                 "patch_type": prompt["patch_type"], "patch_name": mut.get("name"),
-                "num_applied": mut.get("num_applied"), "cost": mut.get("cost", 0.0),
+                "num_applied": mut.get("num_applied"), "cost": _slot_mut_cost,
                 "model_name": model_name, "transport": mut.get("transport"),
                 "attempts": mut.get("attempts"),
             },
@@ -457,7 +589,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                 "arm": model_name,
                 "reward": reward.get("reward"),
                 "baseline": reward.get("baseline", 0.0),
-                "cost": mut.get("cost", 0.0),
+                "cost": _slot_mut_cost,
             }
         )
 
@@ -516,6 +648,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "iter_index": 0, "eval_total": 0, "eval_failures": 0,
             "novelty_accepts": 0, "novelty_rejects": 0, "fix_count": 0, "cost": 0.0,
             "rejected_cost": 0.0,  # F13: spend on novelty-rejected (un-evaluated) slots
+            "fix_success": 0,      # WS1: immediate fixes that recovered correctness
         }
         # HARD budget railguard (immutable safety, NOT a strategy knob): stop
         # starting candidates once cumulative spend (this window so far + all
@@ -574,6 +707,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 "eval_failures": counters["eval_failures"],
                 "eval_total": counters["eval_total"],
                 "fix_count": counters["fix_count"],
+                "fix_success": counters.get("fix_success", 0),
                 "llm_bandit_weights": bandit_weights,
                 "llm_bandit_counts": bandit_counts,
                 "exhausted_retry_slots": [],

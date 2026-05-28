@@ -79,11 +79,17 @@ Diagnostics shape:
 ```
 { window_index, iters_completed, best_score_start, best_score_end, delta,
   J_score, strategy_fingerprint, novelty_acceptance_rate, novelty_rejected_cost,
-  evaluation_failure_rate, fix_rate, llm_bandit_weights, llm_bandit_counts,
+  evaluation_failure_rate, fix_rate, fix_success_rate, llm_bandit_weights, llm_bandit_counts,
   island_health:[{id,best,diversity,stagnation_count}],
   stagnation_flag, low_streak, threshold, exhausted_retry_slots, total_programs,
   window_cost, total_cost, budget_remaining, budget_hit, return_reason }
 ```
+
+`evaluation_failure_rate` is the **un-repairable** failure rate — the fraction of
+slots still incorrect *after* immediate fixes ran (WS1). `fix_rate` = repair
+attempts ÷ slots; `fix_success_rate` = repairs that recovered correctness ÷ attempts
+(`null` when no fix was attempted). A high `fix_rate` with a low `fix_success_rate`
+is the signal that the fix concern needs a rewrite (ladder rung 5).
 
 `stagnation_flag` fires automatically when a window is "low" for
 `consecutive_required` windows. A window is **low** when the best-score gain
@@ -128,7 +134,7 @@ file in the concern's row together.
 | **Exploration / parent** | `sample_parent.py` | (feeds mutate) | flat J with high novelty acceptance |
 | **Diversity / novelty** | `novelty_check.py` | `record_policy.py` (logs sim), `diagnostics` (rate) | `novelty_acceptance_rate`, `novelty_max_similarity` |
 | **Prompt** | `construct_mutation_prompt.py` | `mutate.py` (sends it) | `evaluation_failure_rate`, recurring `exhausted_retry_slots` |
-| **Fix / repair** | `sample_parent.py` (`needs_fix`) | `construct_mutation_prompt.py` (`sample_fix`), `mutate.py` (retry budget) | `fix_rate` |
+| **Fix / repair** | `run_window.py` `_attempt_immediate_fixes` (the immediate repair loop + `evo.fix_retry_budget`) | `construct_mutation_prompt.py` (`sample_fix` prompt), `mutate.py` (apply-retry budget) | `fix_rate`, `fix_success_rate` |
 | **Stagnation trigger** | `stagnation_detector.py` | `diagnostics.py` | `J_score`, `low_streak` |
 | **Memory** | `record_policy.py` | `sample_parent`/`novelty`/`diagnostics` readers | what metadata fields exist |
 | **Island structure** | `island_policy.py` | executed by `archive_record` (foundation) | `island_health` per-island trajectory |
@@ -184,9 +190,12 @@ strategies + their J — the EvoX H) and the journal (the population descriptor)
 4. Reward looks miscalibrated (journal: high reward, low improvement) → rewrite
    the **scoring concern** as a bundle (`compute_reward.py` + `select_llm.py` +
    `sample_parent.py`).
-5. Fixes are wasteful or never succeed (`fix_rate` high, fixes stay incorrect) →
-   rewrite the **fix concern** (`sample_parent.py` `needs_fix` + the `sample_fix`
-   prompt in `construct_mutation_prompt.py`; or tune `max_patch_attempts`).
+5. Fixes are wasteful or never succeed (`fix_rate` high, `fix_success_rate` low) →
+   rewrite the **fix concern**: tune `evo.fix_retry_budget`, edit the `sample_fix`
+   repair prompt in `construct_mutation_prompt.py`, or (rarely) the immediate-fix
+   loop `_attempt_immediate_fixes` in `run_window.py`. If failures are *timeouts*,
+   the repair prompt already feeds the error back — but also confirm `task_sys_msg`
+   carries the abstract runtime-budget caution (see Boot).
 6. Generic stagnation → rewrite the **exploration concern** (`sample_parent.py`).
 7. Framework rewrites aren't breaking the plateau → you need NEW IDEAS. Gather
    context (best program, recent attempts, journal stats) and call
@@ -232,9 +241,14 @@ Helpers: `harness/strategy_store.py`, `harness/validate_strategy.py`.
 The archive is NEVER reset across strategy changes.
 
 ### Failure escalation
-The inner loop retries broken APPLIES itself (bounded, error fed back) and
-records eval failures as incorrect programs the fix concern handles. You see
-failures only via `evaluation_failure_rate` / `fix_rate` / `exhausted_retry_slots`.
+Two repair layers run *inside* the window before you ever see a failure: (1) `mutate.py`
+retries a broken APPLY (patch doesn't apply), bounded, error fed back; (2) WS1's
+`_attempt_immediate_fixes` repairs an EVAL failure in-place — re-prompting the same
+model with the failed code + its error (timeout reason or tableau mismatch), up to
+`evo.fix_retry_budget` times (default 1), re-evaluating each time. So
+`evaluation_failure_rate` is the *post-repair* rate, and `fix_success_rate` says
+whether the repairs worked. You see failures only via these rates +
+`exhausted_retry_slots`.
 Escalate to `subagents/debug-agent.md` only when one candidate exhausts its retry
 budget across two parents. Write its report to `strategy_history/debug_<w>.md`,
 act on its one recommendation, forget the detail. For periodic structural reads,
@@ -295,7 +309,7 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
                 "migration_interval": 10, "enable_dynamic_islands": false, "stagnation_threshold": 100},
   "evo": {"window_size": 15, "patch_types": ["diff","full","cross"], "patch_type_probs": [0.6,0.3,0.1],
           "llm_models": ["azure-gpt-5.4-mini","azure-gpt-5.5"], "llm_dynamic_selection_kwargs": {"cost_aware_coef": 0.5},
-          "reasoning_effort": "medium", "max_patch_attempts": 3, "reward_mode": "absolute",
+          "reasoning_effort": "medium", "max_patch_attempts": 3, "fix_retry_budget": 1, "reward_mode": "absolute",
           "embedding_model": "azure-text-embedding-3-small", "enable_novelty": true,
           "code_embed_sim_threshold": 0.99, "stagnation_abs_floor": 0.001,
           "stagnation_rel_frac": 0.05, "consecutive_required": 2},
@@ -305,6 +319,9 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
 ```
 `llm_models` set → bandit picks per candidate; `enable_novelty` → embedding gate.
 Reasoning models (e.g. `azure-gpt-5.4-pro`) require `reasoning_effort` ≥ "medium".
+`fix_retry_budget` (default 1) = immediate repair attempts on an eval failure
+before the slot is recorded as incorrect (WS1); the orchestrator passes a larger
+budget only when grounding a novel DR direction as a new island (WS5).
 
 **Window size & cadence (EvoX-tuned).** `window_size` (W) is the stagnation unit;
 EvoX uses W ≈ 10% of the total iteration budget — set it accordingly (default 15).

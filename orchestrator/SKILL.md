@@ -151,12 +151,18 @@ evaluator, the user's `evaluate.py`/`initial.<ext>`).
 ## The phases of a run
 
 ### Boot
-1. Read the problem. Decide whether to call `scripts/deep_research.py` (~$5 —
-   deliberate). Use it if SOTA is non-obvious. Use the brief to choose the
-   initial program, `num_islands` (4 default, 8 if multiple algorithmic families
-   compete), and `task_sys_msg`.
-2. Author `run.json` (schema below). Default strategy files as shipped.
-3. Warmup: `run_window.py --config <run>/run.json --windows 1 --iters 1`. If it
+1. **Author `task_sys_msg` — your first real job.** READ the task's `initial.<ext>`
+   and `evaluate.py`, then write a precise problem statement: the goal, the gate set
+   / hard constraints, the score's shape, and an **abstract** caution that each eval
+   has a runtime budget so the synthesized code must stay efficient (NO specific
+   numbers — the limit isn't useful to leak and timeouts were a top failure mode last
+   run). Do NOT spoil the eval criterion (don't reveal held-out specifics or anything
+   that lets a mutation game the score instead of solving the problem).
+2. Decide whether to call `deep_research.py` for SOTA (see the DR section). Use the
+   brief to pick the initial program, `num_islands` (4 default, 8 if multiple
+   algorithmic families compete), and to sharpen `task_sys_msg`.
+3. Author `run.json` (schema below). Default strategy files as shipped.
+4. Warmup: `run_window.py --config <run>/run.json --windows 1 --iters 1`. If it
    fails, STOP and report — never fix the evaluator (foundation).
 
 ### Main loop
@@ -208,6 +214,56 @@ strategies + their J — the EvoX H) and the journal (the population descriptor)
    enough, escalate to `deep_research.py` and TRIAGE its brief (Boot/DR section).
 8. Deep research + rewrites exhausted over several windows → terminate and write
    `RUN_SUMMARY.md` (including foundation-change recommendations).
+
+### Deep research: when to call, how to prompt, and triaging the brief
+DR is the web-grounded escalation above meta. It is *discovery* (find SOTA), not
+*instantiation* (write the code) — that split drives everything below.
+
+**When.** After meta + ≥1 rewrite haven't moved J, and the gap looks *algorithmic*
+(you need a technique the search won't invent). Always pass `results_dir` so the call
+self-logs (prompt + brief) to `journal/calls/` and folds cost into the ledger (WS7).
+
+**How to write the DR query (this is where round-2 went wrong).** Ask for the
+*general SOTA techniques for the problem* — or for a well-defined **sub-problem** —
+described in the model's OWN words, with a citation (author/year/arXiv id). Do NOT ask
+for "the **exact** algorithm from [named paper]" or for a verbatim `reference_snippet`:
+that shape reads as "reproduce copyrighted text" and Azure's content filter refuses it
+**deterministically** (verified — re-firing the blocked query refused again, same text,
+~$0.8 wasted). There is therefore NO DR-retry: a `content_filter`/refusal means
+*rewrite the query shape*, not retry. Keep it concise — state the problem, the
+constraints, what you've tried, and the sub-question; don't dump the whole codebase.
+A DR query may target a sub-direction (e.g. "SOTA for parallel F2 Gaussian elimination
+on a grid") whose answer you then compose into the task's solution.
+
+**Triage the returned brief — your job, per technique** (DR is infrequent, so judge
+each deliberately; EXAMINE THE STRUCTURED LOGS rather than guessing — read
+`journal.read_calls`, `archive_query` `top_n`/`recent_failures`, and the directions
+already in `evo.meta_directions`):
+- **Novel** (no archived program or prior direction resembles it) → GROUND it as a
+  fresh-lineage first member: a dedicated short *grounding run* (below) seeded from the
+  base seed, with pro + web search + the reference, `fix_retry_budget: 3` (a from-scratch
+  reference implementation earns more repair attempts).
+- **History-similar** (resembles something already tried/archived) → use pro + web
+  search to COMBINE it into the closest existing program (parent = that gen),
+  `fix_retry_budget: 1` (counts as an ordinary improvement).
+- **Otherwise → ignore it.** Don't dilute the search with low-promise directions.
+
+**The grounding run (executable recipe, no new machinery).** Author a small `run.json`
+(or override the live one) with: `llm_models: ["azure-gpt-5.4-pro@high"]` (pinned — the
+one time pro is in the mutation pool), a single weighted direction
+`evo.meta_directions: [{text: "<technique + the reference + concrete steps>", weight: 1}]`,
+`evo.mutation_web_search: true`, `fix_retry_budget: 3` (novel) or `1` (similar), and a
+short window (`--iters 1..3`). Web search fires on the mutation + its fixes; pro reads
+the reference and implements it; the immediate-fix loop recovers correctness. **Never
+run pro with web search on a direction that has NO solid reference** — that's the only
+sanctioned pro+websearch use. Then fold the grounded program back into the main run
+(the archive is shared) and resume normal evolution.
+
+*Island isolation note:* literal "spawn a brand-new island N+1 on demand" is managed by
+shinka (`num_islands` / dynamic-island spawn in `island_policy.py`), not forced here —
+a grounding run gives the direction a fresh *lineage* (seeded from the base seed) within
+the existing island structure. If a task genuinely needs hard per-direction island
+isolation, raise `num_islands` at boot or flag it for `RUN_SUMMARY.md` (foundation).
 
 ### Strategy rewrite protocol
 Helpers: `harness/strategy_store.py`, `harness/validate_strategy.py`.
@@ -356,12 +412,13 @@ weight and prepends the failure_note. The legacy `evo.meta_recommendations` sing
 string is still honored (whole blob to every gen) when `meta_directions` is absent.
 
 **Web search (WS4) is OFF by default and gated to two scenarios:** (1) the DR call
-itself; (2) pro nailing a DR reference (the grounding path, Boot/DR). The
-`mutate.py` payload takes `enable_web_search`, plumbed to `_azure.bg_query`. A third
-switch, `evo.fix_web_search` (default false), is left **mutable** for a future
-outer-loop that wants ordinary fix-retries to consult the web. Web search never
-fires on a normal meta-sampled mutation. Caveat: tool support is per-deployment —
-enable it only for a model you've confirmed accepts `web_search_preview`.
+itself; (2) pro nailing a DR reference (the grounding run, Boot/DR). Two run.json
+switches drive scenario 2: `evo.mutation_web_search` (the grounding run's mutation
+calls) and `evo.fix_web_search` (its fix-retries) — both default false and only set
+on a deliberate grounding run. `mutate.py` takes `enable_web_search`, plumbed to
+`_azure.bg_query`. Web search never fires on a normal meta-sampled mutation. Caveat:
+tool support is per-deployment — enable it only for a model you've confirmed accepts
+`web_search_preview`.
 
 **Window size & cadence (EvoX-tuned).** `window_size` (W) is the stagnation unit;
 EvoX uses W ≈ 10% of the total iteration budget — set it accordingly (default 15).

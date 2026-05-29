@@ -517,6 +517,11 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         "language": language,
         "model_name": model_name,
         "reasoning_effort": reasoning_effort,
+        # WS5: web search on the MUTATION call — OFF by default; the orchestrator
+        # sets evo.mutation_web_search on a dedicated *grounding* run (pinned pro +
+        # one DR direction + the reference) so the model can consult the source
+        # while implementing it. Normal evolutionary runs leave it false.
+        "enable_web_search": bool(evo.get("mutation_web_search", False)),
         "max_attempts": evo.get("max_patch_attempts", 3),
         "run_id": cfg.get("run_id"),
         "generation": generation,

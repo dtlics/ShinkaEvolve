@@ -810,6 +810,72 @@ class ProgramDatabase:
         self.conn.commit()
 
     @db_retry()
+    def record_meta_brief(
+        self,
+        island_idx: int,
+        generation: int,
+        content: str,
+        stage: str = "orchestrator",
+        structured_json: Optional[str] = None,
+        model_used: Optional[str] = None,
+        cost: float = 0.0,
+    ) -> None:
+        """Persist a per-island DIRECTION ("brief") into the existing ``meta_briefs``
+        table (no schema change). The orchestrator authors ``content`` at runtime to
+        steer ONE island in a distinct direction; ``get_latest_meta_brief`` reads it
+        back per island. This is the mechanism that keeps islands genuinely
+        DIFFERENTIATED rather than all evolving under one global direction."""
+        if self.read_only:
+            raise PermissionError("record_meta_brief requires a writable database")
+        if not self.cursor or not self.conn:
+            raise ConnectionError("DB not connected.")
+        self.cursor.execute(
+            """
+            INSERT INTO meta_briefs (
+                island_idx, generation, stage, content, structured_json,
+                model_used, cost, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(island_idx), int(generation), str(stage), content,
+                structured_json, model_used, float(cost or 0.0), time.time(),
+            ),
+        )
+        self.conn.commit()
+
+    @db_retry()
+    def get_latest_meta_brief(self, island_idx: int) -> Optional[Dict[str, Any]]:
+        """Return the most recent meta brief for ``island_idx`` (by generation, then
+        recency), or None if the island has no brief. None => the island falls back
+        to the global direction (byte-identical to the no-brief default)."""
+        if not self.cursor:
+            return None
+        self.cursor.execute(
+            """
+            SELECT island_idx, generation, stage, content, structured_json,
+                   model_used, cost, created_at
+            FROM meta_briefs
+            WHERE island_idx = ?
+            ORDER BY generation DESC, created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (int(island_idx),),
+        )
+        row = self.cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "island_idx": row["island_idx"],
+            "generation": row["generation"],
+            "stage": row["stage"],
+            "content": row["content"],
+            "structured_json": row["structured_json"],
+            "model_used": row["model_used"],
+            "cost": row["cost"],
+            "created_at": row["created_at"],
+        }
+
+    @db_retry()
     def _count_programs_in_db(self) -> int:
         if not self.cursor:
             return 0
@@ -2567,6 +2633,32 @@ class ProgramDatabase:
             logger.warning("Cannot spawn island: no island manager configured")
             return None
         return self.island_manager.spawn_island_from_program(program_id)
+
+    @db_retry()
+    def apply_island_actions(
+        self, actions: Optional[Dict[str, Any]], current_generation: int
+    ) -> Dict[str, Any]:
+        """Execute island actions DECIDED by the (mutable) ``island_policy`` — WITHOUT
+        re-deciding (the decision already happened in ``island_policy.main``). This is
+        the OPT-IN path (``evo.island_policy_driven``); the default add()-time
+        maintenance is unchanged. To avoid double-execution, drive this only with the
+        db_config auto-triggers OFF (``enable_dynamic_islands=false`` + ``migration_rate``
+        = 0, the defaults). Uses shinka's existing executors (``perform_migration`` /
+        ``spawn_new_island``); never re-decides. Returns what actually ran."""
+        actions = actions or {}
+        done: Dict[str, Any] = {"migrated": False, "spawned": False, "retired": None}
+        if not self.island_manager:
+            return done
+        if actions.get("migrate"):
+            self.island_manager.perform_migration(int(current_generation))
+            done["migrated"] = True
+        if actions.get("spawn"):
+            done["spawned"] = bool(self.island_manager.spawn_new_island())
+        # retire: island_policy's default never returns a retire index. A future
+        # rewrite that does should route through the NON-destructive eviction used by
+        # spawn_island_from_program; we do not execute an ad-hoc retire here (it would
+        # risk orphaning lineage). The decision is still surfaced upstream for logging.
+        return done
 
     def close(self):
         """Closes the database connection."""

@@ -73,16 +73,17 @@ improvements — all green). We followed the EvoX protocol (window → J → sta
 
 ## Still deferred (revisit after live runs prove the basics)
 - **Richer multi-step meta.** `meta_summarize.py` is the extracted, mutable "meta
-  round" — a single Azure call proposing directions → `evo.meta_recommendations` →
-  `construct_mutation_prompt`. Shinka's original 3-step cycle
+  round" — a single Azure call proposing weighted `directions` + a `failure_note`
+  (→ `evo.meta_directions` / `evo.meta_failure_note`, sampled per-gen). Shinka's
+  original 3-step cycle
   (drift→cache→summarize, `shinka/core/summarizer.py`) was pruned; re-introduce the
   extra stages inside `meta_summarize.py` only if a single call proves too shallow.
 - **Prompt evolution** (upstream `shinka/core/prompt_evolver.py`, pruned here) —
   the orchestrator subsumes that role for strategy code; re-introduce a mutable
   task-prompt evolver only if evolving the prompt (not just the code) proves worth it.
-- **Reasoning-effort as a bandit arm.** `mutate` takes a single `reasoning_effort`
-  from config; shinka's `sample_model_kwargs` treats it as a sampled dimension.
-  Promote it to a bandit dimension if effort selection matters.
+- **Reasoning-effort as a bandit arm — SHIPPED (WS6), no longer deferred.** An
+  `llm_models` entry may be `"model@effort"` and the bandit learns each
+  (model, effort) arm separately (`run_window` splits the arm for the call).
 - **Per-island J-score.** `stagnation_detector` computes a global J; a per-island
   J would let interventions target the stalled island.
 - **`archive_query` full-table scans** for top_n/summary on very long runs —

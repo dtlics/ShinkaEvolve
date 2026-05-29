@@ -25,7 +25,8 @@ INPUT (stdin JSON):
     "subset": [str] | null,          # restrict selection to these arms
     "seed": int | null,
     # update mode:
-    "arm": str, "reward": float | null, "baseline": float | null, "cost": float | null
+    "arm": str, "reward": float | null, "baseline": float | null, "cost": float | null,
+    "cost_only": false               # C0: record cost without a reward update (reject path)
   }
 
 OUTPUT (stdout JSON):
@@ -101,9 +102,14 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     if mode == "update":
         arm = payload["arm"]
-        reward = payload.get("reward")
-        baseline = payload.get("baseline")
-        bandit.update(arm=arm, reward=reward, baseline=baseline)
+        # C0: cost_only records the arm's spend WITHOUT a reward update — used for a
+        # novelty-rejected slot (real spend, no quality signal), so the arm is not
+        # spuriously penalized yet its cost is not undercounted (the cheap-arm
+        # entrenchment driver H3 named). Without cost_only, reward=None imputes worst.
+        if not payload.get("cost_only"):
+            reward = payload.get("reward")
+            baseline = payload.get("baseline")
+            bandit.update(arm=arm, reward=reward, baseline=baseline)
         cost = payload.get("cost")
         if cost is not None:
             try:

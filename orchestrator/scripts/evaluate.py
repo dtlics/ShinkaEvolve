@@ -33,6 +33,7 @@ OUTPUT (stdout JSON):
     "private_metrics": {..},
     "error": str | null,            # validation/first error message
     "error_traceback": str | null,  # truncated traceback when correct=false
+    "text_feedback": str | null,    # evaluator's human-readable reason (domain-failure detail)
     "stdout_log": str,
     "stderr_log": str,              # already head+tail truncated to ~16KB
     "runtime_sec": float
@@ -149,6 +150,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "private_metrics": metrics.get("private", {}) or {},
         "error": error,
         "error_traceback": error_traceback,
+        "text_feedback": metrics.get("text_feedback"),
         "timed_out": bool(timed_out),
         "stdout_log": results.get("stdout_log", "") or "",
         "stderr_log": stderr_log,

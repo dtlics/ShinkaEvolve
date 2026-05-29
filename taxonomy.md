@@ -39,7 +39,7 @@ targets. Each becomes a `scripts/*.py` with a stable JSON contract.
 | `sample_parent.py` | `ProgramDatabase.sample_with_fix_mode` → island_sampler + parents + inspirations ([dbase.py:1372](shinka/database/dbase.py), [parents.py](shinka/database/parents.py), [island_sampler.py](shinka/database/island_sampler.py), [inspirations.py](shinka/database/inspirations.py)) | which island, which parent (power_law/weighted/beam/…), which inspirations + ordering, fix-mode fallback | exploration/exploitation balance is the #1 lever when search stalls |
 | `novelty_check.py` | `NoveltyJudge.assess_novelty_with_rejection_sampling` ([novelty_judge.py:60](shinka/core/novelty_judge.py)) | embedding-cosine threshold + accept/reject/resample logic | rejection rate directly throttles diversity; classic plateau knob |
 | `select_llm.py` | `AsymmetricUCB.select_llm`/`posterior`/`update` ([prioritization.py:170/601/470](shinka/llm/prioritization.py)) | arm-selection (UCB vs Thompson vs forced mix), reward shaping, cost blending | when the bandit collapses to one model and J is flat, re-exploration must be forced |
-| `stagnation_detector.py` | **new** (no Shinka equivalent; cf. `is_stagnant` [dbase.py:2499](shinka/database/dbase.py)) | compute J = Δ·log(1+s_start)/√W, set `stagnation_flag` when J<τ for 2 windows | the entire meta-loop trigger; τ and the J formula are tuning surfaces |
+| `stagnation_detector.py` | **new** (no Shinka equivalent; cf. `is_stagnant` [dbase.py](shinka/database/dbase.py)) | compute `J=Δ/√W` (INFORMATIONAL only — rollback uses the multi-signal `rollback_decision.py`, not J), set `stagnation_flag` when a window stays "low" (`Δ ≤ max(stagnation_abs_floor, stagnation_rel_frac·s_start)`) for `consecutive_required` windows | the meta-loop trigger; the hybrid floors are the tuning surface (the old `J<τ` guard and the `log(1+s_start)` J formula are DEPRECATED — F16) |
 | `island_policy.py` | `CombinedIslandManager` migrate/spawn/retire ([islands.py:498](shinka/database/islands.py)), `check_and_spawn_island_if_stagnant` | when to fork a fresh island, retire a collapsed one, migrate elites | population-structure repair when an island's diversity dies |
 
 **Non-obvious calls, justified:**
@@ -115,7 +115,7 @@ construction* is the evolvable part.
 | Subroutine | Wraps | Mutable part | Immutable part |
 |---|---|---|---|
 | `construct_mutation_prompt.py` | `PromptSampler.sample`/`sample_fix` ([sampler.py:79/261](shinka/core/sampler.py)) + templates ([prompts/](shinka/prompts/)) | the prompt assembly: how parent/inspirations/goal/recommendations/brief are framed; patch-type weighting | — (pure code; emits a string, no call) |
-| `mutate.py` | `LLMClient.query` / `AgentLLMClient.run_agent` + `apply_patch_async` + `<NAME>/<DESCRIPTION>` parse + 3-retry fix loop ([async_runner.py:4498/3883](shinka/core/async_runner.py)) | the prompt it sends (delegated to `construct_mutation_prompt.py`) | the call, the response parse, the patch-apply, the retry-budget mechanics |
+| `mutate.py` | the background-poll Azure call in `scripts/mutate.py` + `scripts/_azure.py` (the old `async_runner.py` / `AgentLLMClient` were removed in the Azure-only prune) + patch-apply + `<NAME>/<DESCRIPTION>` parse + bounded apply-retry | the prompt it sends (delegated to `construct_mutation_prompt.py`) | the call, the response parse, the patch-apply, the retry-budget mechanics |
 
 **Non-obvious calls, justified:**
 
@@ -135,7 +135,7 @@ construction* is the evolvable part.
   not a separate file — it's the same "call LLM with error feedback, apply,
   retry" mechanic the brief describes as inner-loop retry. `prompts_fix` is the
   mutable prompt for that branch.
-- *Meta recommendations (`MetaSummarizer` 3-step, [summarizer.py](shinka/core/summarizer.py)) and the
+- *Meta recommendations (now the single-call `scripts/meta_summarize.py`; the old `MetaSummarizer` 3-step `summarizer.py` was removed) and the
   novelty-judge prompt are cell-C-adjacent but not standalone subroutines.* Their
   prompts are mutable; their output is an *input* to `construct_mutation_prompt.py`
   / `novelty_check.py`. To honor "don't over-fragment," the meta cycle stays a
@@ -149,7 +149,7 @@ construction* is the evolvable part.
 
 | Subroutine | Wraps | Why immutable |
 |---|---|---|
-| `deep_research.py` | `DeepResearchSummarizer` (stages A–D) ([deep_research_summarizer.py](shinka/core/deep_research_summarizer.py)) + `dr_client` (`o3-deep-research`, separate Azure resource) | wraps a ~$5 paid external service with a fixed interface and cost model; the agent *calls* and *interprets* it, never rewrites it |
+| `deep_research.py` | the Stage-C call in `scripts/deep_research.py` + `dr_client` (`o3-deep-research`, separate Azure resource); the old `deep_research_summarizer.py` was removed | wraps a ~$5 paid external service with a fixed interface and cost model; the agent *calls* and *interprets* it, never rewrites it |
 
 **Non-obvious calls, justified:**
 
@@ -174,7 +174,7 @@ from the brief and the "gens since best improved" idea from `is_stagnant`.
 
 ## Existing subsystems consciously left OUT of the new harness
 
-- **Prompt evolution** (`prompt_evolver.py` + `prompt_dbase.py`): a real
+- **Prompt evolution** (the upstream `prompt_evolver.py` + `prompt_dbase.py`, removed here): a real
   meta-evolution mechanism, but it evolves the *task system prompt*, and the new
   orchestrator subsumes that role for *strategy code*. Preserved in the original
   tree, **not wired into the new harness initially** (off by default). Revisit in

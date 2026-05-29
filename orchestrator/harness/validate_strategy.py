@@ -166,7 +166,7 @@ CONTRACTS: Dict[str, Dict[str, Any]] = {
         "invariant": None,
     },
     "meta_summarize.py": {
-        "required_keys": {"recommendations"},
+        "required_keys": {"recommendations", "directions", "failure_note"},
         "needs_archive": False,
         "build_payload": lambda ctx: {
             "mock": True, "mock_text": "1. try simulated annealing", "goal": "x",
@@ -182,6 +182,19 @@ CONTRACTS: Dict[str, Dict[str, Any]] = {
         "invariant": lambda out, ctx: (
             None if out.get("return") is True else "expected return=True at window cap"
         ),
+    },
+    # M15: mutate.py IS a mutable target — give it a real output-contract smoke (mock
+    # mode makes no LLM/Azure call) so a rewrite that drops candidate_path/applied/cost
+    # is caught instead of passing parse-only.
+    "mutate.py": {
+        "required_keys": {"applied", "candidate_path", "cost"},
+        "needs_archive": False,
+        "build_payload": lambda ctx: {
+            "mock": True, "mock_code": "x = 1\n", "parent_code": "x = 0\n",
+            "patch_type": "diff", "patch_dir": ctx.get("tmp_dir", "."),
+            "language": "python", "model_name": "mock",
+        },
+        "invariant": None,
     },
 }
 
@@ -234,7 +247,30 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     spec = CONTRACTS.get(target)
     if spec is None:
-        # Unknown target: best-effort — confirm it has a callable main and runs.
+        # M16: a target that is neither a known contract NOR a MUTABLE strategy file is
+        # almost certainly a typo or a FOUNDATION file — refuse it (the rewrite protocol
+        # must not green-light writing it).
+        try:
+            import os as _os
+            import sys as _sys
+
+            _hd = _os.path.dirname(_os.path.abspath(__file__))
+            if _hd not in _sys.path:
+                _sys.path.insert(0, _hd)
+            from strategy_store import MUTABLE_TARGETS as _MUT
+        except Exception:
+            _MUT = (
+                "sample_parent.py", "novelty_check.py", "select_llm.py", "compute_reward.py",
+                "record_policy.py", "stagnation_detector.py", "island_policy.py",
+                "cadence_policy.py", "construct_mutation_prompt.py", "mutate.py", "meta_summarize.py",
+            )
+        if target not in _MUT:
+            return {
+                "valid": False, "stage": "parse",
+                "errors": [f"{target} is neither a known contract nor a MUTABLE strategy target"],
+            }
+        # A MUTABLE target without a smoke contract (currently only mutate.py — M15):
+        # parse-only for now (confirm a callable main exists).
         if "def main(" not in src:
             return {
                 "valid": False, "stage": "parse",
@@ -242,7 +278,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             }
         return {
             "valid": True, "stage": "parse",
-            "errors": [], "note": f"no smoke contract for {target}; parse-only",
+            "errors": [], "note": f"no smoke contract for {target}; parse-only (M15: add one)",
         }
 
     # 2. SMOKE
@@ -250,6 +286,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         ctx: Dict[str, Any] = {}
         if spec["needs_archive"]:
             ctx = _build_synthetic_archive(tmp)
+        ctx["tmp_dir"] = tmp  # M15: a writable dir for targets (e.g. mutate) that need one
         run_payload = spec["build_payload"](ctx)
         try:
             proc = _run_candidate(candidate_path, run_payload)

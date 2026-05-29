@@ -18,7 +18,9 @@ INPUT (stdin JSON):
     "archive_inspirations": [ {same shape} ],
     "top_k_inspirations": [ {same shape} ],
     "meta_recommendations": str | null,
-    "island_brief": str | null,
+    "failure_note": str | null,      # persistent caution; ALWAYS rendered (never dropped)
+    "island_brief": str | null,      # per-island direction (H1)
+    "brief_compose_mode": "replace" | "augment",  # how a brief combines with the global dir
     "task_sys_msg": str | null,
     "patch_types": ["diff","full","cross"],
     "patch_type_probs": [0.6,0.3,0.1],
@@ -84,15 +86,30 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         # "how to fix" prompt half.
         ancestors = [_to_program(d) for d in payload.get("ancestor_inspirations", [])]
         patch_sys, patch_msg, patch_type = sampler.sample_fix(
-            incorrect_program=parent, ancestor_inspirations=ancestors
+            incorrect_program=parent, ancestor_inspirations=ancestors,
+            failure_note=payload.get("failure_note"),
         )
     else:
+        # brief_compose_mode (MUTABLE lever): "replace" (default) lets a per-island
+        # brief stand in for the global direction (the FOUNDATION sampler's `prefer`
+        # semantic); "augment" layers the brief ON TOP of the global direction. The
+        # composition is done HERE (mutable) rather than hardcoded in sampler.py (K7).
+        _meta_recs = payload.get("meta_recommendations")
+        _island_brief = payload.get("island_brief")
+        if (
+            _island_brief
+            and _meta_recs
+            and payload.get("brief_compose_mode", "replace") == "augment"
+        ):
+            _meta_recs = f"{_island_brief}\n\n{_meta_recs}"
+            _island_brief = None
         patch_sys, patch_msg, patch_type = sampler.sample(
             parent=parent,
             archive_inspirations=archive_insp,
             top_k_inspirations=top_k_insp,
-            meta_recommendations=payload.get("meta_recommendations"),
-            island_brief=payload.get("island_brief"),
+            meta_recommendations=_meta_recs,
+            island_brief=_island_brief,
+            failure_note=payload.get("failure_note"),
         )
 
     # Rewrite lever: orchestrator-supplied guidance is appended to the system

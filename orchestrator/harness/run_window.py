@@ -60,6 +60,7 @@ import novelty_check as novelty_check_script  # noqa: E402
 import compute_reward as compute_reward_script  # noqa: E402
 import record_policy as record_policy_script  # noqa: E402
 import cadence_policy as cadence_policy_script  # noqa: E402
+import island_policy as island_policy_script  # noqa: E402
 import journal  # noqa: E402  (harness sibling)
 import strategy_store  # noqa: E402  (harness sibling — for the strategy fingerprint)
 
@@ -277,23 +278,23 @@ def _sample_meta_direction(meta_directions: Optional[List[Any]], rng: random.Ran
 
 
 def _compose_meta_for_gen(evo: Dict[str, Any], generation: int) -> Optional[str]:
-    """WS2/WS3: build THIS gen's meta guidance. With ``evo.meta_directions`` (the
-    weighted list from meta_summarize), sample ONE direction by weight and prepend
-    the persistent ``evo.meta_failure_note`` caution (fed forward into every gen).
-    Falls back to the legacy single ``evo.meta_recommendations`` blob when no
-    structured directions are present (back-compat with older run.json files)."""
+    """WS2/WS3: build THIS gen's meta DIRECTION only. With ``evo.meta_directions``
+    (the weighted list from meta_summarize), sample ONE direction by weight. Falls
+    back to the legacy single ``evo.meta_recommendations`` blob when no structured
+    directions are present (back-compat with older run.json files).
+
+    The persistent ``evo.meta_failure_note`` is NO LONGER embedded here — it rides
+    as its own always-on ``failure_note`` field (see ``_run_one_candidate`` /
+    ``_attempt_immediate_fixes``), so the caution is never clobbered by an
+    island_brief or dropped on a cross/lit/empty-direction gen (M1/M2/M3/M4)."""
     meta_directions = evo.get("meta_directions")
-    failure_note = evo.get("meta_failure_note")
     if meta_directions:
         seed = evo.get("seed")
         rng = random.Random((int(seed) + int(generation)) if seed is not None else None)
         chosen = _sample_meta_direction(meta_directions, rng)
-        parts: List[str] = []
-        if failure_note:
-            parts.append("Recurring-failure caution (do NOT repeat these mistakes): " + str(failure_note))
         if chosen:
-            parts.append("Direction to pursue in THIS attempt: " + chosen)
-        return "\n\n".join(parts) or None
+            return "Direction to pursue in THIS attempt: " + chosen
+        return None
     return evo.get("meta_recommendations")  # legacy global blob fallback
 
 
@@ -362,7 +363,7 @@ def _attempt_immediate_fixes(
             "generation": generation,
             "metadata": {
                 "stdout_log": ev.get("stdout_log", "") or "",
-                "stderr_log": ev.get("error_traceback") or ev.get("stderr_log") or "",
+                "stderr_log": ev.get("error_traceback") or ev.get("text_feedback") or ev.get("stderr_log") or "",
             },
         }
         fix_prompt = construct_mutation_prompt.main(
@@ -373,7 +374,10 @@ def _attempt_immediate_fixes(
                 "ancestor_inspirations": [learn_from] if learn_from else [],
                 "task_sys_msg": task.get("task_sys_msg"),
                 "language": language,
-                "seed": evo.get("seed"),
+                # M4: the persistent failure caution rides into fix-mode too.
+                "failure_note": evo.get("meta_failure_note"),
+                # C3 (H6): offset by generation so fix prompts don't pin one patch type.
+                "seed": (int(evo["seed"]) + generation) if evo.get("seed") is not None else None,
             }
         )
         fix_payload: Dict[str, Any] = {
@@ -415,6 +419,11 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     task = cfg["task"]
     embedding_model = evo.get("embedding_model", "text-embedding-3-small")
     language = task.get("language", "python")
+    # C3 (H6): offset the seed by generation so the global np.random.seed in
+    # construct_mutation_prompt / select_llm doesn't pin the SAME patch-type and
+    # exploration draw every generation (operator-mix collapse). None => unseeded.
+    _seed = evo.get("seed")
+    gseed = (int(_seed) + generation) if _seed is not None else None
 
     gen_dir = os.path.join(cfg["results_dir"], f"{FOLDER_PREFIX}_{generation}")
     results_dir = os.path.join(gen_dir, "results")
@@ -426,7 +435,8 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             "db_path": db_path,
             "db_config": db_config,
             "embedding_model": embedding_model,
-            "seed": evo.get("seed"),
+            "seed": gseed,
+            "validity_floor": evo.get("validity_floor"),
         }
     )
     parent = archive_query.main(
@@ -461,11 +471,41 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             }
         )["result"]
         archive_insp, top_k_insp = [], []
-        counters["fix_count"] = counters.get("fix_count", 0) + 1
+        # M5: feed the incorrect parent's OWN failure reason into the repair prompt.
+        # sample_fix reads metadata.stderr_log; the parent summary carries
+        # error_traceback as a top-level field (no include_metadata here), so route
+        # it in (mirrors the immediate-fix path's stderr_log chain).
+        _pmd = parent.get("metadata") or {}
+        if not _pmd.get("stderr_log"):
+            # M5: a domain failure (the common cnot class) carries no traceback — fall
+            # back to the persisted text_feedback so this repair prompt isn't blind.
+            _pmd["stderr_log"] = (
+                parent.get("error_traceback") or parent.get("text_feedback") or ""
+            )
+        parent["metadata"] = _pmd
+        # M9: count sampled needs_fix parents separately from immediate-fix ATTEMPTS
+        # so fix_success_rate stays coherent (immediate repairs / immediate attempts).
+        counters["needs_fix_count"] = counters.get("needs_fix_count", 0) + 1
     else:
         ancestors = []
         archive_insp = _fetch(sp.get("archive_inspiration_ids", []))
         top_k_insp = _fetch(sp.get("top_k_inspiration_ids", []))
+
+    # 2a. per-island DIRECTION (H1): fetch the latest brief the orchestrator authored
+    # for THIS island so different islands carry DIFFERENT directions. None => the
+    # island falls back to the global meta direction (byte-identical no-brief default).
+    brief_text = None
+    _isl = sp.get("island_idx")
+    if _isl is not None:
+        try:
+            _brief = archive_query.main({
+                "db_path": db_path, "db_config": db_config,
+                "embedding_model": embedding_model,
+                "query_type": "island_brief", "island_idx": _isl,
+            })["result"]
+            brief_text = (_brief or {}).get("content") or None
+        except Exception:
+            brief_text = None
 
     # 2. construct mutation prompt (MUTABLE policy; fix-mode picks the repair prompt)
     prompt = construct_mutation_prompt.main(
@@ -475,15 +515,21 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             "top_k_inspirations": top_k_insp,
             "ancestor_inspirations": ancestors,
             "needs_fix": needs_fix,
-            # WS2/WS3: per-gen weighted sample of ONE meta direction + the persistent
-            # failure caution — not the old global blob appended to every gen.
+            # WS2/WS3: per-gen weighted sample of ONE meta direction. The persistent
+            # failure caution rides separately as `failure_note` (always-on, never
+            # dropped) rather than embedded in the direction string (M1/M2/M3/M4).
             "meta_recommendations": _compose_meta_for_gen(evo, generation),
+            "failure_note": evo.get("meta_failure_note"),
+            # H1: per-island direction (None unless the orchestrator authored one).
+            "island_brief": brief_text,
+            "brief_compose_mode": evo.get("brief_compose_mode", "replace"),
             "task_sys_msg": task.get("task_sys_msg"),
             "patch_types": evo.get("patch_types"),
             "patch_type_probs": evo.get("patch_type_probs"),
             "language": language,
             "extra_guidance": evo.get("extra_guidance"),
-            "seed": evo.get("seed"),
+            "use_text_feedback": evo.get("use_text_feedback", True),
+            "seed": gseed,
         }
     )
 
@@ -498,7 +544,11 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             {
                 "mode": "select", "models": llm_models, "state_path": state_path,
                 "bandit_kwargs": evo.get("llm_dynamic_selection_kwargs", {}),
-                "seed": evo.get("seed"),
+                # C4 recovery levers (reachable WITHOUT a code rewrite): force_explore
+                # ignores the collapsed posterior (uniform); llm_subset restricts arms.
+                "force_explore": bool(evo.get("force_explore", False)),
+                "subset": evo.get("llm_subset"),
+                "seed": gseed,
             }
         )
         arm_id = sel["model_name"]
@@ -564,8 +614,21 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             # F13: this slot's spend produced nothing to evaluate — record it as
             # waste so diagnostics can surface it and the orchestrator can react
             # (e.g. rewrite the prompt or the novelty threshold).
-            counters["rejected_cost"] = counters.get("rejected_cost", 0.0) + _mut_cost + _slot_embed_cost
-            return  # drop this slot; no eval, no record, no bandit update
+            _rej_cost = _mut_cost + _slot_embed_cost
+            counters["rejected_cost"] = counters.get("rejected_cost", 0.0) + _rej_cost
+            # C0 (H3): feed the rejected slot's REAL spend to the bandit so the arm's
+            # cost isn't undercounted (the cheap-arm-entrenchment driver). Default is
+            # cost-only (neutral — a reject is not a quality failure);
+            # evo.reward_on_reject="penalize" imputes a worst reward instead.
+            if llm_models and arm_id:
+                _penalize = str(evo.get("reward_on_reject", "cost_only")) == "penalize"
+                select_llm_script.main({
+                    "mode": "update", "models": llm_models, "state_path": state_path,
+                    "bandit_kwargs": evo.get("llm_dynamic_selection_kwargs", {}),
+                    "arm": arm_id, "cost": _rej_cost,
+                    "cost_only": (not _penalize), "reward": None, "baseline": None,
+                })
+            return  # drop this slot; no eval, no record (cost fed to the bandit)
 
     # 4. evaluate (IMMUTABLE plumbing)
     ev = _evaluate_candidate(
@@ -599,6 +662,12 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     counters["eval_total"] += 1
     if not ev["correct"]:
         counters["eval_failures"] += 1
+        # G1 (H7): this candidate is un-repairable (still incorrect AFTER the immediate-
+        # fix loop / apply-retries exhausted their budget). Record its generation id so
+        # the debug-agent escalation ("a candidate exhausts its retry budget") can fire
+        # from real data instead of the hardcoded []. Resolves via archive_query by_generation.
+        counters.setdefault("exhausted_retry_slots", []).append(f"gen{generation}")
+        counters["exhausted_retry_count"] = counters.get("exhausted_retry_count", 0) + 1
     counters["novelty_accepts"] += 1
 
     # 4b. compute reward (MUTABLE — scoring concern, generation half)
@@ -607,6 +676,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             "candidate": ev,
             "parent": {"combined_score": parent.get("combined_score", 0.0)},
             "mode": evo.get("reward_mode", "absolute"),
+            "reward_validity_floor": evo.get("reward_validity_floor", 0.001),
         }
     )
 
@@ -645,6 +715,9 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         "public_metrics": ev["public_metrics"],
         "private_metrics": ev["private_metrics"],
         "error_traceback": ev.get("error_traceback"),
+        # M5: persist the domain-failure reason so a later sampled-parent repair (which
+        # has no traceback for a domain failure) can still see WHY the parent failed.
+        "text_feedback": ev.get("text_feedback"),
         "metadata": rec.get("metadata", {}),
     }
     if code_embedding is not None:
@@ -682,7 +755,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     evo = cfg["evo"]
     embedding_model = evo.get("embedding_model", "text-embedding-3-small")
     window_size = int(cfg.get("iters") or evo.get("window_size", 15))
-    num_windows = int(cfg.get("windows", 1))
+    num_windows = max(1, int(cfg.get("windows", 1) or 1))  # G4: --windows 0 coerces to 1 (full-keyed diag, not a near-empty dict)
 
     os.makedirs(cfg["results_dir"], exist_ok=True)
     _boot_embed_cost = _bootstrap_initial(cfg)
@@ -717,6 +790,18 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     # files, computed from the live scripts/. Stamped into every window so the log
     # pins the exact strategy version (all files) that produced each window.
     strategy_fingerprint = strategy_store.current_fingerprint()
+    # G2 (H13): if the strategy fingerprint CHANGED since the last window (a rewrite
+    # was deployed), zero prior_low_streak so the new strategy earns a FAIR TRIAL
+    # instead of inheriting the old streak and re-tripping stagnation after a single
+    # low window (intervention thrashing). The fair-trial LENGTH stays tunable via
+    # evo.consecutive_required. Compares to the last journal window's fingerprint.
+    try:
+        _prev_win = journal.read_windows(cfg["results_dir"], last_n=1)
+        _prev_fp = (_prev_win[-1].get("strategy_fingerprint") if _prev_win else None) or None
+        if _prev_fp is not None and _prev_fp != strategy_fingerprint:
+            prior_low_streak = 0
+    except Exception:
+        pass
 
     def _one_window(widx: int, prior_streak: int) -> Dict[str, Any]:
         best_start = _best_score(db_path, db_config, embedding_model)
@@ -726,6 +811,9 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "novelty_accepts": 0, "novelty_rejects": 0, "fix_count": 0, "cost": 0.0,
             "rejected_cost": 0.0,  # F13: spend on novelty-rejected (un-evaluated) slots
             "fix_success": 0,      # WS1: immediate fixes that recovered correctness
+            "needs_fix_count": 0,  # M9: sampled incorrect parents routed to repair mode
+            "exhausted_retry_slots": [],  # G1/H7: gen ids of un-repairable slots this window
+            "exhausted_retry_count": 0,
         }
         # HARD budget railguard (immutable safety, NOT a strategy knob): stop
         # starting candidates once cumulative spend (this window so far + all
@@ -741,6 +829,22 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
             counters["iter_index"] = i
             _run_one_candidate(cfg, next_gen + i, counters)
             iters_run += 1
+
+        # H8/O3 (opt-in): drive island spawn/migrate via the MUTABLE island_policy
+        # DECISION at the window boundary (not just the db_config add()-time
+        # thresholds). Default off => today's behavior. Use with the db_config
+        # auto-triggers off (enable_dynamic_islands=false + migration_rate=0, the
+        # defaults) to avoid double-execution. Never let it break the window.
+        if evo.get("island_policy_driven"):
+            try:
+                island_policy_script.main({
+                    "db_path": db_path, "db_config": db_config,
+                    "embedding_model": embedding_model,
+                    "current_generation": (next_gen + iters_run - 1) if iters_run else next_gen,
+                    "apply": True,
+                })
+            except Exception:
+                pass
 
         # F9: read the REAL bandit posterior (+ per-arm tallies) for diagnostics,
         # so `llm_bandit_weights` reflects bandit_state.pkl instead of an empty
@@ -777,7 +881,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 "stagnation_rel_frac": evo.get("stagnation_rel_frac"),
                 "prior_low_streak": prior_streak,
                 "consecutive_required": evo.get("consecutive_required", 2),
-                "trigger_metric": evo.get("trigger_metric", "delta"),
+                "trigger_metric": evo.get("trigger_metric", "hybrid"),
                 "novelty_accepts": counters["novelty_accepts"],
                 "novelty_rejects": counters["novelty_rejects"],
                 "novelty_rejected_cost": counters["rejected_cost"],
@@ -785,9 +889,11 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 "eval_total": counters["eval_total"],
                 "fix_count": counters["fix_count"],
                 "fix_success": counters.get("fix_success", 0),
+                "needs_fix_count": counters.get("needs_fix_count", 0),
                 "llm_bandit_weights": bandit_weights,
                 "llm_bandit_counts": bandit_counts,
-                "exhausted_retry_slots": [],
+                "exhausted_retry_slots": counters.get("exhausted_retry_slots", []),
+                "exhausted_retry_count": counters.get("exhausted_retry_count", 0),
             }
         )
         diag["window_cost"] = counters["cost"]

@@ -22,6 +22,7 @@ INPUT (stdin JSON):
     "candidate": {"combined_score": float, "correct": bool, "public_metrics": {..}},
     "parent": {"combined_score": float} | null,
     "mode": "absolute" | "relative",   # rewrite lever; default "absolute"
+    "reward_validity_floor": float,    # O6 reward-scale floor; default 0.001
     "context": {..}                    # free-form (window stats, etc.)
   }
 
@@ -53,12 +54,22 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         # preserves the "failures are penalized, not invisible" invariant.
         return {"reward": None, "baseline": parent_score, "mode": mode}
 
+    # HYBRID (H3 / O6 reward scale): floor the correct candidate's reward CONTRIBUTION
+    # so a correct-but-below-parent candidate is STRICTLY better than a failed one
+    # (reward=None → bandit imputes worst), instead of collapsing to the same
+    # near-worst contribution under the bandit's asymmetric clamp (the bug H3 named).
+    # The penalty SHAPE is the mutable lever `reward_validity_floor` (default 0.001).
+    # The parent-selection SCORE scale has its own separate `validity_floor`
+    # (sample_parent) — two distinct levers per open question O6.
+    # K10: strict separation assumes parent_score >= the bandit baseline (true today —
+    # set_baseline_score is never called and scores are >= 0 on cnot).
+    floor = float(payload.get("reward_validity_floor", 0.001) or 0.0)
+    delta = score - parent_score
     if mode == "relative":
-        # Reward the improvement directly; baseline 0 so the bandit sees the delta.
-        return {"reward": score - parent_score, "baseline": 0.0, "mode": mode}
-
-    # absolute (default): bandit subtracts baseline internally.
-    return {"reward": score, "baseline": parent_score, "mode": mode}
+        # baseline 0 so the bandit sees the (floored) delta directly.
+        return {"reward": max(delta, floor), "baseline": 0.0, "mode": mode}
+    # absolute (default): bandit learns reward - baseline; floor that gap.
+    return {"reward": parent_score + max(delta, floor), "baseline": parent_score, "mode": mode}
 
 
 if __name__ == "__main__":

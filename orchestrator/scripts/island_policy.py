@@ -17,13 +17,15 @@ This is a port of shinka's default island decisions:
 INPUT (stdin JSON):
   {
     "db_path": str, "db_config": {..}, "embedding_model": str,
-    "current_generation": int | null   # if null, taken as max generation in archive
+    "current_generation": int | null,  # if null, taken as max generation in archive
+    "apply": false                      # opt-in: EXECUTE the decided actions (H8/O3)
   }
 
 OUTPUT (stdout JSON):
   {
     "ok": true,
     "actions": {"spawn": bool, "migrate": bool, "retire_island": int | null},
+    "executed": {"migrated": bool, "spawned": bool, "retired": int | null} | null,
     "reasons": {..}, "current_generation": int, "best_generation": int,
     "gens_since_best": int
   }
@@ -41,6 +43,34 @@ except ImportError:
     import archive_query  # type: ignore
 
 
+def _embedding_spread(members):
+    """Mean pairwise cosine DISTANCE (1 - cosine sim) among members carrying an
+    embedding. None when < 2 have embeddings (caller falls back to the count)."""
+    embs = [p.get("embedding") for p in members if p.get("embedding")]
+    if len(embs) < 2:
+        return None
+    import numpy as np
+
+    M = np.asarray(embs, dtype=float)
+    norms = np.linalg.norm(M, axis=1)
+    norms[norms == 0] = 1.0
+    M = M / norms[:, None]
+    sims = M @ M.T
+    iu = np.triu_indices(len(embs), k=1)
+    dists = 1.0 - sims[iu]
+    return float(dists.mean()) if dists.size else None
+
+
+def _gens_since_island_best(members, current_generation):
+    """current_generation minus the generation of the island's best CORRECT
+    member. None when the island has no correct member."""
+    correct = [p for p in members if p.get("correct")]
+    if not correct:
+        return None
+    best = max(correct, key=lambda p: p.get("combined_score", 0.0) or 0.0)
+    return int(current_generation) - int(best.get("generation", 0) or 0)
+
+
 def island_health(
     islands_summary,
     db_path=None,
@@ -49,27 +79,51 @@ def island_health(
 ):
     """Per-island health rows for the window diagnostics. MUTABLE POLICY.
 
-    This is deliberately a **toy** default so the metric DEFINITION lives in a
-    mutable policy file rather than baked into the immutable sensor: `diversity`
-    is just the island's program count and `stagnation_count` is left None. The
-    orchestrator MAY rewrite this (e.g. compute real diversity as the embedding
-    spread within each island — the ``db_*`` params are threaded through so a
-    future version can query embeddings — and track a genuine per-island
-    generations-since-best stagnation count). Until then, downstream readers must
-    treat `diversity` as a population count, not a spread.
+    Real metrics (M12 fix): ``diversity`` is the mean pairwise cosine DISTANCE of
+    the island's program embeddings — a genuine spread, so two islands collapsed
+    onto one genome read LOW even with many members (the toy count could not). And
+    ``stagnation_count`` is generations since the island's best correct program.
+    Both fall back gracefully (diversity -> population count when < 2 embeddings;
+    stagnation_count -> None when no correct member), and this NEVER raises — the
+    diagnostics sensor depends on it. ``count`` is kept as an additive field.
 
-    ``islands_summary`` is the per-island list from archive_query's "summary"
-    ({island_idx, best, count}). Returns a list of
-    {id, best, diversity, stagnation_count}.
+    The orchestrator reads ``diversity``/``stagnation_count`` to decide WHEN to
+    author a per-island brief (``island_brief.py``) to re-differentiate a
+    converging island. ``islands_summary`` is archive_query "summary"'s per-island
+    list ({island_idx, best, count}).
     """
+    rows_by_island: Dict[Any, list] = {}
+    current_generation = 0
+    if db_path is not None:
+        try:
+            progs = archive_query.main(
+                {
+                    "db_path": db_path,
+                    "db_config": db_config or {},
+                    "embedding_model": embedding_model or "text-embedding-3-small",
+                    "query_type": "all",
+                    "include_embedding": True,
+                }
+            )["result"]
+            for p in progs:
+                current_generation = max(current_generation, int(p.get("generation", 0) or 0))
+                rows_by_island.setdefault(p.get("island_idx"), []).append(p)
+        except Exception:
+            rows_by_island = {}
+
     out = []
     for isl in islands_summary or []:
+        idx = isl.get("island_idx")
+        members = rows_by_island.get(idx, [])
+        spread = _embedding_spread(members)
         out.append(
             {
-                "id": isl.get("island_idx"),
+                "id": idx,
                 "best": isl.get("best"),
-                "diversity": isl.get("count"),  # TOY: count, not a spread metric
-                "stagnation_count": None,
+                # real spread when embeddings exist; else fall back to the count.
+                "diversity": spread if spread is not None else isl.get("count"),
+                "stagnation_count": _gens_since_island_best(members, current_generation),
+                "count": isl.get("count"),  # additive: population size kept separately
             }
         )
     return out
@@ -116,8 +170,33 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         and current_generation > 0
     )
 
+    # H8/O3 (opt-in): when the caller asks to APPLY, execute the decided actions via
+    # the FOUNDATION executor (db.apply_island_actions) — this file only DECIDES; the
+    # mutation lives in immutable plumbing. Default (no apply) is decision-only, so a
+    # rewrite of THIS policy's spawn/migrate logic now actually TAKES EFFECT when the
+    # orchestrator runs with evo.island_policy_driven (fixes H8's dead-code lever).
+    executed = None
+    if payload.get("apply"):
+        from shinka.database import ProgramDatabase, DatabaseConfig
+
+        _cfg_kwargs = dict(db_config)
+        _cfg_kwargs["db_path"] = payload["db_path"]
+        _db = ProgramDatabase(
+            DatabaseConfig(**_cfg_kwargs),
+            embedding_model=payload.get("embedding_model", "text-embedding-3-small"),
+            read_only=False,
+        )
+        try:
+            executed = _db.apply_island_actions(
+                {"spawn": bool(spawn), "migrate": bool(migrate), "retire_island": None},
+                current_generation,
+            )
+        finally:
+            _db.close()
+
     return {
         "actions": {"spawn": bool(spawn), "migrate": bool(migrate), "retire_island": None},
+        "executed": executed,
         "reasons": {
             "enable_dynamic_islands": enable_dynamic,
             "stagnation_threshold": stagnation_threshold,

@@ -85,7 +85,7 @@ def test_sample_parent_weighted_parity():
 
         assert len(probs) == len(ref), (len(probs), len(ref))
         assert all(abs(a - b) < 1e-9 for a, b in zip(probs, ref)), (probs, ref)
-        return True
+        return None
 
 
 def test_novelty_check_cosine_parity():
@@ -117,7 +117,7 @@ def test_novelty_check_cosine_parity():
              "candidate_embedding": embs[0], "code_embed_sim_threshold": 0.99}
         )
         assert dup["accept"] is False and dup["max_similarity"] > 0.999
-        return True
+        return None
 
 
 def test_select_llm_bandit_parity():
@@ -147,7 +147,7 @@ def test_select_llm_bandit_parity():
 
     assert len(probs) == len(ref_probs)
     assert all(abs(a - b) < 1e-9 for a, b in zip(probs, ref_probs)), (probs, ref_probs)
-    return True
+    return None
 
 
 def test_island_policy_stagnation_parity():
@@ -168,7 +168,7 @@ def test_island_policy_stagnation_parity():
         db_config2 = dict(db_config, stagnation_threshold=100)
         out2 = island_policy.main({"db_path": db_path, "db_config": db_config2})
         assert out2["actions"]["spawn"] is False
-        return True
+        return None
 
 
 if __name__ == "__main__":

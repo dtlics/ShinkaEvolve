@@ -36,12 +36,15 @@ You cannot weaken these by rewriting a `scripts/` file:
   cost ledger (`journal/run.json` → `total_cost`) summing EVERY LLM cost
   (mutations, the meta round, deep research, embeddings) plus interventions you
   log. `run_window` **hard-stops** the inner loop the moment cumulative spend ≥
-  `budget_usd` and returns `return_reason="budget_exhausted"` (overshoot ≤ one
-  candidate). When YOU call `meta_summarize`/`deep_research`, first check
-  `journal.budget_remaining(run, budget)` and afterward log the cost with
-  `journal.append_intervention({type, cost})` — those discretionary spends are
-  the only ones the per-candidate hard-stop can't pre-empt. On
-  `budget_exhausted`, terminate and write `RUN_SUMMARY.md`.
+  `budget_usd` and returns `return_reason="budget_exhausted"` (overshoot ≤ one full
+  SLOT: a mutation + its `fix_retry_budget` fix-retries + embeds — size `budget_usd`
+  with that headroom, especially on a grounding run with pinned pro). When YOU call
+  `meta_summarize`/`deep_research`, first check `journal.budget_remaining(run, budget)`,
+  and ALWAYS pass `results_dir` so the call SELF-LOGS its cost into the ledger. Do
+  **NOT** also `journal.append_intervention` that LLM cost — the self-log already
+  counted it, so appending it double-counts (`append_intervention` is for
+  rewrites/decisions, NEVER an LLM call's cost). On `budget_exhausted`, terminate and
+  write `RUN_SUMMARY.md`.
 - **No unmonitored LLM calls.** Every LLM call goes through a counted path
   (`mutate`/`meta_summarize` → `_azure.bg_query`; `deep_research` → `dr_client`;
   embeddings → `EmbeddingClient`) whose cost lands in the ledger. No daemon or
@@ -78,11 +81,14 @@ Diagnostics shape:
 
 ```
 { window_index, iters_completed, best_score_start, best_score_end, delta,
-  J_score, strategy_fingerprint, novelty_acceptance_rate, novelty_rejected_cost,
-  evaluation_failure_rate, fix_rate, fix_success_rate, llm_bandit_weights, llm_bandit_counts,
-  island_health:[{id,best,diversity,stagnation_count}],
-  stagnation_flag, low_streak, threshold, exhausted_retry_slots, total_programs,
-  window_cost, total_cost, budget_remaining, budget_hit, return_reason }
+  J_score (informational only), threshold, strategy_fingerprint,
+  novelty_acceptance_rate (null when no novelty events), novelty_rejected_cost,
+  evaluation_failure_rate, fix_rate, fix_success_rate, needs_fix_rate,
+  llm_bandit_weights, llm_bandit_counts,
+  island_health:[{id,best,diversity,stagnation_count,count}],
+  stagnation_flag, low_streak, exhausted_retry_slots, exhausted_retry_count,
+  trigger_metric, total_programs, correct_programs,
+  window_cost, total_cost, budget_remaining, budget_hit, windows_run, return_reason }
 ```
 
 `evaluation_failure_rate` is the **un-repairable** failure rate — the fraction of
@@ -132,7 +138,7 @@ file in the concern's row together.
 |---|---|---|---|
 | **Scoring / reward** | `compute_reward.py` | `select_llm.py` (bandit), `sample_parent.py` (score→parent weight) | `reward_used` vs `improvement_over_parent` per candidate; bandit weights |
 | **Exploration / parent** | `sample_parent.py` | (feeds mutate) | flat J with high novelty acceptance |
-| **Diversity / novelty** | `novelty_check.py` | `record_policy.py` (logs sim), `diagnostics` (rate) | `novelty_acceptance_rate`, `novelty_max_similarity` |
+| **Diversity / novelty** | `novelty_check.py` | `record_policy.py` (logs sim), `diagnostics` (rate) | `novelty_acceptance_rate` (window diag; **null** when no novelty events). `novelty_max_similarity` is PER-PROGRAM metadata — read it via `archive_query` `include_metadata`, not the window diag |
 | **Prompt** | `construct_mutation_prompt.py` | `mutate.py` (sends it) | `evaluation_failure_rate`, recurring `exhausted_retry_slots` |
 | **Fix / repair** | `run_window.py` `_attempt_immediate_fixes` (the immediate repair loop + `evo.fix_retry_budget`) | `construct_mutation_prompt.py` (`sample_fix` prompt), `mutate.py` (apply-retry budget) | `fix_rate`, `fix_success_rate` |
 | **Stagnation trigger** | `stagnation_detector.py` | `diagnostics.py` | `J_score`, `low_streak` |
@@ -166,9 +172,13 @@ evaluator, the user's `evaluate.py`/`initial.<ext>`).
    fails, STOP and report — never fix the evaluator (foundation).
 
 ### Main loop
-Invoke `run_window.py --windows 1`. Read diagnostics. Healthy window
-(`stagnation_flag` false, `evaluation_failure_rate` < 0.3, J holding/rising) →
-do nothing, invoke the next window. **Then keep going** (rule 2).
+Invoke `run_window.py --config <run>/run.json --until-decision` — the **normal mode**:
+it runs windows autonomously and returns only on stagnation or after the cadence cap.
+Do NOT step `--windows 1` per turn (that pays an agent turn per window and erodes the
+100× cost asymmetry rule 1 protects; `--windows 1` is for debugging only). Read the
+returned diagnostics. Healthy (`stagnation_flag` false, `evaluation_failure_rate` < 0.3,
+J holding/rising) → do nothing, invoke the next `--until-decision` call. **Then keep
+going** (rule 2).
 
 ### Meta check (escalation ladder)
 `stagnation_flag` fires when a window stays "low" for `consecutive_required`
@@ -215,6 +225,28 @@ strategies + their J — the EvoX H) and the journal (the population descriptor)
 8. Deep research + rewrites exhausted over several windows → terminate and write
    `RUN_SUMMARY.md` (including foundation-change recommendations).
 
+### Is an arm NEVER selected — locked out, or truly bad? (the role-2 duty)
+This is your flagship framework-flaw check, and it is **independent of stagnation** —
+run it even on a healthy, rising-J run (the ladder above is J-gated and will miss it).
+Watch `llm_bandit_counts` across windows: if one arm's `submitted`/`completed` count is
+stuck near zero while the others climb, decide WHY:
+- **Locked out (a reward/selection flaw):** the arm has a near-zero count BUT, on the
+  few times it ran, shows positive `reward_used` / `improvement_over_parent` (read a
+  program's metadata via `archive_query` `include_metadata`). A few early bad draws
+  drove its posterior down and the bandit stopped sampling it before it could recover —
+  the model isn't bad, the *selection* is starving it. **Recover it with a CONFIG FLIP
+  first, not a rewrite:** raise `epsilon` (exploration floor) or set
+  `evo.force_explore: true` (optionally with `evo.llm_subset: ["<that arm>"]`) for a
+  window to re-open it; lower `cost_aware_coef` if a pricier arm is being starved on
+  cost. Only if config flips don't recover it do you rewrite `select_llm.py`.
+- **Truly bad:** the arm ran ENOUGH (non-trivial count) and genuinely underperformed
+  (low reward, high per-slot `evaluation_failure_rate`). Leave it starved — that's the
+  bandit working; optionally drop it from `llm_models`.
+The reward floor (`compute_reward.py`: a correct-but-worse candidate now scores strictly
+above a *failed* one) and the rejected-slot cost feed (novelty rejects bill the arm)
+exist precisely to make this lock-out *less* likely — but watch for it anyway. "Is it
+the model, or our framework?" is the canonical judgment only you (the outer loop) make.
+
 ### Deep research: when to call, how to prompt, and triaging the brief
 DR is the web-grounded escalation above meta. It is *discovery* (find SOTA), not
 *instantiation* (write the code) — that split drives everything below.
@@ -234,6 +266,22 @@ that shape reads as "reproduce copyrighted text" and Azure's content filter refu
 constraints, what you've tried, and the sub-question; don't dump the whole codebase.
 A DR query may target a sub-direction (e.g. "SOTA for parallel F2 Gaussian elimination
 on a grid") whose answer you then compose into the task's solution.
+
+**Pre-flight self-check — run this BEFORE every DR call (the protector).** Re-read your
+own drafted query and confirm its GOAL is *general SOTA for the task or a well-defined
+sub-task*, not "reproduce a specific named paper." If you catch the query asking to
+reproduce/restate one paper's algorithm verbatim: STOP, recall WHY this DR was triggered
+(which task/sub-problem needs external knowledge), and REWRITE it into the general-SOTA
+form. Reproducing a specific reference is the job of the *follow-up pro grounding run*
+(below) — NOT the DR call. DR finds the technique; grounding implements it. This runtime
+check is what stops you re-introducing the `content_filter`-refusing shape, regardless of
+the prompt templates.
+
+**The `reference_snippet` field is NOT yours to set.** It is requested by the IMMUTABLE
+Stage-C system prompt (`shinka/prompts/prompts_deep_research.py`), not by your query, so
+you cannot soften it from the query side. Your lever is the QUERY shape; on a
+`content_filter` refusal, rewrite the QUERY (drop any named-paper / reproduce framing) —
+never retry the same shape.
 
 **Triage the returned brief — your job, per technique** (DR is infrequent, so judge
 each deliberately; EXAMINE THE STRUCTURED LOGS rather than guessing — read
@@ -295,10 +343,11 @@ Helpers: `harness/strategy_store.py`, `harness/validate_strategy.py`.
    genuinely progressing. Crucially it fires **even when Δ≈0** (early/flat phase),
    which the old `new_J < prior_J·0.8` guard could not. If `regressed`:
    `strategy_store.rollback` / `rollback_bundle` +
-   `record_outcome`/`record_bundle_outcome(accepted=False, decision=<the decide()
-   result>, measure_diagnostics=<measure window>)`. Else
-   `record_outcome(accepted=True, decision=..., measure_diagnostics=...)`. Always
-   pass `decision` + `measure_diagnostics` so the index records WHY and the
+   `record_outcome(new_hash, J, accepted=False, decision=<the decide() result>,
+   measure_diagnostics=<measure window>)` (or `record_bundle_outcome(...)` for a
+   bundle). Else the same call with `accepted=True`. `new_hash` (the deploy's returned
+   new_hash) and `J` (the measure window's J_score) are REQUIRED positional args; always
+   also pass `decision` + `measure_diagnostics` so the index records WHY and the
    evidence (F4). **Rollback is the step that prevents a bad rewrite from poisoning
    the rest of the run — never skip it.**
 
@@ -447,10 +496,30 @@ agentic-control work, all **mutable** and defaulted conservative:
 | `llm_models` `model@effort` arms | bare model | makes reasoning effort part of the bandit arm | when a model is great at one effort, slow at another |
 | `mutation_web_search` | false | web search on the main mutation call | ONLY on a grounding run nailing a DR reference |
 | `fix_web_search` | false | web search on fix-retries | a future call: let repairs consult the web |
-| `cost_aware_coef` | 0.5 | bandit reward-vs-cheapness blend | costs dominating / quality suffering |
+| `cost_aware_coef` | 0.25 | bandit reward-vs-cheapness blend | raise→0.7 if cheapness should dominate; lower→0 if a pricier arm is the only one improving and is being starved |
 | `code_embed_sim_threshold` | 0.99 | novelty cosine gate | false-rejects (large programs cluster 0.96–0.98) → raise |
 | `stagnation_abs_floor`/`rel_frac` | 0.001 / 0.05 | the "low window" bar | recalibrate to the task's natural per-window climb |
 | `db_config.max_islands` | 0 (unbounded) | cap on active islands; at the cap, `spawn_island.py` evicts the worst | set when grounding several DR directions, to bound island count |
+| `validity_floor` | none (inert) | floors VALID parents' selection score (`sample_parent`) so valid-no-gain stays selectable above invalid | many correct programs pinned at score 0 and selection can't separate them |
+| `reward_validity_floor` | 0.001 | floors a correct candidate's bandit reward so correct-but-worse beats *failed* | an arm with high eval-success is starved because its children rarely beat the parent |
+| `reward_on_reject` | cost_only | novelty-rejected slot bills the arm's COST only (neutral) vs `penalize` (impute worst reward) | a duplicate-prone arm should be penalized for waste |
+| `force_explore` / `llm_subset` | false / null | ignore the collapsed bandit (uniform) / restrict to a subset of arms | re-open a starved/locked-out arm (role-2 section) |
+| `epsilon` (in `llm_dynamic_selection_kwargs`) | 0.2 | bandit exploration floor | an arm's share decaying toward 0 while it still occasionally improves → raise to 0.4–0.6 |
+| `use_text_feedback` | true | feed the evaluator's failure reason into the prompt | feedback huge, or risks spoiling a held-out metric → false |
+| `island_policy_driven` | false | drive spawn/migrate/retire via MUTABLE `island_policy.py` at window boundaries (use with the db_config auto-triggers OFF) | repairing population structure via rung 2 |
+| per-island brief (via `island_brief.py`) | none | author a DISTINCT direction for one island so islands differentiate | `island_health` shows two islands converging |
+| `brief_compose_mode` | replace | a per-island brief replaces vs augments the global direction | a strong per-island direction is being diluted by a stale global one |
+| `island_selection_strategy` / `enforce_island_separation` | uniform / true | island selection pressure / same-island vs cross-island inspirations | one island dominates → `weighted`; want cross-pollination → separation `false` |
+| `azure_partial_output_mode` | return | use a cap-hit `incomplete` response's partial text (always billed) vs treat as failure | partial mutations corrupting the archive → `raise` |
+| `unpriced_cost_mode` | warn | warn vs hard-fail on a billed response with no pricing entry | repeated "$0-priced" warnings for a real deployment → `raise` |
+| `meta_failures_first_frac` | 0.5 | how much of meta's context is recent failures vs top performers | failure-dominated window where the failure_note comes back vague → 0.75 |
+| `extra_guidance` | none | free text appended to the next window's mutation system prompt | nudge the search without a code rewrite |
+
+The rollback basket also has tuning knobs passed to `rollback_decision.decide()` (NOT
+`evo.*`): `abs_eval_floor` (0.05, the absolute correctness-collapse floor — keep far
+below a hard task's healthy floor so it isn't auto-rolled-back), `bandit_collapse_frac`
+(0.85) / `bandit_collapse_rise` (0.25) for the bandit-collapse arm, and the existing
+`min_eval_success`/`eval_drop`/`nov_drop`/`score_ratio`.
 
 Reserve code rewrites for when no knob fits the problem (the concern map).
 

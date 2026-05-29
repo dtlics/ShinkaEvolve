@@ -13,9 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import os
 import time
 from typing import Any, Dict, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL_SEC = 3.0
 # Per-call poll-wall cap. 1 hour by design: bg+poll exists precisely to allow long
@@ -68,9 +71,22 @@ def _usage_cost(response: Any, api_model_name: str) -> float:
         from shinka.llm.providers.pricing import calculate_cost
 
         ic, oc = calculate_cost(api_model_name, int(in_tok), int(out_tok))
-        return float(ic) + float(oc)
-    except Exception:
+        cost = float(ic) + float(oc)
+    except Exception as e:
+        # D4 (M10): a billed response that fails to price (unknown/renamed/typo'd
+        # deployment) must NOT silently log $0 and lie to the budget ledger. Warn.
+        if int(in_tok) or int(out_tok):
+            logger.warning(
+                "unpriced billed Azure call (model=%s in=%s out=%s): %s — ledger may "
+                "undercount; add the deployment to pricing.csv", api_model_name, in_tok, out_tok, e
+            )
         return 0.0
+    if cost == 0.0 and (int(in_tok) or int(out_tok)):
+        logger.warning(
+            "Azure call priced to $0.00 with non-zero tokens (model=%s in=%s out=%s)",
+            api_model_name, in_tok, out_tok,
+        )
+    return cost
 
 
 async def _bg_call(
@@ -118,8 +134,19 @@ async def _bg_call(
             await asyncio.sleep(poll_interval)
             response = await client.responses.retrieve(rid)
             status = getattr(response, "status", "unknown") or "unknown"
+        if status == "incomplete":
+            # D0.6/H2: a max-output-tokens cap-hit is USABLE (partial text) and BILLED.
+            # Return it like a completed call so the cost lands in the ledger and the
+            # partial output can still be parsed/applied (azure_partial_output_mode lets
+            # the caller treat it as failure, but the cost is billed either way).
+            return _extract_text(response), _usage_cost(response, api_model_name)
         if status != "completed":
-            raise RuntimeError(f"Azure response {rid} terminal status={status!r}")
+            # Genuine terminal failure (failed/cancelled/expired): unusable, but may
+            # still be BILLED — attach the cost to the exception so the caller folds it
+            # into the ledger instead of dropping it (H2).
+            err = RuntimeError(f"Azure response {rid} terminal status={status!r}")
+            err.cost = _usage_cost(response, api_model_name)
+            raise err
         return _extract_text(response), _usage_cost(response, api_model_name)
     finally:
         # Close the async client WITHIN this event loop. Otherwise the underlying

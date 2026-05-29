@@ -48,9 +48,17 @@ from shinka.core import run_shinka_eval
 
 L_RANGE: list[int] = list(range(2, 11))           # n = 4..100
 N_PER_L: int = 30
-PER_TRIAL_TIMEOUT_S: float = 300.0
-EVAL_WALLCLOCK_BUDGET_S: float = 30 * 60.0          # 30 min total per candidate
+# Env-overridable so the orchestrator can retune the eval-time budget between runs
+# (M8 invariant: harness eval_time > EVAL_WALLCLOCK_BUDGET_S > PER_TRIAL_TIMEOUT_S).
+PER_TRIAL_TIMEOUT_S: float = float(os.environ.get("CNOT_PER_TRIAL_TIMEOUT_S", "300"))
+EVAL_WALLCLOCK_BUDGET_S: float = float(os.environ.get("CNOT_EVAL_WALLCLOCK_BUDGET_S", str(30 * 60)))  # 30 min default
 MAX_CONSECUTIVE_TIMEOUTS: int = 3                    # 3 in a row → early abort
+# M8 INVARIANT: the run config's task.eval_time (the harness LocalJobConfig hard-kill)
+# MUST exceed EVAL_WALLCLOCK_BUDGET_S, which must exceed PER_TRIAL_TIMEOUT_S — else the
+# harness SIGKILLs before the graceful early-abort can return a clean score, and one slow
+# trial can consume the whole window. For the 30-min default budget set eval_time >=
+# "00:35:00"; the two timeouts above are env-overridable (CNOT_*) to fit a tighter budget.
+# (orchestrator/tests assert per_trial < wallclock; the eval_time relation is task-config.)
 MATRIX_SEED_BASE: int = 0xC107A7
 BASELINE_CACHE_PATH: str = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "_baseline_cache.json"
@@ -255,6 +263,7 @@ def aggregate_fn(results: list) -> dict[str, Any]:
     if not results:
         return {
             "combined_score": 0.0,
+            "correct": False,
             "public": {"error": "run_experiment returned no result"},
             "private": {},
             "extra_data": {},
@@ -264,6 +273,7 @@ def aggregate_fn(results: list) -> dict[str, Any]:
     if not callable(candidate):
         return {
             "combined_score": 0.0,
+            "correct": False,
             "public": {"error": f"run_experiment must return callable; got {type(candidate).__name__}"},
             "private": {},
             "extra_data": {},
@@ -334,6 +344,7 @@ def aggregate_fn(results: list) -> dict[str, Any]:
             feedback = f"EARLY ABORT: {early_abort_reason}. " + feedback
         return {
             "combined_score": 0.0,
+            "correct": False,
             "public": public,
             "private": {"all_failures": [{"L": L, "k": k, "reason": why} for L, k, why in failures]},
             "extra_data": {},
@@ -355,6 +366,7 @@ def aggregate_fn(results: list) -> dict[str, Any]:
 
     return {
         "combined_score": float(score),
+        "correct": True,
         "public": {
             "slope": float(slope),
             "intercept": float(intercept),

@@ -437,6 +437,20 @@ def run_shinka_eval(
                 "scores": early_stop_scores,
             }
 
+        # Honor an explicit correctness verdict from the aggregator. Additive:
+        # evaluators that omit `correct` are unaffected, and `is False` ignores a
+        # missing key or truthy junk. This lets a task signal a DOMAIN failure
+        # (invalid candidate / constraint violation) that is neither a NaN/inf
+        # score nor a raised exception — the case the immediate-fix loop and
+        # `evaluation_failure_rate` must see. Parallels the validate_fn path above.
+        if isinstance(metrics, dict) and metrics.get("correct") is False:
+            overall_correct_flag = False
+            if not first_error_message:
+                first_error_message = (
+                    metrics.get("text_feedback")
+                    or "evaluator reported correct=False"
+                )
+
         # Check if combined_score is NaN or inf/-inf and mark as incorrect
         if "combined_score" in metrics:
             combined_score = metrics["combined_score"]

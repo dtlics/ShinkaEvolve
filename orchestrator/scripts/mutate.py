@@ -157,6 +157,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
                 transport = "background"
             except Exception as exc:
                 last_error = f"transport error: {exc}"
+                # H2: a failed/capped Azure call may still be BILLED — fold the cost the
+                # transport attached to the exception so the ledger doesn't drop it.
+                total_cost += float(getattr(exc, "cost", 0.0) or 0.0)
                 break
         else:
             from shinka.llm import LLMClient

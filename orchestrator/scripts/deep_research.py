@@ -6,7 +6,12 @@ Azure resource, ~$5/call). The orchestrator is free to *call* it and *interpret*
 its output, but must not change its body. Per the SKILL.md: call it at problem
 onset (to seed the initial program / island count / prompt) and at stuck-
 stagnation moments (after ≥2 strategy rewrites failed to break a plateau). Be
-deliberate — it is the most expensive single action in the system.
+deliberate — it is the most expensive single action in the system. Before calling,
+the orchestrator runs the SKILL.md "pre-flight self-check": the QUERY must target
+GENERAL SOTA for the task/sub-task, never "reproduce a specific named paper" (that is
+the follow-up pro grounding run's job). The ``reference_snippet`` field below is
+requested by the IMMUTABLE Stage-C system prompt, NOT by your query — on a
+``content_filter`` refusal, rewrite the QUERY shape, never retry the same one.
 
 This is the Stage-C call from shinka's DR pipeline, exposed standalone: it sends
 the research question + program context to ``o3-deep-research`` (background mode +
@@ -22,6 +27,9 @@ INPUT (stdin JSON):
     "reasoning_effort": "medium",
     "max_tool_calls": 20,
     "results_dir": str | null,       # WS7: if set, self-log the full call + fold cost into the ledger
+    "budget_usd": float | null,      # D3: with results_dir, pre-flight-skip when budget can't cover dr_estimated_cost_usd
+    "dr_estimated_cost_usd": 5.0,    # D3 pre-flight estimate
+    "search_surcharge_usd": 0.30,    # D6: web-search cost guard (conservative over-estimate)
     "mock": false, "mock_text": str | null
   }
 
@@ -111,6 +119,17 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     if payload.get("mock"):
         text = payload.get("mock_text", "") or "[]"
         return {"brief": _parse_brief(text), "raw_text": text, "cost": 0.0, "model": model}
+
+    # D3 (H5b, opt-in): budget pre-flight — DR is the single most expensive action (~$5).
+    # Only fires if the agent threads budget_usd (an opt-in guard, NOT an autonomous
+    # guarantee — the harness never calls DR). Skip the spend when budget can't cover it.
+    _rd, _bud = payload.get("results_dir"), payload.get("budget_usd")
+    if _rd and _bud is not None:
+        _rem = _common.budget_remaining(_rd, _bud)
+        _est = float(payload.get("dr_estimated_cost_usd", payload.get("estimated_cost_usd", 5.0)))
+        if _rem is not None and _rem < _est:
+            return {"brief": [], "raw_text": "", "cost": 0.0, "model": model,
+                    "skipped": "budget", "budget_remaining": _rem, "estimated_cost": _est}
 
     import asyncio
     from shinka.llm.agent.dr_client import get_dr_async_client, run_dr_call

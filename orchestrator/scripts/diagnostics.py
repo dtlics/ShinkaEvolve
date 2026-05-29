@@ -11,21 +11,23 @@ and merges those with the per-window counters the harness accumulated
 The clean split: the *sensor* (this file) is fixed; the *J/flag computation* it
 embeds is the one mutable piece, and it lives in its own file.
 
-INPUT (stdin JSON):
-  {
-    "db_path": str, "db_config": {..}, "embedding_model": str,
-    "window_index": int, "iters_completed": int,
-    "best_score_start": float, "window_size": int,
-    "current_strategy_hash": str,
-    "tau": 0.0, "prior_low_streak": 0, "consecutive_required": 2,
-    # per-window counters supplied by the harness:
-    "novelty_accepts": int, "novelty_rejects": int,
-    "eval_failures": int, "eval_total": int,
-    "llm_bandit_weights": {model: weight},
-    "exhausted_retry_slots": [candidate_id, ...]
-  }
+INPUT (stdin JSON): db_path/db_config/embedding_model + the per-window fields the
+  harness accumulates: window_index, iters_completed, best_score_start, window_size,
+  strategy_fingerprint, stagnation_abs_floor/stagnation_rel_frac (``tau`` is a
+  DEPRECATED alias), prior_low_streak, consecutive_required, trigger_metric,
+  novelty_accepts/novelty_rejects/novelty_rejected_cost, eval_failures/eval_total,
+  fix_count/fix_success/needs_fix_count, llm_bandit_weights/llm_bandit_counts,
+  exhausted_retry_slots (generation ids) and exhausted_retry_count.
 
-OUTPUT (stdout JSON): the brief's window diagnostics shape, with "ok": true.
+OUTPUT (stdout JSON, "ok": true): window_index, iters_completed, best_score_start,
+  best_score_end, delta, J_score (INFORMATIONAL only — rollback uses rollback_decision),
+  threshold, strategy_fingerprint, novelty_acceptance_rate (NULL when no novelty events),
+  novelty_rejected_cost, evaluation_failure_rate (post-repair), fix_rate,
+  fix_success_rate, needs_fix_rate, llm_bandit_weights, llm_bandit_counts,
+  island_health [{id, best, diversity, stagnation_count, count}], stagnation_flag,
+  low_streak, exhausted_retry_slots, exhausted_retry_count, trigger_metric,
+  total_programs, correct_programs. (run_window additionally attaches window_cost,
+  total_cost, budget_remaining, budget_hit, windows_run, return_reason.)
 """
 
 from __future__ import annotations
@@ -79,7 +81,10 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     accepts = int(payload.get("novelty_accepts", 0) or 0)
     rejects = int(payload.get("novelty_rejects", 0) or 0)
     nov_total = accepts + rejects
-    novelty_acceptance_rate = (accepts / nov_total) if nov_total else 1.0
+    # O10/K15: None when NO novelty events occurred (UNKNOWN), so rollback_decision
+    # doesn't mistake "no data" for "perfectly diverse" (the F13 flood-detection
+    # inversion). A real rate only when there were events.
+    novelty_acceptance_rate = (accepts / nov_total) if nov_total else None
 
     eval_total = int(payload.get("eval_total", 0) or 0)
     eval_failures = int(payload.get("eval_failures", 0) or 0)
@@ -95,6 +100,12 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # fix was attempted, so the orchestrator can distinguish "no fixes" from "0% worked".
     fix_success = int(payload.get("fix_success", 0) or 0)
     fix_success_rate = (fix_success / fix_count) if fix_count else None
+
+    # M9: needs_fix parents (sampled INCORRECT parents routed to repair mode) are
+    # counted separately from immediate-fix ATTEMPTS, so fix_success_rate stays a
+    # coherent "immediate repairs that worked / immediate attempts" for ladder rung 5.
+    needs_fix_count = int(payload.get("needs_fix_count", 0) or 0)
+    needs_fix_rate = (needs_fix_count / iters) if iters else 0.0
 
     # Island health. The metric DEFINITION lives in the MUTABLE island_policy
     # (F10) so the orchestrator can later evolve "diversity"/"stagnation_count"
@@ -122,12 +133,16 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "evaluation_failure_rate": evaluation_failure_rate,
         "fix_rate": fix_rate,
         "fix_success_rate": fix_success_rate,
+        "needs_fix_rate": needs_fix_rate,
         "llm_bandit_weights": payload.get("llm_bandit_weights", {}),
         "llm_bandit_counts": payload.get("llm_bandit_counts", {}),
         "island_health": island_health,
         "stagnation_flag": stag["stagnation_flag"],
         "low_streak": stag["low_streak"],
         "exhausted_retry_slots": payload.get("exhausted_retry_slots", []),
+        "exhausted_retry_count": int(payload.get("exhausted_retry_count", 0) or 0),
+        # echo the active trigger metric (was threaded in but never emitted/read).
+        "trigger_metric": payload.get("trigger_metric", "hybrid"),
         "total_programs": summary.get("total"),
         "correct_programs": summary.get("correct"),
     }

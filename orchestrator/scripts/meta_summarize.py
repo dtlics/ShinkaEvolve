@@ -121,19 +121,25 @@ def _gather_recent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     db_config = payload.get("db_config", {}) or {}
     embedding_model = payload.get("embedding_model", "text-embedding-3-small")
     n_recent = int(payload.get("n_recent", 16) or 16)
+    # F4 (mutable knob): how much of the context is recent FAILURES vs top performers.
+    # Default 0.5 reproduces today's even split; raise toward 0.75 when failures
+    # dominate and the distilled failure_note keeps coming back vague.
+    frac = min(max(float(payload.get("meta_failures_first_frac", 0.5) or 0.5), 0.0), 1.0)
+    n_fail = max(1, int(round(n_recent * frac)))
+    n_top = max(1, n_recent - n_fail)
     base = {"db_path": db_path, "db_config": db_config, "embedding_model": embedding_model,
             "include_metadata": True}
     out: List[Dict[str, Any]] = []
     seen = set()
     try:  # recent FAILURES first — the signal WS3 must not miss.
-        fails = archive_query.main({**base, "query_type": "recent_failures", "n": max(1, n_recent // 2)})["result"]
+        fails = archive_query.main({**base, "query_type": "recent_failures", "n": n_fail})["result"]
         for p in fails:
             if p.get("id") not in seen:
                 out.append(p); seen.add(p.get("id"))
     except Exception:
         pass
     try:  # then the current top performers (what's working).
-        tops = archive_query.main({**base, "query_type": "top_n", "correct_only": True, "n": max(1, n_recent // 2)})["result"]
+        tops = archive_query.main({**base, "query_type": "top_n", "correct_only": True, "n": n_top})["result"]
         for p in tops:
             if p.get("id") not in seen:
                 out.append(p); seen.add(p.get("id"))
@@ -156,10 +162,21 @@ def _build_user_msg(payload: Dict[str, Any], recents: List[Dict[str, Any]]) -> s
         for p in recents[:20]:
             tag = "ok" if p.get("correct") else "FAIL"
             err = (p.get("error_traceback") or "")
-            # keep only the major reason (first line, capped) — see _ERR_CHARS.
+            # M7: a format_exc() traceback's FIRST line is the generic banner
+            # "Traceback (most recent call last):"; the real exception type+message is
+            # the LAST line. Synthesized reasons (timeouts, domain failures) put the
+            # reason on the first line, so only swap to the last when it's the banner.
             if err:
-                err = err.strip().splitlines()[0][:_ERR_CHARS]
-                err = f" err={err}"
+                _lines = [ln for ln in err.strip().splitlines() if ln.strip()]
+                if _lines:
+                    _pick = (
+                        _lines[-1]
+                        if _lines[0].startswith("Traceback (most recent call last)")
+                        else _lines[0]
+                    )
+                    err = f" err={_pick[:_ERR_CHARS]}"
+                else:
+                    err = ""
             patch = ((p.get("metadata") or {}).get("patch_name")) or p.get("patch_name") or ""
             lines.append(
                 f"- gen {p.get('generation')} [{tag}] score={p.get('combined_score')} "
@@ -225,6 +242,24 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "model": model,
         }
 
+    # D3 (H5b, opt-in): budget pre-flight — only fires if the agent threads budget_usd
+    # (the harness never calls meta; this is agent-invoked, so it is an opt-in guard, not
+    # an autonomous guarantee). Skip the spend when the remaining budget can't cover it.
+    _rd, _bud = payload.get("results_dir"), payload.get("budget_usd")
+    if _rd and _bud is not None:
+        _rem = _common.budget_remaining(_rd, _bud)
+        _est = float(payload.get("meta_estimated_cost_usd", payload.get("estimated_cost_usd", 1.0)))
+        if _rem is not None and _rem < _est:
+            return {"directions": [], "failure_note": None, "recommendations": "",
+                    "cost": 0.0, "model": model, "skipped": "budget",
+                    "budget_remaining": _rem, "estimated_cost": _est}
+    # F3: auto-populate prior_recommendations from recent meta calls so meta doesn't
+    # re-propose directions it already gave (an explicit caller value always wins).
+    if not payload.get("prior_recommendations") and _rd:
+        _prior = _common.recent_meta_directions(_rd, k=3)
+        if _prior:
+            payload = {**payload, "prior_recommendations": "; ".join(_prior[:8])}
+
     recents = _gather_recent(payload)
     system_msg = _SYS.format(n=n)
     user_msg = _build_user_msg(payload, recents)
@@ -232,13 +267,28 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     if payload.get("run_id"):
         call_metadata["run_id"] = payload["run_id"]
 
-    text, cost = _azure.bg_query(
-        model_name=model,
-        system_msg=system_msg,
-        user_msg=user_msg,
-        reasoning_effort=payload.get("reasoning_effort"),
-        call_metadata=call_metadata,
-    )
+    try:
+        text, cost = _azure.bg_query(
+            model_name=model,
+            system_msg=system_msg,
+            user_msg=user_msg,
+            reasoning_effort=payload.get("reasoning_effort"),
+            call_metadata=call_metadata,
+        )
+    except Exception as exc:
+        # H2: meta transport failure must not CRASH the orchestrator. Log the (billed)
+        # cost the transport attached and return a GRACEFUL degraded result with a
+        # discriminator so the agent can tell "meta crashed" from "meta found nothing".
+        _cost = float(getattr(exc, "cost", 0.0) or 0.0)
+        _common.log_external_call(
+            payload.get("results_dir"), "meta",
+            {"system": system_msg, "user": user_msg, "model": model},
+            {"error": str(exc)}, cost=_cost, summary="meta transport FAILED",
+        )
+        return {
+            "directions": [], "failure_note": None, "recommendations": "",
+            "cost": _cost, "model": model, "degraded": True, "error": str(exc),
+        }
     parsed = _parse_meta(text, n)
     # Legacy joined string — handy for logging and for any caller that still wants
     # a single blob (back-compat); the structured fields are the real output.

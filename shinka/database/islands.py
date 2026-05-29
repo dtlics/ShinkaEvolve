@@ -102,10 +102,22 @@ class DefaultIslandAssignmentStrategy(IslandStrategy):
                 )
                 return
 
-        # Final fallback: assign to a random island
-        program.island_idx = random.randint(0, num_islands - 1)
+        # Final fallback: assign to the LEAST-POPULATED island (not a random one) so
+        # evicted-lineage rows with a NULL parent island don't lump onto one island
+        # and skew diversity (M13 edge). Defensive: any query issue falls back to 0.
+        try:
+            self.cursor.execute(
+                "SELECT island_idx, COUNT(*) AS c FROM programs "
+                "WHERE island_idx IS NOT NULL GROUP BY island_idx"
+            )
+            counts = {int(r["island_idx"]): int(r["c"]) for r in self.cursor.fetchall()}
+        except Exception:
+            counts = {}
+        program.island_idx = (
+            min(range(num_islands), key=lambda i: counts.get(i, 0)) if num_islands > 0 else 0
+        )
         logger.debug(
-            f"Assigned program {program.id} to random island "
+            f"Assigned program {program.id} to least-populated island "
             f"{program.island_idx} (all assignment strategies exhausted)"
         )
 
@@ -182,10 +194,22 @@ class CopyInitialProgramIslandStrategy(IslandStrategy):
             )
             return
 
-        # Final fallback: assign to a random island
-        program.island_idx = random.randint(0, num_islands - 1)
+        # Final fallback: assign to the LEAST-POPULATED island (not a random one) so
+        # evicted-lineage rows with a NULL parent island don't lump onto one island
+        # and skew diversity (M13 edge). Defensive: any query issue falls back to 0.
+        try:
+            self.cursor.execute(
+                "SELECT island_idx, COUNT(*) AS c FROM programs "
+                "WHERE island_idx IS NOT NULL GROUP BY island_idx"
+            )
+            counts = {int(r["island_idx"]): int(r["c"]) for r in self.cursor.fetchall()}
+        except Exception:
+            counts = {}
+        program.island_idx = (
+            min(range(num_islands), key=lambda i: counts.get(i, 0)) if num_islands > 0 else 0
+        )
         logger.debug(
-            f"Assigned program {program.id} to random island "
+            f"Assigned program {program.id} to least-populated island "
             f"{program.island_idx} (all assignment strategies exhausted)"
         )
 
@@ -1087,8 +1111,10 @@ class CombinedIslandManager:
             )
             return False
 
-        # Get the next island index
-        new_island_idx = self.get_next_island_index()
+        # Get the next island index, honoring config.max_islands (M13): the capped
+        # allocator evicts the worst island at the cap (protecting island 0 + the
+        # global best) instead of growing unbounded. No-op when max_islands<=0.
+        new_island_idx = self.allocate_island_index_for_spawn()
 
         # Collect programs to copy (root + children if subtree_size > 1)
         programs_to_copy = self._collect_subtree_programs(source_program, subtree_size)

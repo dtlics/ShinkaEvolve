@@ -14,20 +14,28 @@ mutation correctness or floods near-duplicates is caught even when the score is
 still pinned at its opening value.
 
 A rewrite is a REGRESSION (→ roll back) if ANY of:
-  1. Correctness collapse — eval-success rate fell below ``min_eval_success`` (and
-     the prior window was above it), OR dropped by ≥ ``eval_drop`` vs prior.
-     (The rewrite started producing broken candidates.)
-  2. Diversity collapse — novelty-acceptance rate dropped by ≥ ``nov_drop`` vs
-     prior. (The rewrite floods near-duplicates — wasted spend, see F13.)
+  1. Correctness collapse — eval-success fell below the ABSOLUTE ``abs_eval_floor``
+     (near-total breakage; fires regardless of prior, so it is caught even in the
+     flat early phase), OR fell below ``min_eval_success`` while the prior was above
+     it, OR dropped by ≥ ``eval_drop`` vs prior. ``abs_eval_floor`` (0.05) sits FAR
+     below a genuinely-hard task's healthy floor, so a hard task that simply has low
+     correctness is NOT auto-rolled-back every rewrite (K14).
+  2. Diversity collapse — novelty-acceptance dropped by ≥ ``nov_drop`` vs prior.
+     SKIPPED when novelty is UNKNOWN (absent), not treated as maximal (O10/K15).
   3. Score regression — the prior window was making real progress
      (prior Δ > prior threshold) AND the measure window's Δ is < ``score_ratio`` ×
      prior Δ AND search health did not improve to compensate.
+  4. Bandit collapse — selection collapsed onto ONE arm (measure top-arm weight ≥
+     ``bandit_collapse_frac`` AND that arm ROSE ≥ ``bandit_collapse_rise`` vs prior).
+     Fires INDEPENDENTLY of Δ — the reward/bandit-regression class the old basket was
+     blind to in the flat early phase, i.e. the exact outer-loop trigger (H4).
 
 Otherwise accept. Thresholds are kwargs so a future tuning pass can adjust them.
 
 INPUT (stdin JSON):
   { "prior": <window diag>, "measure": <window diag>,
-    "eval_drop": 0.25, "nov_drop": 0.25, "min_eval_success": 0.5, "score_ratio": 0.5 }
+    "eval_drop": 0.25, "nov_drop": 0.25, "min_eval_success": 0.5, "score_ratio": 0.5,
+    "abs_eval_floor": 0.05, "bandit_collapse_frac": 0.85, "bandit_collapse_rise": 0.25 }
 
 OUTPUT (stdout JSON):
   { "ok": true, "regressed": bool, "accept": bool, "reasons": [str], "signals": {..} }
@@ -52,10 +60,12 @@ def _eval_success(diag: Dict[str, Any]) -> float:
     return 1.0 - float(diag.get("evaluation_failure_rate", 0.0) or 0.0)
 
 
-def _nov(diag: Dict[str, Any]) -> float:
-    # default 1.0 (fully accepting) when absent, matching diagnostics' convention
+def _nov(diag: Dict[str, Any]):
+    # O10/K15: return None when novelty is UNKNOWN (absent) — do NOT default to 1.0
+    # ("perfectly diverse"), which would mask a rewrite that records zero novelty
+    # events. Callers skip the diversity arm when this is None.
     v = diag.get("novelty_acceptance_rate")
-    return 1.0 if v is None else float(v)
+    return None if v is None else float(v)
 
 
 def decide(
@@ -66,6 +76,9 @@ def decide(
     nov_drop: float = 0.25,
     min_eval_success: float = 0.5,
     score_ratio: float = 0.5,
+    abs_eval_floor: float = 0.05,
+    bandit_collapse_frac: float = 0.85,
+    bandit_collapse_rise: float = 0.25,
 ) -> Dict[str, Any]:
     reasons: List[str] = []
 
@@ -75,28 +88,53 @@ def decide(
     m_delta = float(measure.get("delta", 0.0) or 0.0)
     p_threshold = float(prior.get("threshold", 0.0) or 0.0)
 
-    # 1. Correctness collapse
-    if m_eval < min_eval_success <= p_eval:
+    # 1. Correctness collapse.
+    if m_eval < abs_eval_floor:
+        # ABSOLUTE near-total collapse — fires regardless of prior, so a rewrite that
+        # breaks almost everything is caught even in the early/flat phase. abs_eval_floor
+        # (0.05) sits FAR below a genuinely-hard task's healthy floor (K14), so a hard
+        # task that simply has low correctness is NOT auto-rolled-back every rewrite.
         reasons.append(
-            f"correctness collapse: eval-success {m_eval:.2f} < {min_eval_success} (prior {p_eval:.2f})"
+            f"correctness collapse: eval-success {m_eval:.2f} < abs_eval_floor {abs_eval_floor}"
+        )
+    elif m_eval < min_eval_success <= p_eval:
+        reasons.append(
+            f"correctness drop below {min_eval_success}: eval-success {m_eval:.2f} (prior {p_eval:.2f})"
         )
     elif (p_eval - m_eval) >= eval_drop:
         reasons.append(
             f"correctness drop: eval-success {p_eval:.2f} → {m_eval:.2f} (≥{eval_drop})"
         )
 
-    # 2. Diversity collapse
-    if (p_nov - m_nov) >= nov_drop:
+    # 2. Diversity collapse (skip when novelty is UNKNOWN — O10/K15).
+    if p_nov is not None and m_nov is not None and (p_nov - m_nov) >= nov_drop:
         reasons.append(
             f"diversity drop: novelty-acceptance {p_nov:.2f} → {m_nov:.2f} (≥{nov_drop})"
         )
 
-    # 3. Score regression (only when the prior window was genuinely progressing)
+    # 3. Score regression (only when the prior window was genuinely progressing).
     if p_delta > p_threshold and m_delta < score_ratio * p_delta:
-        health_improved = (m_nov >= p_nov) and (m_eval >= p_eval)
-        if not health_improved:
+        eval_ok = m_eval >= p_eval
+        nov_ok = (m_nov >= p_nov) if (p_nov is not None and m_nov is not None) else True
+        if not (eval_ok and nov_ok):
             reasons.append(
                 f"score regression: Δ {p_delta:.5f} → {m_delta:.5f} (< {score_ratio}× prior) with no health gain"
+            )
+
+    # 4. Bandit collapse (H4 core): selection collapsed onto a single arm — fires
+    # INDEPENDENTLY of Δ, so it is caught in the flat early phase the old basket was
+    # blind to (the reward/bandit-regression class the outer loop exists to catch).
+    # Uses llm_bandit_weights already in the diagnostics (contract-free).
+    pw = prior.get("llm_bandit_weights") or {}
+    mw = measure.get("llm_bandit_weights") or {}
+    if mw:
+        top_arm = max(mw, key=lambda k: float(mw[k] or 0.0))
+        m_top = float(mw.get(top_arm, 0.0) or 0.0)
+        p_top = float(pw.get(top_arm, 0.0) or 0.0)
+        if m_top >= bandit_collapse_frac and (m_top - p_top) >= bandit_collapse_rise:
+            reasons.append(
+                f"bandit collapse: arm {top_arm} weight {p_top:.2f} → {m_top:.2f} "
+                f"(≥{bandit_collapse_frac}, rose ≥{bandit_collapse_rise})"
             )
 
     regressed = len(reasons) > 0
@@ -119,6 +157,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         nov_drop=float(payload.get("nov_drop", 0.25)),
         min_eval_success=float(payload.get("min_eval_success", 0.5)),
         score_ratio=float(payload.get("score_ratio", 0.5)),
+        abs_eval_floor=float(payload.get("abs_eval_floor", 0.05)),
+        bandit_collapse_frac=float(payload.get("bandit_collapse_frac", 0.85)),
+        bandit_collapse_rise=float(payload.get("bandit_collapse_rise", 0.25)),
     )
 
 

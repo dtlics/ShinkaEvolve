@@ -11,9 +11,11 @@ INPUT (stdin JSON):
     "db_config": {..},
     "embedding_model": str,
     "query_type": "get" | "ancestry" | "best" | "top_n" | "by_generation"
-                | "recent_failures" | "all" | "count" | "summary",
+                | "recent_failures" | "all" | "count" | "summary"
+                | "island_brief",
     # query-specific params:
     "program_id": str,              # get / ancestry
+    "island_idx": int,              # island_brief (latest per-island direction)
     "max_ancestors": 10,            # ancestry
     "metric": str | null,           # best
     "n": 10,                        # top_n / recent_failures / all (cap)
@@ -21,6 +23,7 @@ INPUT (stdin JSON):
     "correct_only": true,           # top_n
     "include_code": false,
     "include_embedding": false,
+    "include_metadata": false,   # surface the per-program metadata blob (the role-2 lock-out read leans on this)
     "code_preview_chars": 0
   }
 
@@ -77,6 +80,11 @@ def _dispatch(db, query_type: str, payload: Dict[str, Any]):
 
     if query_type == "best":
         return _summ(payload, db.get_best_program(payload.get("metric")))
+
+    if query_type == "island_brief":
+        # Latest per-island DIRECTION the orchestrator authored (None if none).
+        # Calls the DB API (never raw SQL) — keeps archive_query API-only.
+        return db.get_latest_meta_brief(int(payload["island_idx"]))
 
     # The remaining query types derive from the full program list. The archive
     # is small in practice; an efficiency note is in NOTES.md for long runs.

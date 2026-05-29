@@ -84,6 +84,7 @@ class PromptSampler:
         meta_recommendations: Optional[str] = None,
         island_brief: Optional[str] = None,
         literature_grounded_item: Optional[Dict[str, Any]] = None,
+        failure_note: Optional[str] = None,
     ) -> Tuple[str, str, str]:
         if self.task_sys_msg is None:
             sys_msg = BASE_SYSTEM_MSG
@@ -161,6 +162,18 @@ class PromptSampler:
                 f"meta_recommendations={bool(meta_recommendations)}, "
                 f"patch_type={patch_type}"
             )
+
+        # The persistent failure caution rides into EVERY generation — rendered
+        # independently of patch_type and of any per-gen direction/island_brief, so
+        # it is never dropped on a cross/literature_grounded gen, when an island_brief
+        # replaced the direction, or when no direction was sampled (M1/M2/M3/M4).
+        if failure_note not in (None, "", "none") and str(failure_note).strip():
+            sys_msg += "\n\n# Known failure modes to avoid"
+            sys_msg += (
+                "\nDo NOT reintroduce these recurring failure modes seen in past "
+                "attempts:\n"
+            )
+            sys_msg += f"\n{failure_note}"
 
         # Add format instructions AFTER meta-recommendations
         if patch_type == "diff":
@@ -262,6 +275,7 @@ class PromptSampler:
         self,
         incorrect_program: Program,
         ancestor_inspirations: Optional[List[Program]] = None,
+        failure_note: Optional[str] = None,
     ) -> Tuple[str, str, str]:
         """
         Generate prompts for fixing an incorrect program.
@@ -273,7 +287,9 @@ class PromptSampler:
             incorrect_program: The incorrect program to fix
             ancestor_inspirations: Programs from the ancestry of the program
                 (sorted chronologically, oldest first)
-            meta_recommendations: Optional recommendations from meta summarizer
+            failure_note: Optional persistent caution (recurring failure modes to
+                avoid), rendered into the repair prompt so a fix does not
+                reintroduce a known failure class.
 
         Returns:
             Tuple of (system_message, user_message, patch_type="fix")
@@ -284,6 +300,12 @@ class PromptSampler:
             sys_msg = self.task_sys_msg
 
         sys_msg += FIX_SYS_FORMAT.format(language=self.language)
+
+        # M4: the persistent failure caution rides into fix-mode prompts too, so a
+        # repair does not reintroduce a known failure class.
+        if failure_note not in (None, "", "none") and str(failure_note).strip():
+            sys_msg += "\n\n# Known failure modes to avoid\n"
+            sys_msg += f"{failure_note}"
 
         # Build eval history from ancestor inspirations (already chronological)
         if ancestor_inspirations and len(ancestor_inspirations) > 0:

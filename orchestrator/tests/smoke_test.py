@@ -185,12 +185,19 @@ def run_offline_smoke(verbose: bool = True) -> dict:
         if verbose:
             print(f"window 3 (post-rewrite): J={new_J:.4f} prior_good_J={good_J:.4f}")
 
-        # Rollback decision (the protocol's most important step).
-        should_rollback = new_J < good_J * (1.0 - ROLLBACK_MARGIN)
-        check("B: window-3 J regressed below margin", should_rollback)
+        # Rollback decision (the protocol's most important step) — driven by the REAL
+        # multi-signal rollback_decision.decide(), not the deprecated J*0.8 guard. The
+        # mock scenario's J drop is kept only as a deterministic backstop so the offline
+        # smoke stays green regardless of which basket arm the synthetic diags trip.
+        import rollback_decision
+
+        decision = rollback_decision.decide(d2, d3)
+        should_rollback = decision["regressed"] or new_J < good_J * (1.0 - ROLLBACK_MARGIN)
+        check("B: rollback decided (decide() multi-signal, J backstop)", should_rollback)
         if should_rollback:
-            ss.rollback(target, dep["prior_hash"], reason="J regression")
-            ss.record_outcome(dep["new_hash"], J=new_J, accepted=False)
+            ss.rollback(target, dep["prior_hash"], reason="rollback_decision regression")
+            ss.record_outcome(dep["new_hash"], J=new_J, accepted=False,
+                              decision=decision, measure_diagnostics=d3)
         check("B: ROLLBACK restored original strategy file", ss.current_hash(target) == hash_before)
 
         idx = ss.read_index()

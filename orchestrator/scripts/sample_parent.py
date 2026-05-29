@@ -20,7 +20,8 @@ INPUT (stdin JSON):
   {
     "db_path": str, "db_config": {..}, "embedding_model": str,
     "island_idx": int | null,     # null => auto-select uniformly among initialized islands
-    "seed": int | null            # for deterministic sampling (tests/parity)
+    "seed": int | null,           # for deterministic sampling (tests/parity)
+    "validity_floor": float | null  # O6 lever: floor VALID parents' scores; null = inert
   }
 
 OUTPUT (stdout JSON):
@@ -83,6 +84,39 @@ def _weighted_probs(scores: List[float], children: List[int], lam: float) -> Lis
     return [1.0 / n] * n if n else []
 
 
+def _select_island(archived_correct, islands, config, rng):
+    """Pick an island per ``config.island_selection_strategy`` (M11). Default
+    "uniform"/"equal" reproduces the prior hardcoded uniform draw (and parity).
+    "proportional" weights by island population; "weighted" by island best-fitness."""
+    if not islands:
+        return None
+    strategy = str(getattr(config, "island_selection_strategy", "uniform") or "uniform")
+    if strategy == "proportional":
+        counts = {i: 0 for i in islands}
+        for p in archived_correct:
+            i = getattr(p, "island_idx", None)
+            if i in counts:
+                counts[i] += 1
+        weights = [counts[i] for i in islands]
+        if sum(weights) > 0:
+            return rng.choices(islands, weights=weights, k=1)[0]
+        return rng.choice(islands)
+    if strategy == "weighted":
+        bests = {i: 0.0 for i in islands}
+        for p in archived_correct:
+            i = getattr(p, "island_idx", None)
+            if i in bests:
+                s = float(getattr(p, "combined_score", 0.0) or 0.0)
+                if s > bests[i]:
+                    bests[i] = s
+        weights = [max(bests[i], 0.0) for i in islands]
+        if sum(weights) > 0:
+            return rng.choices(islands, weights=weights, k=1)[0]
+        return rng.choice(islands)
+    # "uniform" / "equal" (default) — preserves WeightedSamplingStrategy parity.
+    return rng.choice(islands)
+
+
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     from shinka.database import ProgramDatabase, DatabaseConfig
 
@@ -125,17 +159,33 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "selection_probs": [],
         }
 
-    # Island selection: explicit, else uniform among initialized islands.
+    # Island selection (MUTABLE-LEVER, M11): honor config.island_selection_strategy
+    # instead of a hardcoded uniform draw. Default "uniform" reproduces today's
+    # behavior (+ the WeightedSamplingStrategy parity).
     islands = sorted({getattr(p, "island_idx", 0) for p in archived_correct})
     island_idx = payload.get("island_idx")
     if island_idx is None:
-        island_idx = rng.choice(islands)
+        island_idx = _select_island(archived_correct, islands, config, rng)
 
-    pool = [p for p in archived_correct if getattr(p, "island_idx", None) == island_idx]
-    if not pool:  # island has no archived members; fall back to all archived
+    # enforce_island_separation (MUTABLE-LEVER, M11): default True keeps the
+    # same-island pool (today's behavior); False enables cross-island
+    # cross-pollination of parents + inspirations.
+    enforce_sep = bool(getattr(config, "enforce_island_separation", True))
+    if enforce_sep:
+        pool = [p for p in archived_correct if getattr(p, "island_idx", None) == island_idx]
+        if not pool:  # island has no archived members; fall back to all archived
+            pool = archived_correct
+    else:
         pool = archived_correct
 
     scores = [float(getattr(p, "combined_score", 0.0) or 0.0) for p in pool]
+    # MUTABLE-LEVER (O6 — parent-selection score scale): clamp VALID parents'
+    # scores to a floor so valid-but-no-gain candidates stay selectable above the
+    # bottom of the pool. Default None = inert (preserves WeightedSamplingStrategy
+    # parity). The bandit REWARD scale has its own separate `reward_validity_floor`.
+    _vfloor = payload.get("validity_floor")
+    if _vfloor is not None:
+        scores = [max(s, float(_vfloor)) for s in scores]
     children = [int(getattr(p, "children_count", 0) or 0) for p in pool]
     lam = float(getattr(config, "parent_selection_lambda", 10.0))
     probs = _weighted_probs(scores, children, lam)

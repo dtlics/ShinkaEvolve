@@ -15,7 +15,7 @@
     "patch_types": ["diff", "full", "cross"],
     "patch_type_probs": [0.6, 0.3, 0.1],
     "llm_models": ["azure-gpt-5.4-mini", "azure-gpt-5.5"],
-    "llm_dynamic_selection_kwargs": {"cost_aware_coef": 0.5},
+    "llm_dynamic_selection_kwargs": {"cost_aware_coef": 0.25, "epsilon": 0.2},
     "reasoning_effort": "medium",
     "max_patch_attempts": 3,
     "reward_mode": "absolute",

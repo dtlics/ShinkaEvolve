@@ -78,11 +78,26 @@ def append_index(entry: Dict[str, Any]) -> None:
     _write_index(entries)
 
 
+def _assert_mutable(target: str) -> None:
+    """E1/H10: refuse to snapshot/deploy/rollback a NON-mutable target. The rewrite
+    protocol must NEVER touch a FOUNDATION file (the JSON contract, evaluator,
+    diagnostics, journal, harness); an off-by-one in the orchestrator's reasoning would
+    silently corrupt the contract AND make the corruption the restore point. Human
+    override for tooling: SHINKA_ALLOW_FOUNDATION_WRITE."""
+    if target in MUTABLE_TARGETS or os.environ.get("SHINKA_ALLOW_FOUNDATION_WRITE"):
+        return
+    raise PermissionError(
+        f"refusing to write non-mutable strategy target {target!r}: not in MUTABLE_TARGETS "
+        f"(set SHINKA_ALLOW_FOUNDATION_WRITE=1 to override for tooling)"
+    )
+
+
 def snapshot(target: str, reason: str = "snapshot") -> str:
     """Copy the CURRENT scripts/<target> into strategy_history/<hash>/. Idempotent.
 
     Returns the content hash (the snapshot directory name).
     """
+    _assert_mutable(target)
     src = scripts_dir() / target
     if not src.exists():
         raise FileNotFoundError(f"strategy file not found: {src}")
@@ -123,6 +138,7 @@ def deploy(
     window_index: Optional[int] = None,
     prior_J: Optional[float] = None,
     concern: Optional[str] = None,
+    force: bool = False,
 ) -> Dict[str, Any]:
     """Snapshot the current strategy, then deploy ``candidate_path`` over it.
 
@@ -130,7 +146,23 @@ def deploy(
     so it can be restored if a *later* rewrite needs to roll back to it.
     ``concern`` records WHICH concern this rewrite targets (e.g. "prompt",
     "scoring") so the index narrates the change without a snapshot lookup (F4).
+    ``force`` bypasses the rejected-hash guard (E6).
     """
+    # E6 (rewrite F8): refuse to re-deploy a candidate whose content-hash a prior
+    # outcome marked `rejected` for this target (the "don't retread a failed strategy"
+    # invariant) — unless explicitly forced. Cheap guard over the append-only index.
+    if not force:
+        _cand_hash = file_hash(Path(candidate_path))
+        for _e in read_index():
+            if (
+                _e.get("new_hash") == _cand_hash
+                and _e.get("target") == target
+                and _e.get("status") == "rejected"
+            ):
+                raise ValueError(
+                    f"candidate hash {_cand_hash[:8]} for {target} was REJECTED at window "
+                    f"{_e.get('window_index')}; pass force=True to re-deploy anyway"
+                )
     prior_hash = snapshot(target, reason="pre-deploy snapshot")
     dst = scripts_dir() / target
     shutil.copy2(candidate_path, dst)
@@ -155,6 +187,7 @@ def deploy(
 
 def rollback(target: str, prior_hash: str, reason: str = "J regression") -> Dict[str, Any]:
     """Restore strategy_history/<prior_hash>/<target> over scripts/<target>."""
+    _assert_mutable(target)
     snap = history_dir() / prior_hash / target
     if not snap.exists():
         raise FileNotFoundError(f"snapshot not found: {snap}")
@@ -275,10 +308,24 @@ def deploy_bundle(
     for ch in changes:
         prior_hashes[ch["target"]] = snapshot(ch["target"], reason="pre-bundle snapshot")
     new_hashes: Dict[str, str] = {}
-    for ch in changes:
-        shutil.copy2(ch["candidate_path"], scripts_dir() / ch["target"])
-        new_hashes[ch["target"]] = snapshot(ch["target"], reason=reason)
-        update_meta(new_hashes[ch["target"]], window_index=window_index, reason=reason)
+    _applied: List[str] = []
+    try:
+        for ch in changes:
+            shutil.copy2(ch["candidate_path"], scripts_dir() / ch["target"])
+            _applied.append(ch["target"])
+            new_hashes[ch["target"]] = snapshot(ch["target"], reason=reason)
+            update_meta(new_hashes[ch["target"]], window_index=window_index, reason=reason)
+    except Exception:
+        # E2/H11: a mid-bundle failure must leave scripts/ byte-identical to before (no
+        # half-applied, incompatible concern). Restore every already-copied target from
+        # its pre-bundle snapshot, then re-raise WITHOUT writing an index row (we never
+        # reached append_index, so there is no misleading bundle entry / rollback handle).
+        for _t in _applied:
+            try:
+                shutil.copy2(history_dir() / prior_hashes[_t] / _t, scripts_dir() / _t)
+            except Exception:
+                pass
+        raise
     append_index(
         {
             "type": "bundle",
@@ -300,6 +347,7 @@ def deploy_bundle(
 def rollback_bundle(prior_hashes: Dict[str, str], reason: str = "J regression") -> Dict[str, Any]:
     """Restore every target in the bundle from its prior snapshot."""
     for target, h in prior_hashes.items():
+        _assert_mutable(target)
         snap = history_dir() / h / target
         if not snap.exists():
             raise FileNotFoundError(f"bundle snapshot not found: {snap}")

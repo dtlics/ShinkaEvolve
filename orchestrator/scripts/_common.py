@@ -163,6 +163,7 @@ _PROGRAM_SUMMARY_FIELDS = (
     "in_archive",
     "public_metrics",
     "error_traceback",
+    "text_feedback",
     "archive_inspiration_ids",
     "top_k_inspiration_ids",
     "system_prompt_id",
@@ -227,3 +228,55 @@ def log_external_call(results_dir, kind, request, response, cost=0.0, summary=No
         return journal.log_call(results_dir, kind, request, response, cost=cost, summary=summary)
     except Exception:
         return None
+
+
+def _lazy_journal():
+    """Import the FOUNDATION journal via the sanctioned ../harness bridge (O11) — the
+    same lazy path log_external_call uses, so a MUTABLE script may READ the journal
+    without a hard scripts->harness import dependency. Returns the module or None."""
+    try:
+        import os as _os
+        import sys as _sys
+
+        _harness = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "harness")
+        if _harness not in _sys.path:
+            _sys.path.insert(0, _harness)
+        import journal  # type: ignore
+
+        return journal
+    except Exception:
+        return None
+
+
+def budget_remaining(results_dir, budget):
+    """D3 (O11): journal.budget_remaining via the lazy bridge. None when unavailable
+    (caller treats None as 'unknown' and does not skip)."""
+    if not results_dir or budget is None:
+        return None
+    j = _lazy_journal()
+    try:
+        return j.budget_remaining(results_dir, budget) if j else None
+    except Exception:
+        return None
+
+
+def recent_meta_directions(results_dir, k=3):
+    """F3: direction texts from the last ``k`` meta calls (so a meta round can
+    auto-populate prior_recommendations and avoid re-proposing duplicates). Best-effort
+    → [] when unavailable."""
+    if not results_dir:
+        return []
+    j = _lazy_journal()
+    if not j:
+        return []
+    out = []
+    try:
+        for c in list(j.read_calls(results_dir, kind="meta") or [])[-k:]:
+            detail = j.read_call(results_dir, c.get("file")) if c.get("file") else None
+            for d in ((detail or {}).get("response") or {}).get("directions", []) or []:
+                t = d.get("text") if isinstance(d, dict) else None
+                if t:
+                    out.append(t)
+    except Exception:
+        return []
+    return out

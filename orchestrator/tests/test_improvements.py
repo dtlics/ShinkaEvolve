@@ -225,6 +225,51 @@ def test_immediate_fix():
     return True
 
 
+def test_meta_summarize_parsing():
+    """WS2/WS3: meta returns weighted directions + a failure_note; a non-JSON reply
+    degrades to a single direction rather than crashing."""
+    import meta_summarize
+
+    mock_json = (
+        '{"directions": [{"text": "use rung CXs", "weight": 0.7}, '
+        '{"text": "tile 2x2 blocks", "weight": 0.3}], '
+        '"failure_note": "Most recent failures were eval TIMEOUTS; keep synthesis fast."}'
+    )
+    out = meta_summarize.main({"mock": True, "mock_text": mock_json, "max_recommendations": 5})
+    assert len(out["directions"]) == 2, out["directions"]
+    assert out["directions"][0]["text"] == "use rung CXs"
+    assert abs(out["directions"][0]["weight"] - 0.7) < 1e-9
+    assert "timeout" in out["failure_note"].lower()
+
+    # Non-JSON fallback: keep the raw text as one direction, empty failure_note.
+    out2 = meta_summarize.main({"mock": True, "mock_text": "just iterate harder", "max_recommendations": 5})
+    assert len(out2["directions"]) == 1 and out2["directions"][0]["text"] == "just iterate harder"
+    assert out2["failure_note"] == ""
+    return True
+
+
+def test_meta_direction_sampling():
+    """WS2: per-gen sampling picks one direction by weight; compose prepends the
+    persistent failure caution; legacy meta_recommendations blob still works."""
+    import random as _r
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    dirs = [{"text": "A", "weight": 1.0}, {"text": "B", "weight": 0.0}]
+    picks = {run_window._sample_meta_direction(dirs, _r.Random(i)) for i in range(20)}
+    assert picks == {"A"}, picks  # zero-weight arm never chosen
+
+    evo = {"meta_directions": [{"text": "tryX", "weight": 1.0}],
+           "meta_failure_note": "watch runtime/timeouts", "seed": 0}
+    msg = run_window._compose_meta_for_gen(evo, 3)
+    assert "watch runtime/timeouts" in msg and "tryX" in msg, msg
+
+    assert run_window._compose_meta_for_gen({"meta_recommendations": "old blob"}, 0) == "old blob"
+    assert run_window._compose_meta_for_gen({}, 0) is None
+    return True
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
@@ -234,6 +279,8 @@ if __name__ == "__main__":
         ("cadence_policy", test_cadence_policy),
         ("budget_hardstop", test_budget_hardstop),
         ("immediate_fix", test_immediate_fix),
+        ("meta_summarize_parsing", test_meta_summarize_parsing),
+        ("meta_direction_sampling", test_meta_direction_sampling),
     ]
     ok = True
     for name, fn in tests:

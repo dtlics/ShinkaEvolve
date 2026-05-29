@@ -138,7 +138,8 @@ file in the concern's row together.
 | **Stagnation trigger** | `stagnation_detector.py` | `diagnostics.py` | `J_score`, `low_streak` |
 | **Memory** | `record_policy.py` | `sample_parent`/`novelty`/`diagnostics` readers | what metadata fields exist |
 | **Island structure** | `island_policy.py` | executed by `archive_record` (foundation) | `island_health` per-island trajectory |
-| **New directions (meta)** | `meta_summarize.py` (cheap), `deep_research.py` (≈$5) | fed to `construct_mutation_prompt` via `evo.meta_recommendations`, or a seeded island | persistent flat `J_score` after framework rewrites |
+| **New directions (meta)** | `meta_summarize.py` (cheap, REACTIVE — summarizes recent attempts incl. failures) | you write its `directions` → `evo.meta_directions` (run_window samples ONE per gen by weight) + its `failure_note` → `evo.meta_failure_note` (fed forward every gen) | persistent flat `J_score` after framework rewrites |
+| **New directions (DR)** | `deep_research.py` (web-grounded, rare) | you TRIAGE its brief immediately (novel → new island grounded by pro+websearch; history-similar → pro improves an existing gen; else ignore — see Boot/DR) | flat `J_score` that meta can't lift |
 
 Every concern above is **orchestrator-mutable** via the rewrite protocol —
 including the **fix / repair** policy (whether a candidate is fixed or abandoned
@@ -197,11 +198,14 @@ strategies + their J — the EvoX H) and the journal (the population descriptor)
    the repair prompt already feeds the error back — but also confirm `task_sys_msg`
    carries the abstract runtime-budget caution (see Boot).
 6. Generic stagnation → rewrite the **exploration concern** (`sample_parent.py`).
-7. Framework rewrites aren't breaking the plateau → you need NEW IDEAS. Gather
-   context (best program, recent attempts, journal stats) and call
-   `meta_summarize.py` (cheap) for fresh directions; feed them into the next
-   window's `evo.meta_recommendations`. If that's not enough, call
-   `deep_research.py` (web-grounded) and seed a new island from its brief.
+7. Framework rewrites aren't breaking the plateau → you need NEW IDEAS. Call
+   `meta_summarize.py` (cheap) — pass `db_path`/`db_config` and it SELF-GATHERS the
+   recent attempts (failures FIRST, then top performers), so it always sees the
+   failure signal. It returns `directions` (weighted) + a `failure_note` (prose:
+   what's been failing and why). Write `directions` → `evo.meta_directions` (run_window
+   samples ONE per gen by weight — your "best shots" get tried more) and `failure_note`
+   → `evo.meta_failure_note` (rides into every gen as a caution). If meta isn't
+   enough, escalate to `deep_research.py` and TRIAGE its brief (Boot/DR section).
 8. Deep research + rewrites exhausted over several windows → terminate and write
    `RUN_SUMMARY.md` (including foundation-change recommendations).
 
@@ -322,6 +326,11 @@ Reasoning models (e.g. `azure-gpt-5.4-pro`) require `reasoning_effort` ≥ "medi
 `fix_retry_budget` (default 1) = immediate repair attempts on an eval failure
 before the slot is recorded as incorrect (WS1); the orchestrator passes a larger
 budget only when grounding a novel DR direction as a new island (WS5).
+`evo.meta_directions` (`[{text, weight}]`) and `evo.meta_failure_note` (str) are
+NOT authored upfront — you WRITE them from a `meta_summarize` call's output when
+the search stalls (ladder rung 7). run_window samples one direction per gen by
+weight and prepends the failure_note. The legacy `evo.meta_recommendations` single
+string is still honored (whole blob to every gen) when `meta_directions` is absent.
 
 **Window size & cadence (EvoX-tuned).** `window_size` (W) is the stagnation unit;
 EvoX uses W ≈ 10% of the total iteration budget — set it accordingly (default 15).

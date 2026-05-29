@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -236,6 +237,53 @@ def _bootstrap_initial(cfg: Dict[str, Any]) -> float:
     return float(embed_cost or 0.0)
 
 
+def _sample_meta_direction(meta_directions: Optional[List[Any]], rng: random.Random) -> Optional[str]:
+    """WS2: sample ONE meta direction by weight (relative promise / 'best shots').
+    Returns the chosen direction text, or None if there are none."""
+    if not meta_directions:
+        return None
+    texts: List[str] = []
+    weights: List[float] = []
+    for d in meta_directions:
+        if isinstance(d, dict):
+            t = d.get("text")
+            try:
+                w = max(0.0, float(d.get("weight", 1.0)))
+            except (TypeError, ValueError):
+                w = 1.0
+        else:
+            t, w = (str(d) if d else None), 1.0
+        if t:
+            texts.append(t)
+            weights.append(w)
+    if not texts:
+        return None
+    if sum(weights) <= 0:
+        return rng.choice(texts)
+    return rng.choices(texts, weights=weights, k=1)[0]
+
+
+def _compose_meta_for_gen(evo: Dict[str, Any], generation: int) -> Optional[str]:
+    """WS2/WS3: build THIS gen's meta guidance. With ``evo.meta_directions`` (the
+    weighted list from meta_summarize), sample ONE direction by weight and prepend
+    the persistent ``evo.meta_failure_note`` caution (fed forward into every gen).
+    Falls back to the legacy single ``evo.meta_recommendations`` blob when no
+    structured directions are present (back-compat with older run.json files)."""
+    meta_directions = evo.get("meta_directions")
+    failure_note = evo.get("meta_failure_note")
+    if meta_directions:
+        seed = evo.get("seed")
+        rng = random.Random((int(seed) + int(generation)) if seed is not None else None)
+        chosen = _sample_meta_direction(meta_directions, rng)
+        parts: List[str] = []
+        if failure_note:
+            parts.append("Recurring-failure caution (do NOT repeat these mistakes): " + str(failure_note))
+        if chosen:
+            parts.append("Direction to pursue in THIS attempt: " + chosen)
+        return "\n\n".join(parts) or None
+    return evo.get("meta_recommendations")  # legacy global blob fallback
+
+
 def _attempt_immediate_fixes(
     cfg: Dict[str, Any],
     ev: Dict[str, Any],
@@ -413,7 +461,9 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             "top_k_inspirations": top_k_insp,
             "ancestor_inspirations": ancestors,
             "needs_fix": needs_fix,
-            "meta_recommendations": evo.get("meta_recommendations"),
+            # WS2/WS3: per-gen weighted sample of ONE meta direction + the persistent
+            # failure caution — not the old global blob appended to every gen.
+            "meta_recommendations": _compose_meta_for_gen(evo, generation),
             "task_sys_msg": task.get("task_sys_msg"),
             "patch_types": evo.get("patch_types"),
             "patch_type_probs": evo.get("patch_type_probs"),

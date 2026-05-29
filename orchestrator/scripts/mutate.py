@@ -28,6 +28,7 @@ INPUT (stdin JSON):
     "patch_dir": str, "language": "python",
     "model_name": str,                       # azure-* etc.
     "reasoning_effort": "medium" | null,     # for reasoning models
+    "enable_web_search": false,              # WS4: attach web_search_preview (DR-ref grounding / fix)
     "max_attempts": 3,
     "mock": false, "mock_code": str|null, "mock_patch": str|null, "mock_cost": 0.0,
     "run_id": str|null, "generation": int|null, "verbose": false
@@ -125,6 +126,10 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     model_name = payload["model_name"]
     reasoning_effort = payload.get("reasoning_effort")
     max_attempts = int(payload.get("max_attempts", 3))
+    # WS4: web search is OFF unless the caller opts in (DR-reference grounding /
+    # fix-retry when evo.fix_web_search is set). Only the bg (Azure/OpenAI) path
+    # supports it; the legacy sync client ignores it.
+    enable_web_search = bool(payload.get("enable_web_search", False))
     call_metadata = {"purpose": "proposer", "model_name": model_name}
     if payload.get("run_id"):
         call_metadata["run_id"] = payload["run_id"]
@@ -146,7 +151,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         if use_bg:
             try:
                 raw, cost = _azure.bg_query(
-                    model_name, patch_sys, patch_msg, reasoning_effort, call_metadata
+                    model_name, patch_sys, patch_msg, reasoning_effort, call_metadata,
+                    enable_web_search=enable_web_search,
                 )
                 transport = "background"
             except Exception as exc:

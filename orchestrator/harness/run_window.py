@@ -562,6 +562,10 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         ev, mut, _fix_cost = _attempt_immediate_fixes(
             cfg, ev, mut, parent, model_name, gen_dir, results_dir,
             generation, language, int(evo.get("fix_retry_budget", 1)), counters,
+            # WS4: web search during ordinary fix-retries is OFF by default but left
+            # mutable — a future outer-loop can set evo.fix_web_search to let the
+            # repair model consult the web (like the other policy switches).
+            enable_web_search=bool(evo.get("fix_web_search", False)),
         )
         _slot_mut_cost += _fix_cost  # attribute the repair spend to the same arm
         # Re-embed only if a fix actually changed the code, so the archived

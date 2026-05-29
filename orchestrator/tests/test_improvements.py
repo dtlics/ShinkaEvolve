@@ -270,6 +270,50 @@ def test_meta_direction_sampling():
     return True
 
 
+def test_bg_call_tools_and_caps():
+    """WS4: _bg_call attaches the web_search_preview tool + max_output_tokens to the
+    Responses create() call only when asked; both absent otherwise."""
+    import asyncio
+
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import _azure
+
+    captured: dict = {}
+
+    class _FakeResp:
+        id = "r1"
+        status = "completed"
+        output_text = "ok"
+        usage = None
+
+    class _FakeResponses:
+        async def create(self, **kw):
+            captured.clear()
+            captured.update(kw)
+            return _FakeResp()
+
+        async def retrieve(self, rid):
+            return _FakeResp()
+
+    class _FakeClient:
+        responses = _FakeResponses()
+
+        async def aclose(self):
+            pass
+
+    text, cost = asyncio.run(_azure._bg_call(
+        _FakeClient(), "m", "sys", "usr", "medium", {"purpose": "proposer"},
+        0.01, 60, 12345, [{"type": "web_search_preview"}]))
+    assert text == "ok" and cost == 0.0, (text, cost)
+    assert captured["max_output_tokens"] == 12345, captured
+    assert captured["tools"] == [{"type": "web_search_preview"}], captured
+
+    asyncio.run(_azure._bg_call(
+        _FakeClient(), "m", "sys", "usr", None, None, 0.01, 60, None, None))
+    assert "tools" not in captured and "max_output_tokens" not in captured, captured
+    return True
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
@@ -281,6 +325,7 @@ if __name__ == "__main__":
         ("immediate_fix", test_immediate_fix),
         ("meta_summarize_parsing", test_meta_summarize_parsing),
         ("meta_direction_sampling", test_meta_direction_sampling),
+        ("bg_call_tools_and_caps", test_bg_call_tools_and_caps),
     ]
     ok = True
     for name, fn in tests:

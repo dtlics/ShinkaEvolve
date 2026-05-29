@@ -75,7 +75,7 @@ def _usage_cost(response: Any, api_model_name: str) -> float:
 
 async def _bg_call(
     client, api_model_name, system_msg, user_msg, reasoning_effort, call_metadata,
-    poll_interval, poll_timeout, max_output_tokens,
+    poll_interval, poll_timeout, max_output_tokens, tools=None,
 ) -> Tuple[str, float]:
     create_kwargs: Dict[str, Any] = {
         "model": api_model_name,
@@ -92,6 +92,13 @@ async def _bg_call(
         # status='incomplete' with reason='max_output_tokens' if it would exceed
         # this; the partial output is still extractable. Our cost guardrail.
         create_kwargs["max_output_tokens"] = int(max_output_tokens)
+    if tools:
+        # WS4: built-in tools (e.g. web_search_preview) for the call. ONLY set when
+        # the caller explicitly opts in — see bg_query(enable_web_search=...). The
+        # two sanctioned scenarios are DR and pro nailing a DR reference. NOTE: tool
+        # availability is per-deployment; a model that doesn't support the tool will
+        # 400, so the caller (orchestrator) enables it deliberately, not by default.
+        create_kwargs["tools"] = tools
 
     try:
         submitted = await client.responses.create(**create_kwargs)
@@ -138,11 +145,18 @@ def bg_query(
     poll_interval: float = _POLL_INTERVAL_SEC,
     poll_timeout: float = _POLL_TIMEOUT_SEC,
     max_output_tokens: Optional[int] = None,
+    enable_web_search: bool = False,
+    tools: Optional[list] = None,
 ) -> Tuple[str, float]:
     """One Azure background-mode call. Returns (text, cost). Azure/OpenAI only.
 
     `max_output_tokens` defaults to a per-model cap (see _MAX_OUTPUT_TOKENS_BY_MODEL)
     sized so a single max-output call costs < $10. Pass an explicit value to override.
+
+    WS4: `enable_web_search=True` attaches the built-in `web_search_preview` tool
+    (or pass an explicit `tools` list). OFF by default — the two sanctioned uses are
+    DR and pro nailing a DR reference. Tool support is per-deployment; enable it
+    deliberately for the model you've confirmed supports it.
     """
     from shinka.llm.client import get_async_client_llm
     from shinka.llm.providers.model_resolver import resolve_model_backend
@@ -152,11 +166,13 @@ def bg_query(
         raise ValueError(f"bg_query is Azure/OpenAI-only (got provider={provider!r}).")
     if max_output_tokens is None:
         max_output_tokens = _resolve_max_output_tokens(model_name)
+    if tools is None and enable_web_search:
+        tools = [{"type": "web_search_preview"}]
     client, api_model_name, _ = get_async_client_llm(model_name)
     return asyncio.run(
         _bg_call(
             client, api_model_name, system_msg, user_msg,
             reasoning_effort, call_metadata, poll_interval, poll_timeout,
-            max_output_tokens,
+            max_output_tokens, tools,
         )
     )

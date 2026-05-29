@@ -332,6 +332,14 @@ the search stalls (ladder rung 7). run_window samples one direction per gen by
 weight and prepends the failure_note. The legacy `evo.meta_recommendations` single
 string is still honored (whole blob to every gen) when `meta_directions` is absent.
 
+**Web search (WS4) is OFF by default and gated to two scenarios:** (1) the DR call
+itself; (2) pro nailing a DR reference (the grounding path, Boot/DR). The
+`mutate.py` payload takes `enable_web_search`, plumbed to `_azure.bg_query`. A third
+switch, `evo.fix_web_search` (default false), is left **mutable** for a future
+outer-loop that wants ordinary fix-retries to consult the web. Web search never
+fires on a normal meta-sampled mutation. Caveat: tool support is per-deployment —
+enable it only for a model you've confirmed accepts `web_search_preview`.
+
 **Window size & cadence (EvoX-tuned).** `window_size` (W) is the stagnation unit;
 EvoX uses W ≈ 10% of the total iteration budget — set it accordingly (default 15).
 `cadence.max_windows_per_call` controls how often the inner loop hands control

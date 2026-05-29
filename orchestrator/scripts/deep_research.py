@@ -21,6 +21,7 @@ INPUT (stdin JSON):
     "model": "o3-deep-research",
     "reasoning_effort": "medium",
     "max_tool_calls": 20,
+    "results_dir": str | null,       # WS7: if set, self-log the full call + fold cost into the ledger
     "mock": false, "mock_text": str | null
   }
 
@@ -132,8 +133,22 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # surcharge so the budget over-estimates rather than under-counts DR spend.
     search_surcharge = float(payload.get("search_surcharge_usd", 0.30))
     cost = float(token_cost) + search_surcharge
+    brief = _parse_brief(text)
+    # WS7: persist the FULL DR call (query + program_context + raw output) to the
+    # journal and fold cost into the ledger when results_dir is set. This is the fix
+    # for round-1's lost prompt — the query no longer lives only in an ephemeral
+    # runner script that the next call can overwrite.
+    _common.log_external_call(
+        payload.get("results_dir"), "dr",
+        {"query": query, "program_context": program_context, "model": model,
+         "reasoning_effort": payload.get("reasoning_effort", "medium")},
+        {"brief": brief, "raw_text": text, "token_cost": float(token_cost),
+         "search_surcharge": search_surcharge},
+        cost=cost,
+        summary=f"{len(brief)} brief items",
+    )
     return {
-        "brief": _parse_brief(text), "raw_text": text,
+        "brief": brief, "raw_text": text,
         "cost": cost, "token_cost": float(token_cost),
         "search_surcharge": search_surcharge, "model": model,
     }

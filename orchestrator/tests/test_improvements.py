@@ -270,6 +270,38 @@ def test_meta_direction_sampling():
     return True
 
 
+def test_call_logging():
+    """WS7: log_call persists a never-overwritten detail file + compact pointer,
+    folds cost into the ledger, and reads back; _common.log_external_call self-logs
+    and no-ops cleanly when results_dir is falsy."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import journal
+    import _common
+
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "x"})
+        p1 = journal.log_call(td, "dr", {"query": "Q1"}, {"brief": [1, 2]}, cost=1.5, summary="2 items")
+        p2 = journal.log_call(td, "meta", {"user": "U"}, {"directions": []}, cost=0.02, summary="0 dirs")
+        assert p1 != p2 and os.path.exists(p1) and os.path.exists(p2)  # never overwrite
+
+        calls = journal.read_calls(td)
+        assert len(calls) == 2, calls
+        dr = journal.read_calls(td, kind="dr")
+        assert len(dr) == 1 and dr[0]["summary"] == "2 items", dr
+        detail = journal.read_call(td, dr[0]["file"])
+        assert detail["request"]["query"] == "Q1" and detail["response"]["brief"] == [1, 2], detail
+        assert abs(journal.total_cost(td) - 1.52) < 1e-9, journal.total_cost(td)  # cost folded
+
+        p3 = _common.log_external_call(td, "meta", {"u": "v"}, {"r": 1}, cost=0.10, summary="s")
+        assert p3 and os.path.exists(p3)
+        assert abs(journal.total_cost(td) - 1.62) < 1e-9, journal.total_cost(td)
+        assert _common.log_external_call(None, "meta", {}, {}) is None  # no-op without results_dir
+    return True
+
+
 def test_parse_arm():
     """WS6: a bandit arm id 'model@effort' splits into (model, effort); a bare model
     falls back to the run default effort."""
@@ -338,6 +370,7 @@ if __name__ == "__main__":
         ("immediate_fix", test_immediate_fix),
         ("meta_summarize_parsing", test_meta_summarize_parsing),
         ("meta_direction_sampling", test_meta_direction_sampling),
+        ("call_logging", test_call_logging),
         ("parse_arm", test_parse_arm),
         ("bg_call_tools_and_caps", test_bg_call_tools_and_caps),
     ]

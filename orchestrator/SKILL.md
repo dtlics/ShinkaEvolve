@@ -270,14 +270,29 @@ primitives) you couldn't act on.
 
 ## The run journal (your long-term memory, read at any granularity)
 `scripts`/grep or `harness/journal.py`:
-- `journal/run.json` — run summary (status, windows, best, last J).
+- `journal/run.json` — run summary (status, windows, best, last J, total_cost).
 - `journal/windows.jsonl` — per-window diagnostics (the trajectory).
-- `journal/interventions.jsonl` — every action you took + outcome.
+- `journal/interventions.jsonl` — every rewrite/decision you took + outcome.
+- `journal/calls.jsonl` — WS7: compact POINTER index of every external LLM call
+  (meta / deep_research): `{kind, timestamp, file, cost, summary}`. The full prompt
+  + raw output live in `journal/calls/<kind>_<ts>_<rand>.json` (never overwritten).
 - `journal/islands/island_<i>.jsonl` — per-island trajectory.
 - `strategy_history/` — per-strategy-version snapshots + `index.json`.
-Read `journal.j_trajectory(rd)` for a quick J read; drill into `windows.jsonl`
-or a program's `metadata` (via `archive_query` with `include_metadata`) to
-diagnose a cross-cutting problem before rewriting a concern.
+
+**Read efficiently — don't pull big prompts into your context unless you need them.**
+Start with the compact views: `journal.j_trajectory(rd)` for J; `journal.read_calls(rd[, kind])`
+to see WHAT meta/DR runs happened (and their cost) WITHOUT their prompts. Only when
+you need a specific prompt or raw output do you open it with
+`journal.read_call(rd, row["file"])`. Drill into `windows.jsonl` or a program's
+`metadata` (`archive_query` with `include_metadata`) to diagnose a cross-cutting
+problem before rewriting a concern.
+
+**Logging is automatic — don't hand-roll it.** When you call `meta_summarize.py` /
+`deep_research.py`, pass `results_dir`; they SELF-LOG the full call to `journal/calls/`
+AND fold the cost into the ledger. So do NOT also `append_intervention` with the same
+cost (double-count). Never stash a prompt only in an ephemeral runner script — that's
+how round-1's DR prompt was lost. `append_intervention` is for rewrites/decisions, not
+LLM calls.
 
 ## The subroutines
 

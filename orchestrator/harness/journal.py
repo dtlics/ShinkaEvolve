@@ -25,11 +25,16 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 
 def journal_dir(results_dir: str) -> str:
     return os.path.join(results_dir, "journal")
+
+
+def _calls_dir(results_dir: str) -> str:
+    return os.path.join(journal_dir(results_dir), "calls")
 
 
 def _ensure(results_dir: str) -> str:
@@ -150,6 +155,57 @@ def add_cost(results_dir: str, amount: float) -> float:
     return run["total_cost"]
 
 
+def log_call(
+    results_dir: str,
+    kind: str,
+    request: Dict[str, Any],
+    response: Dict[str, Any],
+    cost: float = 0.0,
+    summary: Optional[str] = None,
+) -> str:
+    """WS7: persist ONE external LLM call (meta / deep_research) in full, NEVER
+    overwriting, and fold its cost into the ledger. This is what was missing when
+    round-1's DR prompt was lost to an overwritten runner script.
+
+    Writes two things:
+      journal/calls/<kind>_<ts>_<rand>.json  — the FULL {request, response} (prompts
+                                                + raw output; can be large)
+      journal/calls.jsonl                     — one compact POINTER line per call
+                                                {kind, timestamp, file, cost, summary}
+
+    The pointer index is the key to "detailed but not context-polluting": the
+    orchestrator reads ``calls.jsonl`` (tiny) to see WHAT was called and when, and
+    opens a detail file via ``read_call`` only when it actually needs the prompt or
+    raw output. Returns the detail file path.
+
+    COST: this is THE place an external-call cost enters the ledger. A caller that
+    uses ``log_call`` must NOT also ``append_intervention`` with the same cost
+    (that would double-count). Mutation/embedding cost still flows via window_cost.
+    """
+    _ensure(results_dir)
+    cdir = _calls_dir(results_dir)
+    os.makedirs(cdir, exist_ok=True)
+    ts = time.time()
+    fname = f"{kind}_{int(ts)}_{uuid.uuid4().hex[:6]}.json"
+    fpath = os.path.join(cdir, fname)
+    with open(fpath, "w") as f:
+        json.dump(
+            {"kind": kind, "timestamp": ts, "cost": float(cost or 0.0),
+             "request": request, "response": response},
+            f, indent=2, default=str,
+        )
+    pointer = {
+        "kind": kind, "timestamp": ts,
+        "file": os.path.join("calls", fname),  # relative to journal/
+        "cost": float(cost or 0.0),
+        "summary": summary or "",
+    }
+    _append_jsonl(os.path.join(journal_dir(results_dir), "calls.jsonl"), pointer)
+    if cost:
+        add_cost(results_dir, float(cost))
+    return fpath
+
+
 def total_cost(results_dir: str) -> float:
     return float((read_run(results_dir) or {}).get("total_cost", 0.0))
 
@@ -203,6 +259,26 @@ def j_trajectory(results_dir: str) -> List[Dict[str, Any]]:
 
 def read_interventions(results_dir: str) -> List[Dict[str, Any]]:
     return _read_jsonl(os.path.join(journal_dir(results_dir), "interventions.jsonl"))
+
+
+def read_calls(results_dir: str, kind: Optional[str] = None) -> List[Dict[str, Any]]:
+    """WS7: the compact external-call pointer index (no big prompts). Optionally
+    filter by kind ('meta' / 'dr'). Open a specific call's full detail with
+    ``read_call(results_dir, row['file'])``."""
+    rows = _read_jsonl(os.path.join(journal_dir(results_dir), "calls.jsonl"))
+    return [r for r in rows if (kind is None or r.get("kind") == kind)]
+
+
+def read_call(results_dir: str, file: str) -> Dict[str, Any]:
+    """Read one full call-detail file (the {request, response}) by its pointer
+    ``file`` (relative to journal/, as stored in calls.jsonl)."""
+    p = os.path.join(journal_dir(results_dir), file)
+    if not os.path.exists(p):
+        return {}
+    try:
+        return json.loads(open(p).read())
+    except json.JSONDecodeError:
+        return {}
 
 
 def read_island(results_dir: str, island_id: int) -> List[Dict[str, Any]]:
@@ -280,9 +356,20 @@ if __name__ == "__main__":
             return {"result": read_interventions(rd)}
         if view == "island":
             return {"result": read_island(rd, int(payload["island_id"]))}
+        if view == "calls":
+            return {"result": read_calls(rd, payload.get("kind"))}
+        if view == "call":
+            return {"result": read_call(rd, payload["file"])}
         if view == "append_intervention":
             append_intervention(rd, payload["entry"])
             return {"appended": True}
+        if view == "log_call":
+            path = log_call(
+                rd, payload["kind"], payload.get("request", {}),
+                payload.get("response", {}), float(payload.get("cost", 0.0) or 0.0),
+                payload.get("summary"),
+            )
+            return {"logged": True, "file": path}
         raise ValueError(f"unknown view: {view}")
 
     _common.run_main(main)

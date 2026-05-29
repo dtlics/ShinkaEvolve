@@ -53,6 +53,7 @@ INPUT (stdin JSON):
     "n_recent": 16,
     "prior_recommendations": str | null,
     "max_recommendations": 5,
+    "results_dir": str | null,   # WS7: if set, self-log the full call + fold cost into the ledger
     "mock": false, "mock_text": str | null,
     "run_id": str | null
   }
@@ -242,6 +243,18 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Legacy joined string — handy for logging and for any caller that still wants
     # a single blob (back-compat); the structured fields are the real output.
     joined = "\n".join(f"{i+1}. {d['text']}" for i, d in enumerate(parsed["directions"]))
+    # WS7: persist the full call (prompt + raw output) + fold cost into the ledger
+    # when results_dir is provided — automatic, never-overwritten, no manual step.
+    _common.log_external_call(
+        payload.get("results_dir"), "meta",
+        {"system": system_msg, "user": user_msg, "model": model,
+         "reasoning_effort": payload.get("reasoning_effort")},
+        {"directions": parsed["directions"], "failure_note": parsed["failure_note"],
+         "raw_text": text},
+        cost=float(cost),
+        summary=f"{len(parsed['directions'])} directions"
+        + ("; +failure_note" if parsed["failure_note"] else ""),
+    )
     return {
         "directions": parsed["directions"],
         "failure_note": parsed["failure_note"],

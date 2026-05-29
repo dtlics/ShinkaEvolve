@@ -202,3 +202,28 @@ def program_summary(
     if include_metadata:
         out["metadata"] = get("metadata", {}) or {}
     return out
+
+
+def log_external_call(results_dir, kind, request, response, cost=0.0, summary=None):
+    """WS7: self-log an external LLM call (meta / deep_research) to the run journal,
+    so the prompt + raw output are persisted (never overwritten) and the cost folds
+    into the ledger automatically — the orchestrator just passes ``results_dir``.
+
+    A best-effort no-op when ``results_dir`` is falsy or the journal can't be
+    imported: LOGGING MUST NEVER BREAK A CALL. Returns the detail file path or None.
+    (journal lives in ../harness; add it to sys.path lazily to avoid a hard
+    scripts->harness import dependency.)"""
+    if not results_dir:
+        return None
+    try:
+        import os as _os
+        import sys as _sys
+
+        _harness = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "harness")
+        if _harness not in _sys.path:
+            _sys.path.insert(0, _harness)
+        import journal  # type: ignore
+
+        return journal.log_call(results_dir, kind, request, response, cost=cost, summary=summary)
+    except Exception:
+        return None

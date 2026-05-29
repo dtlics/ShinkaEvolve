@@ -76,6 +76,16 @@ class DatabaseConfig:
         "initial"  # How to seed new islands: "initial", "best", "archive_random"
     )
     island_spawn_subtree_size: int = 1  # Max programs to copy (1=single, >1=subtree)
+    # On-demand island spawning cap (orchestrator grounds a novel direction on its
+    # own island via spawn_island_from_program). max_islands=0 => UNBOUNDED (the
+    # original behavior; spawning always allocates a fresh index). max_islands>0 =>
+    # at the cap, spawning EVICTS one island (retired non-destructively: de-archived
+    # + island_idx nulled, rows preserved) and reuses its index. island 0 and the
+    # global-best island are protected from eviction.
+    max_islands: int = 0
+    island_evict_strategy: str = (
+        "worst_best_fitness"  # which island to retire at the cap: "worst_best_fitness" | "fewest_members"
+    )
 
     # Parent selection parameters
     parent_selection_strategy: str = (
@@ -2545,6 +2555,18 @@ class ProgramDatabase:
             )
 
         return spawned
+
+    def spawn_island_from_program(self, program_id: str) -> Optional[int]:
+        """On-demand: seed a NEW island with a copy of an existing program, honoring
+        ``config.max_islands`` (evicting the worst island when at the cap; island 0
+        and the global-best island are protected). The orchestrator uses this to give
+        a novel deep-research direction its OWN island so it isn't out-competed before
+        it matures. Returns the new island index, or None if the program/manager is
+        missing. Unbounded + a fresh index when ``max_islands`` is 0 (default)."""
+        if not self.island_manager:
+            logger.warning("Cannot spawn island: no island manager configured")
+            return None
+        return self.island_manager.spawn_island_from_program(program_id)
 
     def close(self):
         """Closes the database connection."""

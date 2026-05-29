@@ -302,6 +302,71 @@ def test_call_logging():
     return True
 
 
+def test_capped_island_spawn():
+    """Foundation: at max_islands the spawn allocator EVICTS the worst island
+    (non-destructively: de-archived + island nulled) and reuses its index; the
+    global-best island + island 0 are protected; unbounded mode allocates fresh."""
+    import sqlite3
+    import types
+
+    from shinka.database.islands import CombinedIslandManager
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute(
+        "CREATE TABLE programs (id TEXT PRIMARY KEY, island_idx INTEGER, "
+        "correct INTEGER, combined_score REAL, metadata TEXT)"
+    )
+    cur.execute("CREATE TABLE archive (program_id TEXT)")
+    # 3 islands: 0 best=0.9 (GLOBAL best), 1 best=0.2 (WORST, 2 members), 2 best=0.5
+    rows = [("a0", 0, 0.9), ("a1", 1, 0.2), ("a1b", 1, 0.1), ("a2", 2, 0.5)]
+    for pid, isl, sc in rows:
+        cur.execute(
+            "INSERT INTO programs (id, island_idx, correct, combined_score, metadata) "
+            "VALUES (?,?,1,?,?)", (pid, isl, sc, "{}"))
+        cur.execute("INSERT INTO archive (program_id) VALUES (?)", (pid,))
+    conn.commit()
+
+    cfg = types.SimpleNamespace(num_islands=3, max_islands=3,
+                               island_evict_strategy="worst_best_fitness")
+    mgr = CombinedIslandManager(cur, conn, cfg)
+
+    # At cap (3 active, max 3) → evict the worst-fitness island (1) and reuse index 1.
+    idx = mgr.allocate_island_index_for_spawn()
+    assert idx == 1, idx
+    cur.execute("SELECT COUNT(*) c FROM archive WHERE program_id IN ('a1','a1b')")
+    assert cur.fetchone()["c"] == 0, "evicted island must be de-archived"
+    cur.execute("SELECT COUNT(*) c FROM programs WHERE island_idx = 1")
+    assert cur.fetchone()["c"] == 0, "evicted island index must be freed (nulled)"
+    cur.execute("SELECT COUNT(*) c FROM programs WHERE id IN ('a1','a1b')")
+    assert cur.fetchone()["c"] == 2, "rows preserved (non-destructive)"
+    assert 0 in mgr.get_initialized_islands(), "global-best island 0 protected"
+
+    # fewest_members strategy on a fresh DB: island 2 (1 member) is fewest among
+    # non-protected {1,2} (0 protected as global-best+island0).
+    conn2 = sqlite3.connect(":memory:")
+    conn2.row_factory = sqlite3.Row
+    c2 = conn2.cursor()
+    c2.execute("CREATE TABLE programs (id TEXT PRIMARY KEY, island_idx INTEGER, "
+               "correct INTEGER, combined_score REAL, metadata TEXT)")
+    c2.execute("CREATE TABLE archive (program_id TEXT)")
+    for pid, isl, sc in [("b0", 0, 0.9), ("b1", 1, 0.5), ("b1b", 1, 0.4), ("b2", 2, 0.6)]:
+        c2.execute("INSERT INTO programs VALUES (?,?,1,?,?)", (pid, isl, sc, "{}"))
+        c2.execute("INSERT INTO archive (program_id) VALUES (?)", (pid,))
+    conn2.commit()
+    cfg2 = types.SimpleNamespace(num_islands=3, max_islands=3,
+                                island_evict_strategy="fewest_members")
+    mgr2 = CombinedIslandManager(c2, conn2, cfg2)
+    assert mgr2.allocate_island_index_for_spawn() == 2, "fewest_members evicts island 2"
+
+    # Unbounded (max_islands=0): a fresh index beyond existing, no eviction.
+    cfg2.max_islands = 0
+    nxt = mgr2.allocate_island_index_for_spawn()
+    assert nxt == mgr2.get_next_island_index(), nxt
+    return True
+
+
 def test_parse_arm():
     """WS6: a bandit arm id 'model@effort' splits into (model, effort); a bare model
     falls back to the run default effort."""
@@ -371,6 +436,7 @@ if __name__ == "__main__":
         ("meta_summarize_parsing", test_meta_summarize_parsing),
         ("meta_direction_sampling", test_meta_direction_sampling),
         ("call_logging", test_call_logging),
+        ("capped_island_spawn", test_capped_island_spawn),
         ("parse_arm", test_parse_arm),
         ("bg_call_tools_and_caps", test_bg_call_tools_and_caps),
     ]

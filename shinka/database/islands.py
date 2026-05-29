@@ -942,6 +942,124 @@ class CombinedIslandManager:
 
         return collected
 
+    # --- capped, on-demand island spawning (foundation) --------------------
+    def _island_best_fitness(self) -> Dict[int, float]:
+        """Per active island (one with a correct program), its best combined_score."""
+        self.cursor.execute(
+            """SELECT island_idx, MAX(combined_score) AS best
+                 FROM programs
+                WHERE correct = 1 AND island_idx IS NOT NULL
+             GROUP BY island_idx"""
+        )
+        out: Dict[int, float] = {}
+        for row in self.cursor.fetchall():
+            if row["island_idx"] is not None:
+                out[row["island_idx"]] = (
+                    row["best"] if row["best"] is not None else float("-inf")
+                )
+        return out
+
+    def _global_best_island(self) -> Optional[int]:
+        """Island holding the single best correct program — protected from eviction."""
+        self.cursor.execute(
+            """SELECT island_idx FROM programs
+                WHERE correct = 1 AND island_idx IS NOT NULL
+             ORDER BY combined_score DESC LIMIT 1"""
+        )
+        row = self.cursor.fetchone()
+        return row["island_idx"] if row else None
+
+    def _pick_island_to_evict(self, protected: set) -> Optional[int]:
+        """Choose which island to retire at the cap. config.island_evict_strategy:
+        'worst_best_fitness' (default) = lowest best-score island; 'fewest_members'
+        = smallest population. Never returns a protected island; None if none free."""
+        strategy = getattr(self.config, "island_evict_strategy", "worst_best_fitness")
+        candidates = [i for i in self.get_initialized_islands() if i not in protected]
+        if not candidates:
+            return None
+        if strategy == "fewest_members":
+            pops = self.get_island_populations()
+            return min(candidates, key=lambda i: pops.get(i, 0))
+        best = self._island_best_fitness()
+        return min(candidates, key=lambda i: best.get(i, float("-inf")))
+
+    def _evict_island(self, idx: int) -> int:
+        """Retire island ``idx`` NON-DESTRUCTIVELY so its index can be reused: drop
+        its programs from the archive (they stop being sampled) and NULL their
+        island_idx (the index leaves get_initialized_islands). Rows are PRESERVED
+        (lineage/history intact) and tombstoned in metadata. Returns # retired."""
+        self.cursor.execute("SELECT id, metadata FROM programs WHERE island_idx = ?", (idx,))
+        rows = self.cursor.fetchall()
+        ids = [r["id"] for r in rows]
+        if not ids:
+            return 0
+        qmarks = ",".join("?" for _ in ids)
+        self.cursor.execute(
+            f"DELETE FROM archive WHERE program_id IN ({qmarks})", ids
+        )
+        for r in rows:
+            try:
+                md = json.loads(r["metadata"]) if r["metadata"] else {}
+            except Exception:
+                md = {}
+            md["_evicted_island"] = idx
+            self.cursor.execute(
+                "UPDATE programs SET island_idx = NULL, metadata = ? WHERE id = ?",
+                (json.dumps(md), r["id"]),
+            )
+        logger.info(
+            f"🏝️ Evicted island {idx}: retired {len(ids)} programs "
+            "(de-archived + island freed; rows preserved)"
+        )
+        return len(ids)
+
+    def allocate_island_index_for_spawn(self) -> int:
+        """Index for a new on-demand island, honoring config.max_islands. Under the
+        cap (or max_islands<=0): a fresh index. At the cap: evict the worst island
+        (protecting island 0 + the global-best island) and reuse its index; if
+        nothing is evictable, fall back to a fresh index (soft cap) with a warning."""
+        max_islands = int(getattr(self.config, "max_islands", 0) or 0)
+        active = self.get_initialized_islands()
+        if max_islands <= 0 or len(active) < max_islands:
+            return self.get_next_island_index()
+        protected = {0}
+        gbi = self._global_best_island()
+        if gbi is not None:
+            protected.add(gbi)
+        victim = self._pick_island_to_evict(protected)
+        if victim is None:
+            logger.warning(
+                "max_islands reached but no evictable island (all protected); "
+                "allocating a new index beyond the cap."
+            )
+            return self.get_next_island_index()
+        self._evict_island(victim)
+        return victim
+
+    def spawn_island_from_program(self, program_id: str) -> Optional[int]:
+        """On-demand: seed a NEW island with a copy of ``program_id`` (e.g. a grounded
+        DR-direction implementation), honoring the max_islands cap via eviction. The
+        copy becomes the island's root (parent_id=None). Returns the new island index,
+        or None if the program wasn't found."""
+        self.cursor.execute("SELECT * FROM programs WHERE id = ?", (program_id,))
+        row = self.cursor.fetchone()
+        if row is None:
+            logger.warning(
+                f"spawn_island_from_program: program {program_id} not found"
+            )
+            return None
+        source = dict(row)
+        new_idx = self.allocate_island_index_for_spawn()
+        new_id = self._copy_program_to_island(
+            source, new_idx, new_parent_id=None, strategy="from_program", is_root=True
+        )
+        self.conn.commit()
+        logger.info(
+            f"🏝️ Spawned island {new_idx} seeded from {program_id[:8]}... "
+            f"(new root {new_id[:8]}...)"
+        )
+        return new_idx
+
     def spawn_new_island(self) -> bool:
         """Spawn a new island by copying a program (or subtree) based on config.
 

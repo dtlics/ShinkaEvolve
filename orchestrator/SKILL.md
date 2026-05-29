@@ -239,10 +239,10 @@ on a grid") whose answer you then compose into the task's solution.
 each deliberately; EXAMINE THE STRUCTURED LOGS rather than guessing — read
 `journal.read_calls`, `archive_query` `top_n`/`recent_failures`, and the directions
 already in `evo.meta_directions`):
-- **Novel** (no archived program or prior direction resembles it) → GROUND it as a
-  fresh-lineage first member: a dedicated short *grounding run* (below) seeded from the
-  base seed, with pro + web search + the reference, `fix_retry_budget: 3` (a from-scratch
-  reference implementation earns more repair attempts).
+- **Novel** (no archived program or prior direction resembles it) → GROUND it (the
+  grounding run below: pro + web search + the reference, `fix_retry_budget: 3`), then
+  give it **its own island** so it isn't out-competed before it matures: feed the
+  grounded program's id to `spawn_island.py` (foundation `spawn_island_from_program`).
 - **History-similar** (resembles something already tried/archived) → use pro + web
   search to COMBINE it into the closest existing program (parent = that gen),
   `fix_retry_budget: 1` (counts as an ordinary improvement).
@@ -259,11 +259,15 @@ run pro with web search on a direction that has NO solid reference** — that's 
 sanctioned pro+websearch use. Then fold the grounded program back into the main run
 (the archive is shared) and resume normal evolution.
 
-*Island isolation note:* literal "spawn a brand-new island N+1 on demand" is managed by
-shinka (`num_islands` / dynamic-island spawn in `island_policy.py`), not forced here —
-a grounding run gives the direction a fresh *lineage* (seeded from the base seed) within
-the existing island structure. If a task genuinely needs hard per-direction island
-isolation, raise `num_islands` at boot or flag it for `RUN_SUMMARY.md` (foundation).
+**On-demand island spawning (foundation).** `spawn_island.py` (stdin
+`{db_path, db_config, embedding_model, program_id}`) seeds a NEW island with a copy of
+the grounded program as its root — true per-direction isolation. It honors
+`db_config.max_islands`: at the cap it RETIRES the worst island (lowest best-fitness,
+or fewest members via `island_evict_strategy`) NON-DESTRUCTIVELY — de-archived + island
+freed, rows preserved for lineage — and reuses that index; island 0 and the global-best
+island are protected. `max_islands: 0` (default) = unbounded (always a fresh index).
+Set `max_islands` (e.g. `num_islands + a few`) when you expect to ground several DR
+directions, so the island count stays bounded and the weakest tracks recycle.
 
 ### Strategy rewrite protocol
 Helpers: `harness/strategy_store.py`, `harness/validate_strategy.py`.
@@ -381,7 +385,8 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
   "task": {"eval_program_path": "...evaluate.py", "init_program_path": "...initial.py",
            "task_sys_msg": "<precise goal>", "language": "python", "eval_time": "00:05:00"},
   "db_config": {"num_islands": 4, "archive_size": 40, "parent_selection_lambda": 10.0,
-                "migration_interval": 10, "enable_dynamic_islands": false, "stagnation_threshold": 100},
+                "migration_interval": 10, "enable_dynamic_islands": false, "stagnation_threshold": 100,
+                "max_islands": 0, "island_evict_strategy": "worst_best_fitness"},
   "evo": {"window_size": 15, "patch_types": ["diff","full","cross"], "patch_type_probs": [0.6,0.3,0.1],
           "llm_models": ["azure-gpt-5.4-mini","azure-gpt-5.5"], "llm_dynamic_selection_kwargs": {"cost_aware_coef": 0.5},
           "reasoning_effort": "medium", "max_patch_attempts": 3, "fix_retry_budget": 1, "reward_mode": "absolute",
@@ -445,6 +450,7 @@ agentic-control work, all **mutable** and defaulted conservative:
 | `cost_aware_coef` | 0.5 | bandit reward-vs-cheapness blend | costs dominating / quality suffering |
 | `code_embed_sim_threshold` | 0.99 | novelty cosine gate | false-rejects (large programs cluster 0.96–0.98) → raise |
 | `stagnation_abs_floor`/`rel_frac` | 0.001 / 0.05 | the "low window" bar | recalibrate to the task's natural per-window climb |
+| `db_config.max_islands` | 0 (unbounded) | cap on active islands; at the cap, `spawn_island.py` evicts the worst | set when grounding several DR directions, to bound island count |
 
 Reserve code rewrites for when no knob fits the problem (the concern map).
 

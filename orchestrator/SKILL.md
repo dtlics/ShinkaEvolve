@@ -429,6 +429,25 @@ generations between healthy check-ins (default 3 × 15 ≈ 45) — frequent enou
 stay adaptive, sparse enough not to burn your turns. Stagnation always returns
 control immediately.
 
+### Config levers — flip a knob before you rewrite code
+Many decisions that *look* like they need a strategy-code rewrite are already
+exposed as `evo.*` config knobs. Prefer adjusting a knob (cheap, instant, no
+protocol) over rewriting a `scripts/` policy. The full set added for the
+agentic-control work, all **mutable** and defaulted conservative:
+
+| Knob | Default | What it does | When to flip |
+|---|---|---|---|
+| `fix_retry_budget` | 1 | immediate eval-failure repair attempts per slot | raise for a hard task; the grounding run uses 3 |
+| `meta_directions` / `meta_failure_note` | — | per-gen sampled directions + persistent caution (you write them from a `meta_summarize` output) | every meta escalation (rung 7) |
+| `llm_models` `model@effort` arms | bare model | makes reasoning effort part of the bandit arm | when a model is great at one effort, slow at another |
+| `mutation_web_search` | false | web search on the main mutation call | ONLY on a grounding run nailing a DR reference |
+| `fix_web_search` | false | web search on fix-retries | a future call: let repairs consult the web |
+| `cost_aware_coef` | 0.5 | bandit reward-vs-cheapness blend | costs dominating / quality suffering |
+| `code_embed_sim_threshold` | 0.99 | novelty cosine gate | false-rejects (large programs cluster 0.96–0.98) → raise |
+| `stagnation_abs_floor`/`rel_frac` | 0.001 / 0.05 | the "low window" bar | recalibrate to the task's natural per-window climb |
+
+Reserve code rewrites for when no knob fits the problem (the concern map).
+
 ## What never to do
 - Never modify a `scripts/` file directly without the rewrite protocol.
 - Never edit FOUNDATION files (schema, contract, evaluate, archive_record/query,

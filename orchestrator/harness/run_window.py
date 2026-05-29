@@ -237,6 +237,19 @@ def _bootstrap_initial(cfg: Dict[str, Any]) -> float:
     return float(embed_cost or 0.0)
 
 
+def _parse_arm(arm_id: Optional[str], default_effort: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """WS6: a bandit arm id may encode reasoning effort as ``"model@effort"`` so the
+    bandit treats each (model, effort) as a distinct arm (e.g. pro@medium vs pro@high
+    are learned separately). Split it into (model_name, reasoning_effort) for the
+    actual call; an arm with no ``@`` uses the run's default effort. Per-model VALID
+    efforts are the orchestrator's responsibility when authoring the arm list (pro
+    rejects 'low')."""
+    if arm_id and "@" in arm_id:
+        model, effort = arm_id.split("@", 1)
+        return model, (effort or default_effort)
+    return arm_id, default_effort
+
+
 def _sample_meta_direction(meta_directions: Optional[List[Any]], rng: random.Random) -> Optional[str]:
     """WS2: sample ONE meta direction by weight (relative promise / 'best shots').
     Returns the chosen direction text, or None if there are none."""
@@ -290,6 +303,7 @@ def _attempt_immediate_fixes(
     mut: Dict[str, Any],
     learn_from: Optional[Dict[str, Any]],
     model_name: Optional[str],
+    reasoning_effort: Optional[str],
     gen_dir: str,
     results_dir: str,
     generation: int,
@@ -370,7 +384,7 @@ def _attempt_immediate_fixes(
             "patch_dir": gen_dir,
             "language": language,
             "model_name": model_name,
-            "reasoning_effort": evo.get("reasoning_effort"),
+            "reasoning_effort": reasoning_effort,  # WS6: same arm's effort as the failed attempt
             "max_attempts": evo.get("max_patch_attempts", 3),
             "run_id": cfg.get("run_id"),
             "generation": generation,
@@ -478,7 +492,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     mock = cfg.get("mock", {}) or {}
     llm_models = evo.get("llm_models")
     state_path = os.path.join(cfg["results_dir"], "bandit_state.pkl")
-    model_name = evo.get("model_name")
+    arm_id = evo.get("model_name")  # bandit arm identity (may be "model@effort")
     if llm_models:
         sel = select_llm_script.main(
             {
@@ -487,7 +501,11 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                 "seed": evo.get("seed"),
             }
         )
-        model_name = sel["model_name"]
+        arm_id = sel["model_name"]
+    # WS6: split the arm id "model@effort" → (model, effort). The bandit (select +
+    # update below) keys on arm_id, so it learns per (model,effort); the actual call
+    # uses the clean model_name + that arm's effort (default when the arm has no @).
+    model_name, reasoning_effort = _parse_arm(arm_id, evo.get("reasoning_effort"))
 
     # 3. mutate: LLM call + apply (IMMUTABLE body, MUTABLE prompt) — mockable
     mut_payload = {
@@ -498,7 +516,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         "patch_dir": gen_dir,
         "language": language,
         "model_name": model_name,
-        "reasoning_effort": evo.get("reasoning_effort"),
+        "reasoning_effort": reasoning_effort,
         "max_attempts": evo.get("max_patch_attempts", 3),
         "run_id": cfg.get("run_id"),
         "generation": generation,
@@ -560,7 +578,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     ):
         _pre_fix_code = mut["candidate_code"]
         ev, mut, _fix_cost = _attempt_immediate_fixes(
-            cfg, ev, mut, parent, model_name, gen_dir, results_dir,
+            cfg, ev, mut, parent, model_name, reasoning_effort, gen_dir, results_dir,
             generation, language, int(evo.get("fix_retry_budget", 1)), counters,
             # WS4: web search during ordinary fix-retries is OFF by default but left
             # mutable — a future outer-loop can set evo.fix_web_search to let the
@@ -640,7 +658,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             {
                 "mode": "update", "models": llm_models, "state_path": state_path,
                 "bandit_kwargs": evo.get("llm_dynamic_selection_kwargs", {}),
-                "arm": model_name,
+                "arm": arm_id,  # WS6: per-(model,effort) arm, not the bare model
                 "reward": reward.get("reward"),
                 "baseline": reward.get("baseline", 0.0),
                 "cost": _slot_mut_cost,

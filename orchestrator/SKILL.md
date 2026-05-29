@@ -323,6 +323,14 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
 ```
 `llm_models` set → bandit picks per candidate; `enable_novelty` → embedding gate.
 Reasoning models (e.g. `azure-gpt-5.4-pro`) require `reasoning_effort` ≥ "medium".
+**WS6 — effort is part of the arm.** An `llm_models` entry may be `"model@effort"`
+(e.g. `"azure-gpt-5.3-codex@medium"`, `"azure-gpt-5.4-pro@high"`); the bandit then
+learns each (model, effort) separately and run_window splits it for the call. A bare
+`"model"` uses the global `evo.reasoning_effort`. Only encode VALID combos (pro
+rejects `low`). **Pro policy:** keep `azure-gpt-5.4-pro` OUT of the normal mutation
+pool by default — it's slow/expensive and reserved for ideation (meta/DR) and for
+*grounding a DR reference* (Boot/DR). This is a default, not a lock: a future
+outer-loop may add `pro@high` to the pool if a task warrants it.
 `fix_retry_budget` (default 1) = immediate repair attempts on an eval failure
 before the slot is recorded as incorrect (WS1); the orchestrator passes a larger
 budget only when grounding a novel DR direction as a new island (WS5).

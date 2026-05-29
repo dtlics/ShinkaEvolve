@@ -197,7 +197,7 @@ def test_immediate_fix():
             counters = {"cost": 0.0, "iter_index": 0}
             cfg = {**base_cfg, "budget_usd": None}
             ev, mut, _fc = run_window._attempt_immediate_fixes(
-                cfg, dict(ev0), dict(mut0), None, "azure-x", td, td, 5, "python", 1, counters)
+                cfg, dict(ev0), dict(mut0), None, "azure-x", "medium", td, td, 5, "python", 1, counters)
             assert ev["correct"] is True and mut["candidate_code"] == "fixed", (ev, mut)
             assert counters["fix_count"] == 1 and counters["fix_success"] == 1, counters
             assert abs(counters["cost"] - 0.5) < 1e-9, counters  # fix cost folded
@@ -208,7 +208,7 @@ def test_immediate_fix():
                 "stdout_log": "", "stderr_log": ""}
             counters = {"cost": 0.0, "iter_index": 0}
             ev, mut, _fc = run_window._attempt_immediate_fixes(
-                cfg, dict(ev0), dict(mut0), None, "azure-x", td, td, 5, "python", 2, counters)
+                cfg, dict(ev0), dict(mut0), None, "azure-x", "medium", td, td, 5, "python", 2, counters)
             assert ev["correct"] is False and counters["fix_count"] == 2, counters
             assert counters.get("fix_success", 0) == 0 and abs(counters["cost"] - 1.0) < 1e-9, counters
 
@@ -216,7 +216,7 @@ def test_immediate_fix():
             counters = {"cost": 0.0, "iter_index": 0}
             cfg_b = {**base_cfg, "budget_usd": 0.4}
             ev, mut, _fc = run_window._attempt_immediate_fixes(
-                cfg_b, dict(ev0), dict(mut0), None, "azure-x", td, td, 5, "python", 3, counters)
+                cfg_b, dict(ev0), dict(mut0), None, "azure-x", "medium", td, td, 5, "python", 3, counters)
             assert counters["fix_count"] == 1, counters  # 2nd attempt unaffordable -> stopped
     finally:
         run_window.construct_mutation_prompt.main = orig_cmp
@@ -267,6 +267,19 @@ def test_meta_direction_sampling():
 
     assert run_window._compose_meta_for_gen({"meta_recommendations": "old blob"}, 0) == "old blob"
     assert run_window._compose_meta_for_gen({}, 0) is None
+    return True
+
+
+def test_parse_arm():
+    """WS6: a bandit arm id 'model@effort' splits into (model, effort); a bare model
+    falls back to the run default effort."""
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    assert run_window._parse_arm("azure-gpt-5.4-pro@high", "medium") == ("azure-gpt-5.4-pro", "high")
+    assert run_window._parse_arm("azure-gpt-5.4-mini", "low") == ("azure-gpt-5.4-mini", "low")
+    assert run_window._parse_arm("azure-gpt-5.5@", "medium") == ("azure-gpt-5.5", "medium")  # empty effort -> default
+    assert run_window._parse_arm(None, "medium") == (None, "medium")
     return True
 
 
@@ -325,6 +338,7 @@ if __name__ == "__main__":
         ("immediate_fix", test_immediate_fix),
         ("meta_summarize_parsing", test_meta_summarize_parsing),
         ("meta_direction_sampling", test_meta_direction_sampling),
+        ("parse_arm", test_parse_arm),
         ("bg_call_tools_and_caps", test_bg_call_tools_and_caps),
     ]
     ok = True

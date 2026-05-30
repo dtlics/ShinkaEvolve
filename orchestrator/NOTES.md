@@ -91,6 +91,21 @@ improvements — all green). We followed the EvoX protocol (window → J → sta
 - **`island_policy` retire execution.** It recommends `{spawn, migrate, retire}`;
   shinka executes spawn/migrate, but has no native "retire island" path — wiring
   retire is future work.
+
+## Accepted limitations — deliberate no-ops (post-2026-05-29 design audit)
+The design audit folded into commit `f719bdb` intentionally left these UNFIXED — each
+is negligible or only fires on a path the framework does not ship by default. A future
+agent should NOT "rediscover" and over-engineer them:
+- **Embedding cost is billed to a bandit arm on a novelty REJECT but not on an ACCEPT** —
+  a <1% cost asymmetry that can make a duplicate-prone arm look marginally cheap.
+- **A novelty-rejected slot bumps the arm's submitted count with no matching completed**,
+  so its UCB exploration bonus deflates slightly on rejects (the reward floor + the
+  rejected-slot cost feed handle the larger cheap-arm-entrenchment drivers; this
+  visit-count side-channel is left).
+- **Scheduled migration stamps the run's max generation, not the triggering one** —
+  dormant (`migration_rate` ships at 0).
+- **`enable_web_search` is silently ignored on the legacy non-Azure provider path** —
+  dead in this Azure-only fork (documented in `mutate.py`, not warned).
 - **Sequential harness vs. async pipeline.** `run_window` runs one candidate at a
   time (clean reference order); the real `ShinkaEvolveRunner` is concurrent.
   Parallelize within a window if wall-clock becomes the bottleneck.

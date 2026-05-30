@@ -6,11 +6,11 @@ current strategy and emits a window-end diagnostics JSON. The orchestrator
 invokes it as a single subprocess per window; it never sequences the scripts
 itself.
 
-It composes the scripts in ``../scripts`` in the canonical Shinka order
-(established in AUDIT.md §3):
+It composes the scripts in ``../scripts`` in the canonical Shinka per-candidate order:
 
-    select_llm (deferred to Phase 5) -> sample_parent -> construct_mutation_prompt
-    -> mutate -> evaluate -> archive_record   [repeat W times]   -> diagnostics
+    sample_parent -> construct_mutation_prompt -> select_llm -> mutate -> evaluate
+    -> immediate-fix -> archive_record -> reward/bandit-update   [repeat W times]
+    -> diagnostics
 
 The driver is sequential (one candidate at a time), the clean reference order;
 it writes to the same ``programs.sqlite`` schema shinka uses, so the real

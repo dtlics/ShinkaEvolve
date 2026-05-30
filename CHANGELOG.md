@@ -22,7 +22,7 @@ DB + prompt DB, all non-Azure providers, `plots/`/`webui/`/`docs/`/`cli/`, the
 (setup/convert/inspect) + the cnot task so the repo stays reusable. `pip install -e .`
 is no longer required — `import shinka` is path-forced to this tree. See
 [orchestrator/SKILL.md](orchestrator/SKILL.md) + [orchestrator/NOTES.md](orchestrator/NOTES.md);
-design map in [AUDIT.md](AUDIT.md) + [taxonomy.md](taxonomy.md).
+four-cell mutability map in [taxonomy.md](taxonomy.md).
 
 ### `collapsed-agent`
 Collapsed the outer `Shinka` repo into this submodule. `tasks/`, `configs/`,

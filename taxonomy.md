@@ -5,7 +5,7 @@
 > mutable `orchestrator/scripts/*` set documented in
 > [orchestrator/SKILL.md](orchestrator/SKILL.md). Kept for design rationale.
 
-> Step 2 of the rewrite. From `AUDIT.md`, every decision point is placed into one
+> Step 2 of the rewrite. Every decision point is placed into one
 > of four cells along two axes: **does it embed an LLM call?** × **may the
 > orchestrator rewrite it mid-run?** This file is the contract for what becomes a
 > mutable `scripts/*.py` strategy file vs. immutable plumbing.
@@ -169,7 +169,7 @@ construction* is the evolvable part.
 
 `stagnation_detector.py` (cell A) and `diagnostics.py`'s window-JSON assembly
 (cell B) have no Shinka equivalent — they implement the EvoX window/J-score that
-§9 of AUDIT.md showed is absent. They are written fresh, drawing the J formula
+the original Shinka codebase lacked. They are written fresh, drawing the J formula
 from the brief and the "gens since best improved" idea from `is_stagnant`.
 
 ## Existing subsystems consciously left OUT of the new harness

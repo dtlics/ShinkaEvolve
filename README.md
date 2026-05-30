@@ -32,7 +32,7 @@ examples/circle_packing/  reference task used by the smoke test
 skills/              Claude Code skills: shinka-orchestrator (the outer loop),
                      shinka-setup / shinka-convert / shinka-inspect (authoring)
 scripts/test_azure.py     Azure deployment smoke test
-AUDIT.md, taxonomy.md     design map of the rewrite
+taxonomy.md               four-cell mutability map of the strategy files
 ```
 
 ## Quick start

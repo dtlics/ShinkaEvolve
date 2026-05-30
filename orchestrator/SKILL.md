@@ -497,7 +497,7 @@ agentic-control work, all **mutable** and defaulted conservative:
 | `mutation_web_search` | false | web search on the main mutation call | ONLY on a grounding run nailing a DR reference |
 | `fix_web_search` | false | web search on fix-retries | a future call: let repairs consult the web |
 | `cost_aware_coef` | 0.25 | bandit reward-vs-cheapness blend | raise→0.7 if cheapness should dominate; lower→0 if a pricier arm is the only one improving and is being starved |
-| `code_embed_sim_threshold` | 0.99 | novelty cosine gate | false-rejects (large programs cluster 0.96–0.98) → raise |
+| `code_embed_sim_threshold` | 0.99 | novelty cosine gate | false-rejects (large programs cluster 0.96–0.98) → raise. Watch `novelty_rejected_cost`: near-duplicate rejection has eaten ~half a real run's spend — if it is high, raise this OR push bolder-mutation guidance |
 | `stagnation_abs_floor`/`rel_frac` | 0.001 / 0.05 | the "low window" bar | recalibrate to the task's natural per-window climb |
 | `db_config.max_islands` | 0 (unbounded) | cap on active islands; at the cap, `spawn_island.py` evicts the worst | set when grounding several DR directions, to bound island count |
 | `validity_floor` | none (inert) | floors VALID parents' selection score (`sample_parent`) so valid-no-gain stays selectable above invalid | many correct programs pinned at score 0 and selection can't separate them |

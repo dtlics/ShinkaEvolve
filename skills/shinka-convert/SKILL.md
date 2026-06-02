@@ -76,7 +76,10 @@ Do not edit the original source tree unless the user explicitly requests in-plac
 7. Write the run config (`orchestrator_run.json`).
    - Copy `scripts/orchestrator_run.json`; set `task.eval_program_path` /
      `task.init_program_path` / `task.language` to match the candidate file.
-   - Set `budget_usd`, the Azure `evo.llm_models`, and a precise `task_sys_msg`.
+   - Set `budget_usd`, the Azure `evo.llm_models`, and a precise `task_sys_msg`. The
+     starter ships `task_sys_msg` as the sentinel `__UNSET_AUTHOR_AT_BOOT__` — the harness
+     REFUSES to start until the orchestrator authors a real goal (no-spoil); running the
+     task means BEING the orchestrator/outer-loop under the new run loop.
 8. Smoke test before handoff.
    - Run `python evaluate.py --program_path <initial file> --results_dir /tmp/shinka_convert_smoke`
    - Confirm evaluator runs without exceptions.

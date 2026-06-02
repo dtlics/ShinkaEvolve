@@ -20,7 +20,7 @@ INPUT (stdin JSON):
     "mode": "select" | "update",
     "models": [str],
     "state_path": str | null,        # pickle of bandit state; created if absent
-    "bandit_kwargs": {..},           # e.g. {"cost_aware_coef": 0.5}
+    "bandit_kwargs": {..},           # e.g. {"cost_aware_coef": 0.25, "epsilon": 0.2}
     "force_explore": false,          # rewrite lever: uniform instead of UCB
     "subset": [str] | null,          # restrict selection to these arms
     "seed": int | null,

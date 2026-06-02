@@ -7,13 +7,22 @@ CHANGELOG](https://github.com/SakanaAI/ShinkaEvolve/blob/main/CHANGELOG.md).
 ## Fork branches (most recent first)
 
 ### `main` — Claude-as-orchestrator rewrite + Azure-only prune
-Recast the system so **Claude Code is the outer-loop orchestrator**: the inner
-loop (`orchestrator/harness/run_window.py`) runs W-iteration windows and returns a
-diagnostics JSON; the agent reads it between windows and rewrites mutable strategy
-CODE (`orchestrator/scripts/*`) on stagnation via validate → deploy → measure →
-rollback. EvoX-faithful stagnation (trigger Δ<τ; J kept for rollback). Inner-loop
-LLM calls run on Azure in background-poll mode (never the agent's own tokens); a
-single cost ledger (`journal`) hard-stops at `budget_usd`.
+Recast the system so **Claude Code wears two hats** — the ORCHESTRATOR (operational,
+in-the-flow jobs) and the OUTER-LOOP / FRAMEWORK-AUDIT role (rewriting mutable strategy
+CODE when the framework itself is flawed). The run loop: hands-on **warmup** in a throwaway
+db → a background-launched **window-cluster** woken on an uncapped **work-score taper**
+(bounded by budget / termination / stagnation) → an **automatic per-window meta round** that
+writes **per-island briefs** (islands differentiate by default) → **framework-audit +
+deep-research checks** on one shared control-return rhythm → **termination** (five
+consecutive intervention-cycles incl. ≥1 DR) → an **ending document + structured run
+archive**. A framework rewrite runs snapshot → reason → deploy → measure-awake → revert
+(rollback FAILS CLOSED on no/NaN data; a revert fully rewinds code + archive DB + bandit but
+NEVER the cost ledger). The progress signal is the best-score gain vs a hybrid low-window
+bar; rollback uses the multi-signal `rollback_decision.py`. Inner-loop LLM calls run on
+Azure in background-poll mode (never the agent's own tokens); a single crash-durable cost
+ledger (`journal`) hard-stops at `budget_usd`, and a per-call ~$10 token cap bounds any
+single call. (Older entries below are a fork-lineage record, not agent instruction — left
+unchanged by design.)
 
 **Azure-only prune** — removed `async_runner`, the agentic-proposer layer,
 `summarizer`/`novelty_judge`/`prompt_evolver`/`deep_research_summarizer`, the async

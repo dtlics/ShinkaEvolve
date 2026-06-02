@@ -28,6 +28,7 @@ import json
 import os
 import shutil
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -139,6 +140,7 @@ def deploy(
     prior_J: Optional[float] = None,
     concern: Optional[str] = None,
     force: bool = False,
+    results_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Snapshot the current strategy, then deploy ``candidate_path`` over it.
 
@@ -163,6 +165,9 @@ def deploy(
                     f"candidate hash {_cand_hash[:8]} for {target} was REJECTED at window "
                     f"{_e.get('window_index')}; pass force=True to re-deploy anyway"
                 )
+    # P7-T1: snapshot the run STATE (archive DB + bandit + ledger) BEFORE deploy so a
+    # regressing/crashing measure window can be fully rewound (cost ledger preserved).
+    state_snap_id = snapshot_state(results_dir, label=reason) if results_dir else None
     prior_hash = snapshot(target, reason="pre-deploy snapshot")
     dst = scripts_dir() / target
     shutil.copy2(candidate_path, dst)
@@ -174,6 +179,7 @@ def deploy(
             "concern": concern,
             "prior_hash": prior_hash,
             "new_hash": new_hash,
+            "state_snap_id": state_snap_id,
             "reason": reason,
             "window_index": window_index,
             "prior_J": prior_J,
@@ -182,7 +188,7 @@ def deploy(
             "timestamp": _now(),
         }
     )
-    return {"prior_hash": prior_hash, "new_hash": new_hash}
+    return {"prior_hash": prior_hash, "new_hash": new_hash, "state_snap_id": state_snap_id}
 
 
 def rollback(target: str, prior_hash: str, reason: str = "J regression") -> Dict[str, Any]:
@@ -202,6 +208,87 @@ def rollback(target: str, prior_hash: str, reason: str = "J regression") -> Dict
         }
     )
     return {"restored_hash": prior_hash}
+
+
+# ---------------------------------------------------------------------------
+# Run-STATE snapshots (P7-T1): make a framework rewrite recoverable by snapshotting
+# the archive DB + bandit + ledger before deploy, so a regressing/crashing measure
+# window can be FULLY rewound — code AND state — except the cost ledger, which is
+# never rewound (spend stays counted; a revert-and-retry can't exceed the budget).
+# ---------------------------------------------------------------------------
+def _prune_state_snapshots(keep: int) -> None:
+    if keep <= 0:
+        return
+    states = sorted(history_dir().glob("state_*"), key=lambda p: p.stat().st_mtime)
+    for old in states[:-keep]:
+        shutil.rmtree(old, ignore_errors=True)
+
+
+def snapshot_state(results_dir: str, label: Optional[str] = None, keep: int = 5) -> str:
+    """Snapshot run STATE (archive DB + bandit + ledger) into strategy_history/state_<id>/
+    so a framework rewrite is recoverable. Copies programs.sqlite + bandit_state.pkl +
+    journal/run.json (each only if present). Operates on results_dir state files — NOT
+    MUTABLE_TARGETS — so it does NOT route through _assert_mutable. Retains the last
+    ``keep`` snapshots. Returns the snap id.
+
+    PRECONDITION: call only when NO window subprocess is live — the measuring window runs
+    as a separate, fully-exited subprocess, so the snapshot is taken either before
+    launching it (pre-deploy) or after it has exited (pre-revert); no sqlite/pkl writer
+    is active during the copy, so a half-written bandit_state.pkl cannot be captured."""
+    snap_id = uuid.uuid4().hex[:12]
+    dest = history_dir() / f"state_{snap_id}"
+    dest.mkdir(parents=True, exist_ok=True)
+    rd = Path(results_dir)
+    for rel in ("programs.sqlite", "bandit_state.pkl", os.path.join("journal", "run.json")):
+        src = rd / rel
+        if src.exists():
+            shutil.copy2(src, dest / Path(rel).name)
+    (dest / "state_meta.json").write_text(json.dumps(
+        {"snap_id": snap_id, "label": label, "created_at": _now(),
+         "results_dir": str(results_dir)}, indent=2))
+    _prune_state_snapshots(keep)
+    return snap_id
+
+
+def restore_state(results_dir: str, snap_id: str) -> Dict[str, Any]:
+    """FULL rewind of run STATE to a snapshot: restore programs.sqlite (archive) +
+    bandit_state.pkl (selector) byte-for-byte. NEVER rewinds the COST LEDGER — the LIVE
+    total_cost is preserved (the snapshot's run.json is restored, then the current/
+    higher total_cost is re-stamped) so spend stays counted and a revert-and-retry can
+    never be used to exceed the budget. Returns {restored:[...], total_cost_preserved}."""
+    dest = history_dir() / f"state_{snap_id}"
+    if not dest.exists():
+        raise FileNotFoundError(f"state snapshot not found: {dest}")
+    rd = Path(results_dir)
+    live_run = rd / "journal" / "run.json"
+    live_total: Optional[float] = None
+    if live_run.exists():
+        try:
+            live_total = float(json.loads(live_run.read_text()).get("total_cost", 0.0) or 0.0)
+        except Exception:
+            live_total = None
+    restored: List[str] = []
+    for name, rel in (("programs.sqlite", "programs.sqlite"),
+                      ("bandit_state.pkl", "bandit_state.pkl"),
+                      ("run.json", os.path.join("journal", "run.json"))):
+        src = dest / name
+        if src.exists():
+            tgt = rd / rel
+            tgt.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, tgt)
+            restored.append(name)
+    # Re-stamp the preserved (live) total_cost so the ledger is NEVER rewound.
+    if live_total is not None and live_run.exists():
+        try:
+            run = json.loads(live_run.read_text())
+            run["total_cost"] = live_total
+            run["restored_from_state"] = snap_id
+            tmp = str(live_run) + ".tmp"
+            Path(tmp).write_text(json.dumps(run, indent=2))
+            os.replace(tmp, live_run)
+        except Exception:
+            pass
+    return {"restored": restored, "total_cost_preserved": live_total}
 
 
 # Compact set of measure-window signals worth pinning into the index entry so a
@@ -297,13 +384,32 @@ def deploy_bundle(
     window_index: Optional[int] = None,
     prior_J: Optional[float] = None,
     concern: Optional[str] = None,
+    force: bool = False,
+    results_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """changes: [{"candidate_path":..., "target":...}, ...].
 
     Snapshots every target first (so the whole bundle can be restored), then
     deploys every candidate, then logs ONE bundle entry. Returns
-    {prior_hashes, new_hashes} (both target->hash dicts).
+    {prior_hashes, new_hashes, state_snap_id}.
     """
+    # P7-T4: rejected-hash guard, parity with deploy() — refuse the bundle if ANY
+    # target's candidate hash was previously REJECTED for that target (single or bundle
+    # entry), unless explicitly forced. Runs BEFORE any snapshot/copy.
+    if not force:
+        idx = read_index()
+        for ch in changes:
+            _ch = file_hash(Path(ch["candidate_path"]))
+            for _e in idx:
+                _rej_single = (_e.get("new_hash") == _ch and _e.get("target") == ch["target"]
+                               and _e.get("status") == "rejected")
+                _rej_bundle = (_e.get("type") == "bundle" and _e.get("status") == "rejected"
+                               and (_e.get("new_hashes") or {}).get(ch["target"]) == _ch)
+                if _rej_single or _rej_bundle:
+                    raise ValueError(
+                        f"bundle candidate hash {_ch[:8]} for {ch['target']} was REJECTED "
+                        f"at window {_e.get('window_index')}; pass force=True to re-deploy")
+    state_snap_id = snapshot_state(results_dir, label=reason) if results_dir else None
     prior_hashes: Dict[str, str] = {}
     for ch in changes:
         prior_hashes[ch["target"]] = snapshot(ch["target"], reason="pre-bundle snapshot")
@@ -333,6 +439,7 @@ def deploy_bundle(
             "targets": [ch["target"] for ch in changes],
             "prior_hashes": prior_hashes,
             "new_hashes": new_hashes,
+            "state_snap_id": state_snap_id,
             "reason": reason,
             "window_index": window_index,
             "prior_J": prior_J,
@@ -341,7 +448,7 @@ def deploy_bundle(
             "timestamp": _now(),
         }
     )
-    return {"prior_hashes": prior_hashes, "new_hashes": new_hashes}
+    return {"prior_hashes": prior_hashes, "new_hashes": new_hashes, "state_snap_id": state_snap_id}
 
 
 def rollback_bundle(prior_hashes: Dict[str, str], reason: str = "J regression") -> Dict[str, Any]:

@@ -1,6 +1,6 @@
 ---
 name: archive-analyst
-description: Periodic structural read of the evolution archive when the numeric window diagnostics don't capture what's off about the population (e.g. suspected lineage collapse, island monoculture, or an unexplored region). Spawn roughly every 50 windows, or on a hunch. Returns a one-page summary; it does not modify the archive.
+description: Periodic structural read of the evolution archive when the numeric window diagnostics don't capture what's off about the population (e.g. suspected lineage collapse, island monoculture, or an unexplored region). Spawn on a control-return when the population looks structurally off — your cadence is the work-score taper, not a fixed interval. Note that the automatic per-window meta round writes a distinct per-island brief, so islands differentiate by default; a true monoculture means those briefs aren't taking. Returns a one-page summary; it does not modify the archive.
 tools: Read, Bash, Grep
 ---
 

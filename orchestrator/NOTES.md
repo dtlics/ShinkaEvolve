@@ -1,8 +1,46 @@
 # NOTES.md — what's done, what's deferred
 
-The EvoX-derived system works end-to-end offline (see `tests/`: parity, smoke,
-improvements — all green). We followed the EvoX protocol (window → J → stagnation
-→ validate → deploy → measure → rollback), not a homegrown one.
+> **Loop redesign (2026-06).** The run loop is now: **warmup** (hands-on oversight in a
+> throwaway db) → background-launched **window-cluster** woken on a **work-score taper**
+> (uncapped; bounded by budget / termination / stagnation) → an **automatic per-window
+> meta round** that writes **per-island briefs** (islands differentiate by default) →
+> **framework-audit + DR checks** on one shared control-return rhythm → **termination**
+> (5 consecutive intervention-cycles incl. ≥1 DR) → **end-of-run ending document +
+> structured archive**. Two named roles: ORCHESTRATOR (operational/critical-path) and
+> OUTER-LOOP/FRAMEWORK-AUDIT (improvement/tapering). The older "round" notes below predate
+> this and describe the prior windows-only loop — they are kept as history; `SKILL.md` /
+> `CLAUDE.md` are the live teaching. (De-jargoned: the EvoX/WS-n/J-score-formula framing in
+> the old notes is superseded — the progress signal is the best-score gain vs the
+> low-window bar; rollback uses the multi-signal `rollback_decision.py`.)
+
+## Code ↔ doc consistency contract (P9-T0)
+
+The rule: **no behavior a doc describes that the code doesn't do, and no code behavior the
+docs don't explain.** Every code change is paired with its doc change; the doc-lint test
+(`test_skill_doc_teaches_run_loop_and_roles`) is the enforcement, keyed on durable
+behavioral language (never a codename). `orchestrator/SKILL.md` is the **single real file**
+— `.claude/skills/shinka-orchestrator/SKILL.md` is a symlink to the same inode, so one edit
+updates both views.
+
+| Behavior | Code that does it (file:function) | Doc that teaches it |
+|---|---|---|
+| Crash-durable ledger / budget hard cap | `journal.py:_write_json_atomic` + `read_run` recompute; `run_window.main` budget break | SKILL "Safety railguards" |
+| Truthful recording (apply-exhausted) | `run_window._run_one_candidate` (`mut.get("applied") is False` branch); `mutate.py` return | SKILL "Failure handling" |
+| Per-step trace + warmup | `journal.log_step`; `run_window` `--warmup`/`--trace-steps` + `_trace` sinks + `cleanup_warmup` | SKILL "Warmup" |
+| Sensor fields (errored_fraction, model_collapse, failure types) | `diagnostics.py:main` + `_model_collapse` | SKILL "Diagnostics" |
+| Automatic per-window meta + per-island briefs | `meta_summarize.py` (`island_directions`); `run_window._one_window` meta block → `island_brief.py` | SKILL "The automatic meta round" |
+| Uncapped work-score taper | `journal.recent_work_score`/`work_low_streak`; `cadence_policy.main`; `run_window` cluster loop | SKILL "The run loop" / "The taper" |
+| Repair mode (trigger / append / two-strike tombstone / release) | `sample_parent` `select:"errored"`; `dbase.append_program_error`/`tombstone_program`; `repair_record.py`; `run_window` gate | SKILL "Failure handling" |
+| Boot guard + spoil mitigation | `run_window.main` sentinel guard; `run_window`/`construct_mutation_prompt` `use_text_feedback` gating | SKILL "Boot" |
+| Snapshot/measure/revert (cost preserved) + fail-closed + counts-collapse | `strategy_store.snapshot_state`/`restore_state`; `rollback_decision.decide` | SKILL "The framework-audit rewrite cycle" |
+| DR refusal (no crash) | `dr_client.run_dr_call` (`.cost` on raise); `deep_research.main` try/except | SKILL "Deep research" |
+| Termination + end-of-run archive | OC judgment from `interventions.jsonl`; `journal.build_run_summary`/`finalize_run`/`archive_run` | SKILL "Termination + end of run" |
+
+
+The system works end-to-end offline (see `orchestrator/tests/`: parity, smoke,
+improvements — all green). [HISTORICAL] This round followed the EvoX-derived protocol
+(window → J → stagnation → validate → deploy → measure → rollback); the current loop
+supersedes it — see the banner at the top of this file and `SKILL.md` for the live design.
 
 ## Third round (cadence + eval + Azure-only prune)
 - **Run-until-decision cadence.** `run_window --until-decision` runs windows
@@ -81,11 +119,11 @@ improvements — all green). We followed the EvoX protocol (window → J → sta
 - **Prompt evolution** (upstream `shinka/core/prompt_evolver.py`, pruned here) —
   the orchestrator subsumes that role for strategy code; re-introduce a mutable
   task-prompt evolver only if evolving the prompt (not just the code) proves worth it.
-- **Reasoning-effort as a bandit arm — SHIPPED (WS6), no longer deferred.** An
+- **Reasoning-effort as a bandit arm — SHIPPED, no longer deferred.** An
   `llm_models` entry may be `"model@effort"` and the bandit learns each
   (model, effort) arm separately (`run_window` splits the arm for the call).
-- **Per-island J-score.** `stagnation_detector` computes a global J; a per-island
-  J would let interventions target the stalled island.
+- **Per-island progress signal.** `stagnation_detector` computes a global progress
+  reading; a per-island version would let interventions target the stalled island.
 - **`archive_query` full-table scans** for top_n/summary on very long runs —
   add indexed queries if archives reach tens of thousands of programs.
 - **`island_policy` retire execution.** It recommends `{spawn, migrate, retire}`;
@@ -109,6 +147,23 @@ agent should NOT "rediscover" and over-engineer them:
 - **Sequential harness vs. async pipeline.** `run_window` runs one candidate at a
   time (clean reference order); the real `ShinkaEvolveRunner` is concurrent.
   Parallelize within a window if wall-clock becomes the bottleneck.
+
+## Design rationale the docs lean on (one-liners)
+- **Why model-collapse is judged on COUNTS-share, not weights:** a single bandit arm's
+  weight is capped at `1 − epsilon` (≈0.80), so a weight can never reach a collapse
+  threshold — the submitted-COUNT share is the only faithful collapse signal
+  (`diagnostics._model_collapse`; the `rollback_decision` weights-arm is legacy/near-unreachable).
+- **Why rollback FAILS CLOSED:** a measure window with no / NaN / crashed (non-zero exit or
+  unparseable output) data is treated as worst-case and reverted, so a broken rewrite can
+  never be silently accepted (`rollback_decision.decide`).
+- **Scalability is deliberately deferred:** per-generation novelty is O(N) cosine over
+  CACHED embeddings of a SIZE-CAPPED archive with bounded per-island membership, so it's
+  cheap and left as-is; evaluation is serial. Revisit only at a full inspection (trigger:
+  `archive_size` raised enough to bottleneck novelty or serial eval) — it's listed as a
+  standing future-fix candidate in the end-of-run ending document.
+- **`timed_out` is a REAL harness-synthesized field:** `orchestrator/scripts/evaluate.py`
+  sets it when a candidate's runtime reaches the eval-time limit, and the active cnot task's
+  per-trial timeouts feed it — so `timeout_count` is genuinely non-zero, not a doc/code lie.
 
 ## Foundation = out of the orchestrator's scope (by design)
 The sqlite schema, the JSON contract (`_common.py`), the evaluator subprocess,

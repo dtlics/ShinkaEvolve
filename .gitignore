@@ -217,3 +217,7 @@ cython_debug/
 
 # Local browser automation state
 .playwright-cli/
+
+# Archived completed runs (local reference only — P8-T1); do not read prior
+# archives while running a new job.
+orchestrator/run_archive/

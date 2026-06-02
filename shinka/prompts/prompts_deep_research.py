@@ -1,74 +1,23 @@
-"""Prompts for the deep-research meta cycle (phase 2 of research-grounding).
+"""Prompt for the orchestrator's deep-research (DR) call.
 
-Each stage is single-intent per the design doc:
+The DR is a SINGLE web-grounded research call (see
+``orchestrator/scripts/deep_research.py``), made as an agent decision at a
+control-return: it asks a research model (Azure ``o3-deep-research`` via the
+dedicated DR client) for concrete, code-applicable, *referenceable* techniques to
+try next, and the orchestrator triages the returned brief into the islands.
 
-* Stage A — drift judge. Cheap model decides whether an island has
-  drifted enough since its last brief to warrant a new DR call. No
-  tools. Output: a small structured JSON.
-* Stage B — novelty cache lookup. No LLM call — pure embedding NN
-  lookup against the dr_brief_cache table.
-* Stage C — deep research. Uses ``o3-deep-research`` (or whatever
-  the user configures as ``dr_model``). Tools scoped to web research
-  the model uses internally.
-* Stage D — code grounding. Spawns a short agent run with
-  ``web_search`` to fetch 1-2 sources for each concrete technique in
-  the brief. Scope-restricted to ``dr_code_grounding_domains``.
-
-Prompts here intentionally avoid sharing system messages across
-stages — single-intent prompts are easier to test and trace in cost
-dashboards (each stage gets its own ``purpose`` tag).
+This is NOT a multi-stage A→D pipeline. That pipeline (drift judge → novelty cache
+→ research → code grounding) was removed in the Azure-only prune; only this one
+prompt survives. The ``DR_STAGE_C_*`` names are kept for continuity with the call
+site — there are no other stages.
 """
 
 from __future__ import annotations
 
 
 # --------------------------------------------------------------------
-# Stage A — drift judge (per-island, cheap model)
-# --------------------------------------------------------------------
-
-DR_STAGE_A_SYS_MSG = """\
-You are the drift judge for an evolutionary code-optimization run.
-
-Your only job: decide whether the recent programs on this island have
-drifted enough from the prior research brief to warrant a fresh, more
-expensive deep-research call.
-
-Output a single JSON object with these fields and nothing else:
-- "drift_score": float in [0.0, 1.0]. 0.0 means no meaningful change
-  from prior brief; 1.0 means the population is exploring a clearly
-  new direction.
-- "justification": one short sentence explaining the score.
-- "candidate_question": one focused research question to feed to the
-  DR model if Stage C fires. Must be a single sentence, code-grounded
-  (e.g. "How do recent papers exploit cache-oblivious tiling for
-  small-matrix GEMM kernels?"), not a vague topic.
-
-Do NOT propose code changes here. Do NOT critique the programs. Just
-score and propose a question. The orchestrator decides whether to act.
-"""
-
-DR_STAGE_A_USER_MSG = """\
-Island: {island_idx}
-Generation: {generation}
-
-Previous brief for this island (None if first DR pass):
----
-{previous_brief}
----
-
-Recent programs on this island (most recent last):
----
-{recent_programs}
----
-
-Drift threshold the orchestrator is comparing against: {drift_threshold}
-
-Score the drift and propose a candidate research question.
-"""
-
-
-# --------------------------------------------------------------------
-# Stage C — deep research (Azure o3-deep-research)
+# Deep research — concrete technique finder (Azure o3-deep-research).
+# Historically "Stage C"; the only DR prompt still in use.
 # --------------------------------------------------------------------
 
 DR_STAGE_C_SYS_MSG = """\
@@ -108,41 +57,4 @@ Context — what the program in scope does:
 {program_context}
 
 Find concrete techniques to try. Each must have a referenceable source.
-"""
-
-
-# --------------------------------------------------------------------
-# Stage D — code grounding (short agent run with web_search)
-# --------------------------------------------------------------------
-
-DR_STAGE_D_SYS_MSG = """\
-You are confirming a specific technical reference for a coding agent
-that will attempt to implement the technique next.
-
-You have a ``web_search`` tool. Use it ONLY to confirm or extend the
-reference source given below — do NOT pursue alternative ideas, even
-if you find better ones during search. The orchestrator will decide
-later whether to broaden the search.
-
-Allowed source domains: {allowed_domains}
-
-Return a JSON object with:
-{{
-  "confirmed": true | false,
-  "reference_snippet": "<short verbatim quote from a valid source>",
-  "source": "<URL or canonical citation>",
-  "notes": "<one-sentence note: why this snippet is the right one>"
-}}
-
-If you can't find a confirmation in the allowed domains, return
-``confirmed: false`` with a one-sentence explanation in ``notes``.
-"""
-
-DR_STAGE_D_USER_MSG = """\
-Technique to confirm:
-- Idea: {idea}
-- Proposed reference source: {reference_source}
-- Proposed reference snippet: {reference_snippet}
-
-Confirm the snippet's source or extend with a stronger one. Return JSON.
 """

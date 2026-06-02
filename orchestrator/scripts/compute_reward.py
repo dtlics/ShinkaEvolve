@@ -32,6 +32,7 @@ OUTPUT (stdout JSON):
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict
 
 try:
@@ -40,19 +41,33 @@ except ImportError:
     import _common  # type: ignore
 
 
+def _finite(x: Any, default: float = 0.0) -> float:
+    """Coerce to a finite float; return ``default`` for None / NaN / inf / non-numeric."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return default
+    return v if math.isfinite(v) else default
+
+
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     candidate = payload.get("candidate", {}) or {}
     parent = payload.get("parent") or {}
     mode = payload.get("mode", "absolute")
 
     correct = bool(candidate.get("correct", False))
-    score = float(candidate.get("combined_score", 0.0) or 0.0)
-    parent_score = float(parent.get("combined_score", 0.0) or 0.0)
+    parent_score = _finite(parent.get("combined_score"), 0.0)
+    _raw = candidate.get("combined_score")
+    _score_finite = isinstance(_raw, (int, float)) and math.isfinite(float(_raw))
 
-    if not correct:
-        # Incorrect → no reward; the bandit imputes a worst-case value. This
-        # preserves the "failures are penalized, not invisible" invariant.
+    # P10-T1: incorrect OR a NON-FINITE/missing candidate score (NaN / inf / None — a
+    # buggy evaluator or a loss/regret task gone wrong) → no reward; the bandit imputes a
+    # worst-case value, so one bad number can't poison an arm. (Failures are penalized,
+    # not invisible.) NEGATIVE FINITE scores pass through to the floor logic — the reward
+    # math is relative, so negative-score tasks are fully supported.
+    if not correct or not _score_finite:
         return {"reward": None, "baseline": parent_score, "mode": mode}
+    score = float(_raw)
 
     # HYBRID (H3 / O6 reward scale): floor the correct candidate's reward CONTRIBUTION
     # so a correct-but-below-parent candidate is STRICTLY better than a failed one

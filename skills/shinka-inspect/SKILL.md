@@ -16,6 +16,10 @@ Do not use this skill when:
 - You still need to scaffold a task (`shinka-setup`)
 - You need to run evolution (use the **shinka-orchestrator** outer loop)
 
+**Caveat:** inspect is for between-run review of the **current** run's archive. While a
+run/job is in progress, the run loop forbids reading **prior** runs' archives (under
+`orchestrator/run_archive/`) — those are the user's later-reference only, not run inputs.
+
 ## What it does
 - Uses `shinka.utils.load_programs_to_df` to read program records
 - Ranks programs by `combined_score`

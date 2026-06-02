@@ -5,7 +5,7 @@
   "task": {
     "eval_program_path": "evaluate.py",
     "init_program_path": "initial.py",
-    "task_sys_msg": "REPLACE with a precise goal statement for this task.",
+    "task_sys_msg": "__UNSET_AUTHOR_AT_BOOT__",
     "language": "python",
     "eval_time": "00:05:00"
   },
@@ -19,6 +19,12 @@
     "reasoning_effort": "medium",
     "max_patch_attempts": 3,
     "reward_mode": "absolute",
+    "auto_meta": true,
+    "meta_model": "azure-gpt-5.5",
+    "meta_reasoning_effort": "medium",
+    "repair_trigger_fraction": 0.20,
+    "repair_attempt_cap": 2,
+    "repair_escalation_model": null,
     "embedding_model": "azure-text-embedding-3-small",
     "enable_novelty": true,
     "code_embed_sim_threshold": 0.99,
@@ -26,6 +32,6 @@
     "stagnation_rel_frac": 0.05,
     "consecutive_required": 2
   },
-  "cadence": {"mode": "until_decision", "max_windows_per_call": 3},
+  "cadence": {"mode": "until_decision", "base_low": 5, "low_threshold": 1},
   "window_state": {"window_index": 0, "prior_low_streak": 0}
 }

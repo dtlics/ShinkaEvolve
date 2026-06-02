@@ -38,13 +38,5 @@ def default_llm_kwargs() -> dict[str, Any]:
     }
 
 
-def default_prompt_patch_types() -> list[str]:
-    return ["diff", "full"]
-
-
-def default_prompt_patch_type_probs() -> list[float]:
-    return [0.7, 0.3]
-
-
 def default_archive_criteria() -> dict[str, float]:
     return {"combined_score": 1.0}

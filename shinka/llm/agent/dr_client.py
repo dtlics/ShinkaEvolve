@@ -146,6 +146,25 @@ def get_dr_async_client(
     return client, base_url
 
 
+def _usage_cost(response: Any, model: str) -> float:
+    """Best-effort token cost from response.usage × pricing.csv (0.0 if unavailable).
+    Shared by the success path AND the failure raises (P7-T6) so a DR call that burned
+    tokens but then failed terminally still reports its billed cost to the ledger."""
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return 0.0
+    in_tok = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0) or 0
+    out_tok = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", 0) or 0
+    try:
+        from shinka.llm.providers.pricing import calculate_cost
+
+        ic, oc = calculate_cost(model, int(in_tok), int(out_tok))
+        return float(ic) + float(oc)
+    except Exception as exc:
+        logger.warning("DR cost computation failed for %s: %s", model, exc)
+        return 0.0
+
+
 async def run_dr_call(
     client: Any,
     *,
@@ -212,10 +231,12 @@ async def run_dr_call(
     terminal = {"completed", "failed", "incomplete", "cancelled", "expired"}
     while last_status not in terminal:
         if elapsed > poll_timeout_sec:
-            raise TimeoutError(
+            _err = TimeoutError(
                 f"DR response {response_id} did not finish: "
                 f"last status={last_status!r} after {elapsed:.1f}s"
             )
+            _err.cost = _usage_cost(response, model)  # P7-T6: bill what was spent
+            raise _err
         await asyncio.sleep(poll_interval_sec)
         elapsed += poll_interval_sec
         response = await client.responses.retrieve(response_id)
@@ -223,9 +244,11 @@ async def run_dr_call(
 
     if last_status not in ("completed", "incomplete"):
         # failed / cancelled / expired → genuinely no usable output.
-        raise RuntimeError(
+        _err = RuntimeError(
             f"DR response {response_id} terminal status={last_status!r}"
         )
+        _err.cost = _usage_cost(response, model)  # P7-T6: bill what was spent before failing
+        raise _err
     if last_status == "incomplete":
         # The model hit a cap (max_output_tokens / max_tool_calls / reasoning
         # budget) but the partial output is normally still a usable brief — so we
@@ -258,19 +281,7 @@ async def run_dr_call(
     # output_tokens includes the model's reasoning/thinking tokens (Responses
     # API), so this captures the full billable token cost. The web_search tool
     # cost is NOT in usage; the caller (deep_research.py) adds a surcharge.
-    cost = 0.0
-    usage = getattr(response, "usage", None)
-    if usage is not None:
-        in_tok = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0) or 0
-        out_tok = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", 0) or 0
-        try:
-            from shinka.llm.providers.pricing import calculate_cost
-
-            ic, oc = calculate_cost(model, int(in_tok), int(out_tok))
-            cost = float(ic) + float(oc)
-        except Exception as exc:
-            logger.warning("DR cost computation failed for %s: %s", model, exc)
-            cost = 0.0
+    cost = _usage_cost(response, model)
     return text, cost
 
 

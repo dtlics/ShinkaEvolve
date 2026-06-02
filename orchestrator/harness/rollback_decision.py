@@ -43,6 +43,7 @@ OUTPUT (stdout JSON):
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -79,8 +80,33 @@ def decide(
     abs_eval_floor: float = 0.05,
     bandit_collapse_frac: float = 0.85,
     bandit_collapse_rise: float = 0.25,
+    bandit_collapse_count_frac: float = 0.85,
+    bandit_collapse_min_pulls: int = 8,
+    measure_crashed: bool = False,
 ) -> Dict[str, Any]:
     reasons: List[str] = []
+
+    # P7-T2: FAIL CLOSED on no usable measure data. A measure window that crashed,
+    # exited non-zero, returned empty, or produced NaN in a core sensor is treated as a
+    # REGRESSION (revert) — never silently accepted. That is the precise worst case the
+    # safety net exists to catch. A VALID flat window (delta 0 with a present, non-NaN
+    # eval-failure-rate) is NOT caught here.
+    def _is_nan(x: Any) -> bool:
+        return isinstance(x, float) and math.isnan(x)
+
+    _core_absent = (
+        measure.get("best_score_end") is None
+        and "delta" not in measure
+        and "evaluation_failure_rate" not in measure
+    )
+    _core_nan = any(_is_nan(measure.get(k)) for k in ("delta", "evaluation_failure_rate", "best_score_end"))
+    if measure_crashed or (not measure) or _core_absent or _core_nan:
+        return {
+            "regressed": True,
+            "accept": False,
+            "reasons": ["measure window produced no usable data — fail closed"],
+            "signals": {"measure_crashed": bool(measure_crashed)},
+        }
 
     p_eval, m_eval = _eval_success(prior), _eval_success(measure)
     p_nov, m_nov = _nov(prior), _nov(measure)
@@ -121,10 +147,36 @@ def decide(
                 f"score regression: Δ {p_delta:.5f} → {m_delta:.5f} (< {score_ratio}× prior) with no health gain"
             )
 
-    # 4. Bandit collapse (H4 core): selection collapsed onto a single arm — fires
-    # INDEPENDENTLY of Δ, so it is caught in the flat early phase the old basket was
-    # blind to (the reward/bandit-regression class the outer loop exists to catch).
-    # Uses llm_bandit_weights already in the diagnostics (contract-free).
+    # 4. Bandit collapse — selection collapsed onto a single arm while judging this
+    # just-deployed rewrite (NOT steady-state; this module is only invoked to judge a
+    # measure window — steady-state collapse is the SURFACED model_collapse diag flag,
+    # never auto-corrected).
+    # 4a. PRIMARY — COUNTS-share. A single arm's WEIGHT caps at 1-epsilon, so weights
+    # can never reveal a collapse; submitted-COUNTS can. Fires when the top arm's
+    # submitted-share >= bandit_collapse_count_frac AND rose vs prior AND there were
+    # enough total pulls (min_pulls floor avoids firing on a 2-pull window).
+    def _submitted(counts: Any) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        for arm, c in (counts or {}).items():
+            out[arm] = float(c.get("submitted", c.get("completed", 0)) or 0) if isinstance(c, dict) else float(c or 0)
+        return out
+
+    pc, mc = _submitted(prior.get("llm_bandit_counts")), _submitted(measure.get("llm_bandit_counts"))
+    m_total = sum(mc.values())
+    if mc and len(mc) >= 2 and m_total >= bandit_collapse_min_pulls:
+        top = max(mc, key=lambda k: mc[k])
+        m_share = mc[top] / m_total if m_total else 0.0
+        p_total = sum(pc.values())
+        p_share = (pc.get(top, 0.0) / p_total) if p_total else 0.0
+        if m_share >= bandit_collapse_count_frac and m_share > p_share:
+            reasons.append(
+                f"bandit collapse (counts): arm {top} submitted-share {p_share:.2f} → "
+                f"{m_share:.2f} (≥{bandit_collapse_count_frac}, rose)"
+            )
+
+    # 4b. LEGACY weights arm — kept for back-compat but near-unreachable (the
+    # 1-epsilon single-arm weight ceiling means bandit_collapse_frac=0.85 rarely fires);
+    # the counts-share arm above is the real signal.
     pw = prior.get("llm_bandit_weights") or {}
     mw = measure.get("llm_bandit_weights") or {}
     if mw:
@@ -160,6 +212,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         abs_eval_floor=float(payload.get("abs_eval_floor", 0.05)),
         bandit_collapse_frac=float(payload.get("bandit_collapse_frac", 0.85)),
         bandit_collapse_rise=float(payload.get("bandit_collapse_rise", 0.25)),
+        bandit_collapse_count_frac=float(payload.get("bandit_collapse_count_frac", 0.85)),
+        bandit_collapse_min_pulls=int(payload.get("bandit_collapse_min_pulls", 8)),
+        measure_crashed=bool(payload.get("measure_crashed", False)),
     )
 
 

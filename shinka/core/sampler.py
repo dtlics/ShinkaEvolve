@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple, Literal
+from typing import List, Optional, Tuple, Literal
 import numpy as np
 from shinka.database import Program
 from shinka.database.inspirations import InspirationContextBuilder
@@ -16,8 +16,6 @@ from shinka.prompts import (
     get_cross_component,
     FIX_SYS_FORMAT,
     FIX_ITER_MSG,
-    LIT_GROUNDED_SYS_FORMAT,
-    LIT_GROUNDED_ITER_MSG,
     format_error_output_section,
 )
 from shinka.prompts.prompts_init import INIT_SYSTEM_MSG, INIT_USER_MSG
@@ -83,7 +81,6 @@ class PromptSampler:
         top_k_inspirations: List[Program],
         meta_recommendations: Optional[str] = None,
         island_brief: Optional[str] = None,
-        literature_grounded_item: Optional[Dict[str, Any]] = None,
         failure_note: Optional[str] = None,
     ) -> Tuple[str, str, str]:
         if self.task_sys_msg is None:
@@ -99,24 +96,15 @@ class PromptSampler:
         if island_brief:
             meta_recommendations = island_brief
 
-        # Build the candidate type list with the same suppression
-        # pattern the cross arm uses. ``literature_grounded`` is
-        # suppressed when no DR brief item with a non-empty
-        # reference_snippet is available — the orchestrator passes
-        # ``literature_grounded_item=None`` in that case.
+        # Build the candidate type list: the ``cross`` arm is suppressed when there
+        # are no inspirations to cross-pollinate with.
         skip_cross = (
             len(archive_inspirations) == 0 and len(top_k_inspirations) == 0
-        )
-        skip_lit = (
-            literature_grounded_item is None
-            or not str(literature_grounded_item.get("reference_snippet") or "").strip()
         )
         valid_types: List[str] = []
         valid_probs: List[float] = []
         for t, p in zip(self.patch_types, self.patch_type_probs):
             if t == "cross" and skip_cross:
-                continue
-            if t == "literature_grounded" and skip_lit:
                 continue
             valid_types.append(t)
             valid_probs.append(p)
@@ -141,10 +129,9 @@ class PromptSampler:
             )
 
         # Add meta-recommendations BEFORE format instructions (if provided).
-        # ``cross`` and ``literature_grounded`` both manage their own
-        # focus material (cross-pollination context / DR brief item)
-        # and don't want a generic rec slot competing with it.
-        skip_meta_rec_for = {"cross", "literature_grounded"}
+        # ``cross`` manages its own focus material (cross-pollination context)
+        # and doesn't want a generic rec slot competing with it.
+        skip_meta_rec_for = {"cross"}
         if meta_recommendations not in [None, "none"] and patch_type not in skip_meta_rec_for:
             sys_msg += "\n\n# Potential Recommendations"
             sys_msg += (
@@ -165,8 +152,8 @@ class PromptSampler:
 
         # The persistent failure caution rides into EVERY generation — rendered
         # independently of patch_type and of any per-gen direction/island_brief, so
-        # it is never dropped on a cross/literature_grounded gen, when an island_brief
-        # replaced the direction, or when no direction was sampled (M1/M2/M3/M4).
+        # it is never dropped on a cross gen, when an island_brief replaced the
+        # direction, or when no direction was sampled (M1/M2/M3/M4).
         if failure_note not in (None, "", "none") and str(failure_note).strip():
             sys_msg += "\n\n# Known failure modes to avoid"
             sys_msg += (
@@ -185,8 +172,6 @@ class PromptSampler:
             sys_msg += selected_format
         elif patch_type == "cross":
             sys_msg += CROSS_SYS_FORMAT
-        elif patch_type == "literature_grounded":
-            sys_msg += LIT_GROUNDED_SYS_FORMAT
 
         # Build sorted inspiration context (combines archive + top-k)
         sorted_inspirations = self.context_builder.build_context(
@@ -240,25 +225,6 @@ class PromptSampler:
                 archive_inspirations,
                 top_k_inspirations,
                 language=self.language,
-            )
-        elif patch_type == "literature_grounded":
-            # The orchestrator picked one BriefItem dict for this call;
-            # render it into the prompt verbatim. The suppression
-            # branch above ensures ``literature_grounded_item`` is
-            # always populated when we reach this dispatch.
-            item = literature_grounded_item or {}
-            iter_msg = LIT_GROUNDED_ITER_MSG.format(
-                language=self.language,
-                idea=item.get("idea", "(missing)"),
-                rationale=item.get("rationale", ""),
-                reference_source=item.get("reference_source", "(none)"),
-                reference_snippet=item.get("reference_snippet", "(none)"),
-                gotchas=item.get("gotchas", "(none)"),
-                code_content=parent.code,
-                performance_metrics=perf_str(
-                    parent.combined_score, parent.public_metrics
-                ),
-                text_feedback_section=text_feedback_section,
             )
         elif patch_type == "paper":
             raise NotImplementedError("Paper edit not implemented.")

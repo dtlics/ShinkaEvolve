@@ -84,6 +84,43 @@ def test_journal_roundtrip():
     return None
 
 
+def test_journal_ledger_durability():
+    """P0-T1: a truncated/corrupt run.json is repaired on read by recomputing
+    total_cost from the durable streams — the budget cap is never silently zeroed.
+    Writes are atomic (no leftover .tmp)."""
+    import json as _json
+
+    import journal
+
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "r", "goal": "g", "budget_usd": 10.0})
+        for i in (0, 1):
+            journal.append_window(td, {
+                "window_index": i, "J_score": 0.1, "best_score_end": 1.5,
+                "total_programs": 5, "window_cost": 0.5,
+                "island_health": [{"id": 0, "best": 1.5, "diversity": 3}],
+            })
+        journal.append_intervention(td, {"type": "rewrite", "cost": 0.3, "outcome": "accepted"})
+        journal.log_call(td, "meta", {"u": "U"}, {"d": []}, cost=0.2, summary="meta")
+        # 2*0.5 (windows) + 0.3 (intervention) + 0.2 (call) = 1.5
+        assert abs(journal.total_cost(td) - 1.5) < 1e-9, journal.total_cost(td)
+        rp = journal._run_path(td)
+        assert not os.path.exists(rp + ".tmp")  # atomic write leaves no temp
+
+        # Corrupt run.json by truncating it mid-object (simulate a crash mid-write).
+        with open(rp, "w") as f:
+            f.write('{"run_id": "r", "total_co')
+
+        run = journal.read_run(td)
+        assert run, "read_run must reconstruct, not return {}"
+        assert run.get("recovered_from_corruption") is True
+        assert run.get("windows_completed") == 2
+        assert abs(journal.total_cost(td) - 1.5) < 1e-9, journal.total_cost(td)
+        assert not os.path.exists(rp + ".tmp")
+        _json.loads(open(rp).read())  # reconstructed file parses cleanly
+    return None
+
+
 def test_concern_bundle():
     with tempfile.TemporaryDirectory() as td:
         sc, hi = os.path.join(td, "scripts"), os.path.join(td, "hist")
@@ -118,14 +155,53 @@ def test_concern_bundle():
 
 
 def test_cadence_policy():
-    import cadence_policy
+    """P4-T2: the work-score taper is UNCAPPED and escalating; no work score → wake
+    every window; an OPTIONAL max_windows_per_call still clamps when the user sets one."""
+    import cadence_policy as cp
 
-    stag = cadence_policy.main({"stagnation_flag": True, "windows_run": 1, "max_windows_per_call": 3})
-    assert stag["return"] is True and stag["reason"] == "stagnation"
-    cap = cadence_policy.main({"stagnation_flag": False, "windows_run": 3, "max_windows_per_call": 3})
-    assert cap["return"] is True and cap["reason"] == "window_cap"
-    cont = cadence_policy.main({"stagnation_flag": False, "windows_run": 1, "max_windows_per_call": 3})
-    assert cont["return"] is False
+    assert cp.main({"stagnation_flag": True, "windows_run": 1})["reason"] == "stagnation"
+    hi = cp.main({"stagnation_flag": False, "windows_run": 1, "recent_work_score": 3})
+    assert hi["return"] is True and hi["target_cluster_size"] == 1 and hi["reason"] == "taper"
+    # no work-score signal → wake every window (safe default)
+    assert cp.main({"stagnation_flag": False, "windows_run": 1,
+                    "recent_work_score": None})["target_cluster_size"] == 1
+
+    def _tgt(streak):
+        return cp.main({"stagnation_flag": False, "windows_run": 0, "recent_work_score": 0,
+                        "work_low_streak": streak})["target_cluster_size"]
+
+    assert _tgt(1) == 5 and _tgt(2) == 10 and _tgt(3) == 20  # uncapped escalation
+    assert cp.main({"stagnation_flag": False, "windows_run": 3, "recent_work_score": 0,
+                    "work_low_streak": 1})["return"] is False  # 3 < 5
+    assert cp.main({"stagnation_flag": False, "windows_run": 5, "recent_work_score": 0,
+                    "work_low_streak": 1})["return"] is True   # 5 >= 5
+    # OPTIONAL explicit ceiling still clamps if the user sets one
+    assert cp.main({"stagnation_flag": False, "windows_run": 0, "recent_work_score": 0,
+                    "work_low_streak": 3, "max_windows_per_call": 8})["target_cluster_size"] == 8
+    return None
+
+
+def test_work_score_readers():
+    """P4-T1: journal readers that drive the taper (recent_work_score / recent_work_axes
+    / work_low_streak)."""
+    import tempfile
+
+    import journal
+
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "w"})
+        assert journal.recent_work_score(td) is None  # none recorded yet
+        assert journal.work_low_streak(td) == 0
+        journal.append_intervention(td, {"type": "audit", "work_audit": 3, "work_dr": 0, "work_score": 3})
+        journal.append_intervention(td, {"type": "audit", "work_audit": 0, "work_dr": 0, "work_score": 0})
+        assert journal.recent_work_score(td) == 0.0
+        assert abs(journal.recent_work_score(td, n=2) - 1.5) < 1e-9  # mean(3, 0)
+        assert journal.recent_work_axes(td) == {"work_audit": 0, "work_dr": 0}
+        assert journal.work_low_streak(td) == 1  # only the trailing 0 is low; the 3 breaks it
+        journal.append_intervention(td, {"type": "audit", "work_score": 0})
+        assert journal.work_low_streak(td) == 2  # two trailing lows
+        journal.append_intervention(td, {"type": "audit", "work_score": 3})
+        assert journal.work_low_streak(td) == 0  # latest is high → streak resets
     return None
 
 
@@ -165,6 +241,610 @@ def test_budget_hardstop():
         # intervention cost lands in the same ledger
         journal.append_intervention(rd, {"type": "deep_research", "cost": 5.0})
         assert journal.budget_remaining(rd, 2.5) < 0
+    return None
+
+
+def test_apply_exhausted_truthful_recording():
+    """P1-T1 (F-INNER-1): an apply-exhausted slot (mutate returns applied=False) is a
+    TRUE failed attempt — the model's cost is charged cost-only to the bandit, NO
+    reward, NOTHING archived (never a fabricated parent-copy duplicate), surfaced via
+    the exhausted-retry signals."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+    import journal
+
+    orig_mut = run_window.mutate.main
+    orig_sel = run_window.select_llm_script.main
+    sel_updates = []
+
+    def _capture_sel(payload):
+        if payload.get("mode") == "update":
+            sel_updates.append(dict(payload))
+        return orig_sel(payload)
+
+    try:
+        run_window.mutate.main = lambda p: {
+            "ok": True, "applied": False, "num_applied": 0,
+            "candidate_code": p.get("parent_code", ""), "candidate_path": "/tmp/ae.py",
+            "name": None, "description": None, "cost": 1.0, "attempts": 3,
+            "transport": "mock", "error": "patch did not apply", "raw_response": None,
+        }
+        run_window.select_llm_script.main = _capture_sel
+        with tempfile.TemporaryDirectory() as td:
+            rd = os.path.join(td, "run")
+            ip = os.path.join(td, "i.py")
+            open(ip, "w").write("# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n")
+            cfg = {
+                "results_dir": rd, "run_id": "ae", "budget_usd": 100.0,
+                "task": {"eval_program_path": "unused.py", "init_program_path": ip,
+                         "task_sys_msg": "x", "language": "python"},
+                "db_config": {"num_islands": 1, "archive_size": 20},
+                "evo": {"window_size": 3, "patch_types": ["diff"], "patch_type_probs": [1.0],
+                        "embedding_model": "text-embedding-3-small",
+                        "llm_models": ["m1", "m2"], "enable_novelty": False, "seed": 0},
+                "mock": {"enabled": True, "mutate_cost": 1.0,
+                         "scores_by_generation": {str(i): 1.0 for i in range(40)}},
+                "cadence": {"mode": "until_decision", "max_windows_per_call": 1},
+                "window_state": {"window_index": 0, "prior_low_streak": 0},
+            }
+            d = run_window.main(cfg)
+            # only the bootstrap seed is archived; the 3 apply-exhausted slots add NOTHING
+            summ = run_window.archive_query.main({
+                "db_path": os.path.join(rd, "programs.sqlite"),
+                "db_config": cfg["db_config"], "embedding_model": "text-embedding-3-small",
+                "query_type": "summary"})["result"]
+            assert summ["total"] == 1, summ  # no fabricated parent-copy duplicates
+            assert d["exhausted_retry_count"] == 3, d.get("exhausted_retry_count")
+            assert len(d.get("exhausted_retry_slots", [])) == 3
+            # every bandit update from the apply-exhausted slots was cost-only, no reward
+            assert len(sel_updates) == 3, len(sel_updates)
+            assert all(u.get("cost_only") is True and u.get("reward") is None
+                       for u in sel_updates), sel_updates
+            assert journal.total_cost(rd) >= 3.0, journal.total_cost(rd)
+    finally:
+        run_window.mutate.main = orig_mut
+        run_window.select_llm_script.main = orig_sel
+    return None
+
+
+def test_diagnostics_sensor_fields():
+    """P2-T3: errored_fraction (tombstoned EXCLUDED so it can release), apply/timeout/
+    wrong echoes + apply_failure_rate, the counts-based model_collapse flag; the dead
+    current_strategy_hash echo is gone."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import diagnostics as diag
+
+    orig_aq = diag.archive_query.main
+    orig_ih = diag.island_policy.island_health
+    try:
+        diag.island_policy.island_health = lambda *a, **k: []
+
+        def _summary(total, correct, tomb=0):
+            return lambda p: {"result": {"total": total, "correct": correct,
+                                         "best_score": 1.0, "islands": [],
+                                         "tombstoned_count": tomb}}
+
+        base = {"db_path": "x", "db_config": {}, "embedding_model": "m",
+                "window_index": 0, "iters_completed": 5, "best_score_start": 1.0,
+                "window_size": 5}
+
+        diag.archive_query.main = _summary(5, 3)
+        out = diag.main(dict(base))
+        assert abs(out["errored_fraction"] - 0.4) < 1e-9, out["errored_fraction"]
+        assert "current_strategy_hash" not in out  # dead echo removed
+
+        diag.archive_query.main = _summary(5, 3, tomb=2)  # tombstoned excluded → releases
+        assert diag.main(dict(base))["errored_fraction"] == 0.0
+
+        diag.archive_query.main = _summary(0, 0)
+        assert diag.main(dict(base))["errored_fraction"] == 0.0
+
+        diag.archive_query.main = _summary(5, 3)
+        out3 = diag.main({**base, "llm_bandit_counts": {"a": {"submitted": 20}, "b": {"submitted": 1}}})
+        assert out3["model_collapse"]["collapsed"] is True
+        assert out3["model_collapse"]["top_arm"] == "a"
+        out4 = diag.main({**base, "llm_bandit_counts": {"a": {"submitted": 5}, "b": {"submitted": 5}}})
+        assert out4["model_collapse"]["collapsed"] is False
+
+        out5 = diag.main({**base, "eval_total": 5, "apply_exhausted": 2,
+                          "timeout_count": 1, "wrong_answer_count": 3})
+        assert out5["apply_exhausted_count"] == 2
+        assert out5["timeout_count"] == 1 and out5["wrong_answer_count"] == 3
+        assert abs(out5["apply_failure_rate"] - 2 / 7) < 1e-9
+    finally:
+        diag.archive_query.main = orig_aq
+        diag.island_policy.island_health = orig_ih
+    return None
+
+
+def test_warmup_trace_and_cleanup():
+    """P2-T2: per-step tracing writes journal/steps.jsonl (sampler → prompt → llm_output
+    → eval → framework_decision) ONLY when on; cleanup_warmup removes the throwaway
+    workspace idempotently."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+    import journal
+
+    def _cfg(rd, trace):
+        os.makedirs(rd, exist_ok=True)
+        ip = os.path.join(rd, "i.py")
+        open(ip, "w").write("# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n")
+        return {
+            "results_dir": rd, "run_id": "w", "budget_usd": 100.0, "trace_steps": trace,
+            "task": {"eval_program_path": "unused.py", "init_program_path": ip,
+                     "task_sys_msg": "x", "language": "python"},
+            "db_config": {"num_islands": 1, "archive_size": 20},
+            "evo": {"window_size": 2, "patch_types": ["diff"], "patch_type_probs": [1.0],
+                    "embedding_model": "text-embedding-3-small", "enable_novelty": False, "seed": 0},
+            "mock": {"enabled": True, "mutate_cost": 0.0,
+                     "scores_by_generation": {str(i): 1.0 + 0.01 * i for i in range(40)}},
+            "cadence": {"mode": "until_decision", "max_windows_per_call": 1},
+            "window_state": {"window_index": 0, "prior_low_streak": 0},
+        }
+
+    with tempfile.TemporaryDirectory() as td:
+        rd1 = os.path.join(td, "traced")
+        run_window.main(_cfg(rd1, True))
+        kinds = {s.get("step") for s in journal.read_steps(rd1)}
+        assert {"sampler", "prompt", "llm_output", "eval", "framework_decision"} <= kinds, kinds
+
+        rd2 = os.path.join(td, "untraced")
+        run_window.main(_cfg(rd2, False))
+        assert journal.read_steps(rd2) == []  # tracing OFF → no steps.jsonl
+        assert not os.path.exists(os.path.join(rd2, "journal", "steps.jsonl"))
+
+        warm = os.path.join(rd2, "warmup")
+        os.makedirs(warm, exist_ok=True)
+        assert run_window.cleanup_warmup(rd2) is True
+        assert not os.path.exists(warm)
+        assert run_window.cleanup_warmup(rd2) is False  # idempotent no-op
+    return None
+
+
+def test_meta_island_directions():
+    """P3-T1: meta returns one distinct island_directions entry per island, drops a
+    malformed entry without crashing, and defaults to gpt-5.5."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import meta_summarize
+
+    txt = ('{"directions": [{"text": "anneal", "weight": 0.5}], "failure_note": "fn", '
+           '"island_directions": [{"island_idx": 0, "text": "greedy"}, '
+           '{"island_idx": "bad", "text": "dropme"}, {"island_idx": 2, "text": "exact"}]}')
+    out = meta_summarize.main({"mock": True, "mock_text": txt, "goal": "g"})
+    assert out["model"] == "azure-gpt-5.5"  # default model flipped to gpt-5.5
+    assert [d["island_idx"] for d in out["island_directions"]] == [0, 2]  # "bad" dropped
+    assert out["directions"] and out["failure_note"] == "fn"
+    out2 = meta_summarize.main(
+        {"mock": True, "mock_text": '{"directions": [], "failure_note": ""}', "goal": "g"})
+    assert out2["island_directions"] == []  # absent key → []
+    return None
+
+
+def test_auto_meta_per_window():
+    """P3-T2: the harness runs an automatic per-window meta round, folds its cost into
+    the ledger, and auto-records ONE per-island brief; auto_meta=False skips the whole
+    round; a meta failure never crashes the window."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+    import journal
+
+    def _cfg(rd, auto_meta):
+        os.makedirs(rd, exist_ok=True)
+        ip = os.path.join(rd, "i.py")
+        open(ip, "w").write("# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n")
+        return {
+            "results_dir": rd, "run_id": "m", "budget_usd": 100.0,
+            "task": {"eval_program_path": "unused.py", "init_program_path": ip,
+                     "task_sys_msg": "x", "language": "python"},
+            "db_config": {"num_islands": 2, "archive_size": 20},
+            "evo": {"window_size": 1, "patch_types": ["diff"], "patch_type_probs": [1.0],
+                    "embedding_model": "text-embedding-3-small", "enable_novelty": False,
+                    "seed": 0, "auto_meta": auto_meta},
+            "mock": {"enabled": True, "mutate_cost": 0.0,
+                     "scores_by_generation": {str(i): 1.0 + 0.01 * i for i in range(40)}},
+            "cadence": {"mode": "until_decision", "max_windows_per_call": 1},
+            "window_state": {"window_index": 0, "prior_low_streak": 0},
+        }
+
+    orig_meta = run_window.meta_summarize_script.main
+    try:
+        def _meta_stub(payload):  # folds cost like the real log_external_call does
+            journal.add_cost(payload["results_dir"], 0.5)
+            return {"directions": [{"text": "d", "weight": 1.0}], "failure_note": "fn",
+                    "island_directions": [{"island_idx": 0, "text": "island0 dir"}],
+                    "recommendations": "d", "cost": 0.5, "model": "x"}
+
+        run_window.meta_summarize_script.main = _meta_stub
+        with tempfile.TemporaryDirectory() as td:
+            rd = os.path.join(td, "run")
+            d = run_window.main(_cfg(rd, True))
+            assert journal.total_cost(rd) >= 0.5 and d["total_cost"] >= 0.5  # meta cost folded
+            brief = run_window.archive_query.main({
+                "db_path": os.path.join(rd, "programs.sqlite"), "db_config": {"num_islands": 2},
+                "embedding_model": "text-embedding-3-small",
+                "query_type": "island_brief", "island_idx": 0})["result"]
+            assert (brief or {}).get("content") == "island0 dir", brief
+
+        called = {"n": 0}
+
+        def _meta_count(payload):
+            called["n"] += 1
+            return _meta_stub(payload)
+
+        run_window.meta_summarize_script.main = _meta_count
+        with tempfile.TemporaryDirectory() as td:
+            run_window.main(_cfg(os.path.join(td, "run"), False))
+            assert called["n"] == 0  # auto_meta=False skips the whole round
+
+        def _meta_raise(payload):
+            raise RuntimeError("boom")
+
+        run_window.meta_summarize_script.main = _meta_raise
+        with tempfile.TemporaryDirectory() as td:
+            d = run_window.main(_cfg(os.path.join(td, "run"), True))
+            assert d.get("ok") is True  # a meta failure never crashes the window
+    finally:
+        run_window.meta_summarize_script.main = orig_meta
+    return None
+
+
+def test_repair_mode_lifecycle():
+    """P5 (T1/T2/T3/T4): repair mode turns ON at >=20% errored; a FAILED repair appends
+    to the errored PARENT (no new child) and tombstones it after the attempt cap;
+    tombstoning EXCLUDES it from errored_fraction so the mode RELEASES."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    def _cfg(rd):
+        os.makedirs(rd, exist_ok=True)
+        ip = os.path.join(rd, "i.py")
+        open(ip, "w").write("# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n")
+        return {
+            "results_dir": rd, "run_id": "rep", "budget_usd": 100.0,
+            "task": {"eval_program_path": "unused.py", "init_program_path": ip,
+                     "task_sys_msg": "x", "language": "python"},
+            "db_config": {"num_islands": 1, "archive_size": 20},
+            "evo": {"window_size": 1, "patch_types": ["diff"], "patch_type_probs": [1.0],
+                    "embedding_model": "text-embedding-3-small", "enable_novelty": False,
+                    "seed": 0, "auto_meta": False, "repair_trigger_fraction": 0.2,
+                    "repair_attempt_cap": 2, "fix_retry_budget": 0},
+            "mock": {"enabled": True, "mutate_cost": 0.0,
+                     "scores_by_generation": {str(i): 1.0 for i in range(40)},
+                     "incorrect_generations": [1, 2, 3]},  # gen1 errored; repairs (gen2) fail
+            "cadence": {"mode": "until_decision", "max_windows_per_call": 1},
+            "window_state": {"window_index": 0, "prior_low_streak": 0},
+        }
+
+    def _summary(rd, cfg):
+        return run_window.archive_query.main({
+            "db_path": os.path.join(rd, "programs.sqlite"),
+            "db_config": cfg["db_config"], "embedding_model": "text-embedding-3-small",
+            "query_type": "summary"})["result"]
+
+    with tempfile.TemporaryDirectory() as td:
+        rd = os.path.join(td, "run")
+        cfg = _cfg(rd)
+        # window 0: normal gen → gen1 errored child → errored_fraction >= 0.2
+        d0 = run_window.main(cfg)
+        s0 = _summary(rd, cfg)
+        assert s0["total"] == 2 and s0["correct"] == 1, s0  # bootstrap + 1 errored
+        assert d0["errored_fraction"] >= 0.2, d0["errored_fraction"]
+        # window 1: repair mode ON → repair gen FAILS → no new child, parent repair +1
+        d1 = run_window.main(cfg)
+        assert d1["repair_fail_count"] == 1, d1
+        assert _summary(rd, cfg)["total"] == 2  # NO new child archived for the failed repair
+        # window 2: repair fails again → parent tombstoned (cap=2)
+        d2 = run_window.main(cfg)
+        assert d2["repair_tombstoned_count"] == 1, d2
+        assert _summary(rd, cfg)["tombstoned_count"] == 1
+        # tombstoned EXCLUDED from errored_fraction → it dropped → repair RELEASES
+        assert d2["errored_fraction"] < 0.2, d2["errored_fraction"]
+    return None
+
+
+def test_boot_guard():
+    """P6-T1: the harness refuses to start (spending NOTHING) when task_sys_msg is unset
+    / placeholder; require_sys_msg=false downgrades to a warning; the starters ship the
+    sentinel."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    def _cfg(rd, sysmsg, require=True):
+        os.makedirs(rd, exist_ok=True)
+        ip = os.path.join(rd, "i.py")
+        open(ip, "w").write("# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n")
+        task = {"eval_program_path": "u.py", "init_program_path": ip, "language": "python",
+                "require_sys_msg": require}
+        if sysmsg is not None:
+            task["task_sys_msg"] = sysmsg
+        return {
+            "results_dir": rd, "run_id": "b", "budget_usd": 100.0, "task": task,
+            "db_config": {"num_islands": 1, "archive_size": 20},
+            "evo": {"window_size": 1, "patch_types": ["diff"], "patch_type_probs": [1.0],
+                    "embedding_model": "text-embedding-3-small", "enable_novelty": False,
+                    "seed": 0, "auto_meta": False},
+            "mock": {"enabled": True, "scores_by_generation": {str(i): 1.0 for i in range(5)}},
+            "cadence": {"mode": "until_decision", "max_windows_per_call": 1},
+            "window_state": {"window_index": 0, "prior_low_streak": 0},
+        }
+
+    for bad in ("__UNSET_AUTHOR_AT_BOOT__", "", None):
+        with tempfile.TemporaryDirectory() as td:
+            rd = os.path.join(td, "run")
+            try:
+                run_window.main(_cfg(rd, bad))
+                assert False, f"expected SystemExit for task_sys_msg={bad!r}"
+            except SystemExit:
+                pass
+            # spent NOTHING: no journal / no db created before the guard
+            assert not os.path.exists(os.path.join(rd, "journal"))
+            assert not os.path.exists(os.path.join(rd, "programs.sqlite"))
+    # require_sys_msg=false + sentinel → proceeds with a warning
+    with tempfile.TemporaryDirectory() as td:
+        assert run_window.main(_cfg(os.path.join(td, "r"), "__UNSET_AUTHOR_AT_BOOT__", require=False)).get("ok") is True
+    # a real authored message is unaffected
+    with tempfile.TemporaryDirectory() as td:
+        assert run_window.main(_cfg(os.path.join(td, "r"), "solve the real task")).get("ok") is True
+    # both starters carry the sentinel
+    for skill in ("shinka-setup", "shinka-convert"):
+        p = _REPO_ROOT / "skills" / skill / "scripts" / "orchestrator_run.json"
+        assert "__UNSET_AUTHOR_AT_BOOT__" in open(p).read()
+    return None
+
+
+def test_fix_prompt_reads_only_metadata_channels():
+    """P6-T3 contract: the fix prompt's error section comes ONLY from the parent's
+    stdout_log/stderr_log metadata — so run_window blanking those channels when
+    use_text_feedback=false is a COMPLETE spoil mitigation."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import construct_mutation_prompt as cmp
+
+    def _fix_prompt(stderr):
+        parent = {"id": "p", "code": "x=1\n", "combined_score": 0.0,
+                  "metadata": {"stdout_log": "", "stderr_log": stderr}}
+        out = cmp.main({"parent": parent, "needs_fix": True, "language": "python",
+                        "patch_types": ["diff"], "patch_type_probs": [1.0],
+                        "task_sys_msg": "t", "seed": 0})
+        return (out.get("patch_sys", "") or "") + "\n" + (out.get("patch_msg", "") or "")
+
+    assert "HELDOUT=0.42" in _fix_prompt("boom HELDOUT=0.42")  # marker in channel → in prompt
+    assert "HELDOUT=0.42" not in _fix_prompt("")               # blank channel → NOT in prompt
+    return None
+
+
+def test_snapshot_restore_state():
+    """P7-T1: restore_state is a FULL rewind of archive + bandit, but the cost LEDGER is
+    PRESERVED at the live value (never rewound) so a revert can't be used to exceed budget."""
+    import glob
+    import json as _json
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import strategy_store as ss
+
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["SHINKA_ORCH_HISTORY_DIR"] = os.path.join(td, "hist")
+        try:
+            rd = os.path.join(td, "run")
+            os.makedirs(os.path.join(rd, "journal"))
+            open(os.path.join(rd, "programs.sqlite"), "w").write("DB_V1")
+            open(os.path.join(rd, "bandit_state.pkl"), "wb").write(b"BANDIT_V1")
+            with open(os.path.join(rd, "journal", "run.json"), "w") as f:
+                _json.dump({"run_id": "r", "total_cost": 1.0, "best_score": 0.5}, f)
+            snap = ss.snapshot_state(rd, label="pre")
+            # mutate all three + raise the LIVE cost to 5.0
+            open(os.path.join(rd, "programs.sqlite"), "w").write("DB_V2")
+            open(os.path.join(rd, "bandit_state.pkl"), "wb").write(b"BANDIT_V2")
+            with open(os.path.join(rd, "journal", "run.json"), "w") as f:
+                _json.dump({"run_id": "r", "total_cost": 5.0, "best_score": 0.9}, f)
+            out = ss.restore_state(rd, snap)
+            assert open(os.path.join(rd, "programs.sqlite")).read() == "DB_V1"  # archive rewound
+            assert open(os.path.join(rd, "bandit_state.pkl"), "rb").read() == b"BANDIT_V1"  # bandit rewound
+            run = _json.load(open(os.path.join(rd, "journal", "run.json")))
+            assert run["total_cost"] == 5.0  # cost ledger PRESERVED (not rewound to 1.0)
+            assert run["best_score"] == 0.5  # other state rewound to the snapshot
+            assert out["total_cost_preserved"] == 5.0
+            for _ in range(6):  # 1 + 6 = 7 snapshots, keep=5 → 5 remain
+                ss.snapshot_state(rd, keep=5)
+            assert len(glob.glob(os.path.join(td, "hist", "state_*"))) == 5
+        finally:
+            os.environ.pop("SHINKA_ORCH_HISTORY_DIR", None)
+    return None
+
+
+def test_rollback_fail_closed_and_collapse():
+    """P7-T2: fail CLOSED on no-data / NaN measure; P7-T3: counts-share collapse."""
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import rollback_decision as rb
+
+    assert rb.decide({}, {})["regressed"] is True  # empty measure → fail closed
+    assert rb.decide({}, {"delta": 0.0, "evaluation_failure_rate": 0.3},
+                     measure_crashed=True)["regressed"] is True
+    assert rb.decide({}, {"delta": float("nan"), "evaluation_failure_rate": 0.3})["regressed"] is True
+    flat = {"delta": 0.0, "threshold": 0.001, "evaluation_failure_rate": 0.3}
+    assert rb.decide(flat, dict(flat))["regressed"] is False  # valid flat window is NOT caught
+
+    prior = {**flat, "llm_bandit_counts": {"a": {"submitted": 5}, "b": {"submitted": 5}}}
+    collapsed = {**flat, "llm_bandit_counts": {"a": {"submitted": 20}, "b": {"submitted": 1}}}
+    r = rb.decide(prior, collapsed)
+    assert r["regressed"] is True and any("collapse" in x for x in r["reasons"])
+    assert rb.decide(prior, dict(prior))["regressed"] is False  # balanced arms → no collapse
+    return None
+
+
+def test_validate_select_llm_all_modes():
+    """P7-T5: validate_strategy smokes select+weights+update on the real select_llm.py."""
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import validate_strategy as vs
+
+    r = vs.main({"candidate_path": str(_ORCH / "scripts" / "select_llm.py"),
+                 "target_filename": "select_llm.py"})
+    assert r["valid"] is True, r
+    return None
+
+
+def test_dr_refusal_graceful():
+    """P7-T6: a refused/failed DR call returns a DEGRADED result (no crash) with a reason."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import deep_research
+    import shinka.llm.agent.dr_client as drc
+
+    orig_client, orig_run = drc.get_dr_async_client, drc.run_dr_call
+    try:
+        drc.get_dr_async_client = lambda: (object(), None)
+
+        async def _raise_cf(*a, **k):
+            raise RuntimeError("content_filter refused the query")
+
+        drc.run_dr_call = _raise_cf
+        out = deep_research.main({"query": "q", "program_context": "c"})
+        assert out["refused"] is True and out["reason"] == "content_filter", out
+
+        async def _raise_to(*a, **k):
+            raise TimeoutError("did not finish")
+
+        drc.run_dr_call = _raise_to
+        out2 = deep_research.main({"query": "q", "program_context": "c"})
+        assert out2["refused"] is True and out2["reason"].startswith("dr_failed"), out2
+    finally:
+        drc.get_dr_async_client, drc.run_dr_call = orig_client, orig_run
+    return None
+
+
+def test_deploy_bundle_rejected_guard():
+    """P7-T4: deploy_bundle refuses a candidate hash a prior bundle outcome REJECTED."""
+    import importlib
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        sc, hi = os.path.join(td, "scripts"), os.path.join(td, "hist")
+        os.makedirs(sc)
+        os.environ["SHINKA_ORCH_SCRIPTS_DIR"] = sc
+        os.environ["SHINKA_ORCH_HISTORY_DIR"] = hi
+        try:
+            import strategy_store as ss
+            importlib.reload(ss)
+            for f in ("compute_reward.py", "select_llm.py"):
+                open(os.path.join(sc, f), "w").write("def main(p):\n    return {'v': 1}\n")
+            c1, c2 = os.path.join(td, "c1.py"), os.path.join(td, "c2.py")
+            open(c1, "w").write("def main(p):\n    return {'v': 2}\n")
+            open(c2, "w").write("def main(p):\n    return {'v': 3}\n")
+            changes = [{"candidate_path": c1, "target": "compute_reward.py"},
+                       {"candidate_path": c2, "target": "select_llm.py"}]
+            res = ss.deploy_bundle(changes, reason="t", window_index=1)
+            ss.record_bundle_outcome(res["new_hashes"], J=0.0, accepted=False)
+            try:
+                ss.deploy_bundle(changes, reason="retry", window_index=2)
+                assert False, "expected ValueError for a rejected bundle hash"
+            except ValueError:
+                pass
+            ss.deploy_bundle(changes, reason="forced", window_index=3, force=True)  # force bypasses
+        finally:
+            os.environ.pop("SHINKA_ORCH_SCRIPTS_DIR", None)
+            os.environ.pop("SHINKA_ORCH_HISTORY_DIR", None)
+            importlib.reload(ss)  # restore real dirs for later tests
+    return None
+
+
+def test_per_call_cost_cap():
+    """P7-T7: the per-call max-output-token cap (the deliberate ~$10 guard) is pinned."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import _azure
+
+    assert _azure._resolve_max_output_tokens("azure-gpt-5.5") == 200_000
+    assert _azure._resolve_max_output_tokens("azure-gpt-5.4-pro") == 50_000
+    # P7-T7: DR carries its OWN per-call cap (≈$8 at 200k); verify the default is pinned.
+    import inspect as _inspect
+
+    import shinka.llm.agent.dr_client as drc
+    assert _inspect.signature(drc.run_dr_call).parameters["max_output_tokens"].default == 200_000
+    # the fix retry rides the SAME capped path as a normal mutation: mutate.py → _azure.bg_query
+    # (which resolves the cap), so a fix call cannot exceed the per-model cap either.
+    import mutate as _mutate
+    assert "bg_query" in _inspect.getsource(_mutate), "fix/mutation must share the capped bg_query path"
+    return None
+
+
+def test_nonfinite_score_guards():
+    """P10-T1/T2: a non-finite candidate score → failed-attempt reward (no NaN poisons
+    the bandit); negative finite scores are supported; the parent sampler's weighted
+    probabilities are never NaN even with a non-finite score in the pool."""
+    import math as _m
+
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import compute_reward
+    import sample_parent
+
+    for bad in (float("nan"), float("inf"), None):
+        out = compute_reward.main({"candidate": {"combined_score": bad, "correct": True},
+                                   "parent": {"combined_score": 0.5}, "mode": "absolute"})
+        assert out["reward"] is None, (bad, out)
+    # a NEGATIVE finite (correct-but-worse) score still yields a finite reward floored by
+    # reward_validity_floor → proves negative-score tasks are supported.
+    neg = compute_reward.main({"candidate": {"combined_score": -0.5, "correct": True},
+                               "parent": {"combined_score": -0.3}, "mode": "absolute",
+                               "reward_validity_floor": 0.001})
+    assert neg["reward"] is not None and abs((neg["reward"] - neg["baseline"]) - 0.001) < 1e-9, neg
+    # weighted-probs falls back to a finite uniform vector when a NaN would poison the sum
+    probs = sample_parent._weighted_probs([1.0, float("nan"), 2.0], [0, 0, 0], 10.0)
+    assert len(probs) == 3 and all(_m.isfinite(p) for p in probs) and abs(sum(probs) - 1.0) < 1e-6, probs
+    return None
+
+
+def test_end_of_run_summary_and_archive():
+    """P8-T1: ending summary carries the future-fixes header (not 'J trajectory');
+    finalize_run flips status; archive_run copies the COMPACT subset (excl call blobs);
+    None-defaulting never crashes; .gitignore carries the archive dir."""
+    import json as _json
+    import tempfile
+
+    import journal
+
+    with tempfile.TemporaryDirectory() as td:
+        rd = os.path.join(td, "run")
+        journal.init_run(rd, {"run_id": "ar", "goal": "g", "budget_usd": 10.0})
+        journal.append_window(rd, {"window_index": 0, "best_score_end": 1.5,
+                                    "total_programs": 3, "window_cost": 0.5,
+                                    "stagnation_flag": False, "island_health": []})
+        journal.log_call(rd, "dr", {"query": "q"}, {"brief": []}, cost=0.2, summary="s")
+        summ = journal.build_run_summary(rd)
+        assert "# Run Summary" in summ
+        assert "Future fixes for the user before the next run" in summ
+        assert "Progress trajectory" in summ and "J trajectory" not in summ
+
+        journal.finalize_run(rd, "budget_exhausted")
+        run = journal.read_run(rd)
+        assert run["status"] == "budget_exhausted" and run.get("finished_at")
+
+        open(os.path.join(rd, "RUN_SUMMARY.md"), "w").write(summ)
+        open(os.path.join(rd, "programs.sqlite"), "w").write("DB")
+        dest_root = os.path.join(td, "arch")
+        dest = journal.archive_run(rd, dest_root=dest_root)
+        assert os.path.basename(dest).startswith("ar__")
+        assert os.path.exists(os.path.join(dest, "journal", "run.json"))
+        assert os.path.exists(os.path.join(dest, "journal", "calls.jsonl"))
+        assert os.path.exists(os.path.join(dest, "programs.sqlite"))
+        assert os.path.exists(os.path.join(dest, "RUN_SUMMARY.md"))
+        assert not os.path.isdir(os.path.join(dest, "journal", "calls"))  # heavy blobs excluded
+
+        # None-defaulting: a run.json without run_id/finished_at derives both, no int(None)
+        rd2 = os.path.join(td, "run2")
+        os.makedirs(os.path.join(rd2, "journal"))
+        with open(os.path.join(rd2, "journal", "run.json"), "w") as f:
+            _json.dump({"total_cost": 0.0}, f)
+        assert "run2__" in journal.archive_run(rd2, dest_root=dest_root)
+
+    assert "orchestrator/run_archive/" in open(_REPO_ROOT / ".gitignore").read()
     return None
 
 
@@ -739,19 +1419,49 @@ def test_rollback_basket_and_foundation_guard():
         pass
 
 
-def test_skill_doc_teaches_new_levers_and_role2():
-    """Phase 8/9 (H8 doc-lint): SKILL.md teaches the role-2 lock-out duty + the H12 DR
-    self-check, documents the new mutable levers, and the main loop uses
-    --until-decision. A regression that drops the teaching fails here."""
+def test_skill_doc_teaches_run_loop_and_roles():
+    """P9-T9 doc-lint: SKILL.md + CLAUDE.md teach the NEW run loop + the two roles in
+    behavioral language, and the killed jargon is gone from PROSE. Assert durable
+    BEHAVIORS, never a codename being killed. (Atomic with P10-T5: the phantom levers are
+    dropped from both SKILL.md and this asserted set in one change.)"""
+    import re as _re
+
     skill = (_ORCH / "SKILL.md").read_text()
-    assert "locked out" in skill and "llm_bandit_counts" in skill, "role-2 teaching missing"
-    assert "force_explore" in skill and "epsilon" in skill, "recovery levers not taught"
-    assert "Pre-flight self-check" in skill and "reference_snippet" in skill, "H12 missing"
-    for knob in ("validity_floor", "reward_validity_floor", "reward_on_reject",
-                 "island_policy_driven", "brief_compose_mode", "azure_partial_output_mode",
-                 "unpriced_cost_mode"):
-        assert knob in skill, f"lever {knob} not documented in SKILL.md"
-    assert "--until-decision" in skill and "normal mode" in skill, "main-loop not corrected"
+    claude = (_REPO_ROOT / "CLAUDE.md").read_text()
+    # Strip fenced code blocks so the bare `J_score` JSON field (allowed) doesn't trip the
+    # absent-jargon check — only PROSE is checked for killed tokens. Flatten whitespace so
+    # a hard-wrapped multi-word phrase still matches as a substring.
+    skill_prose = _re.sub(r"```.*?```", "", skill, flags=_re.DOTALL)
+    skill_flat = " ".join(skill.split())
+    skill_prose_flat = " ".join(skill_prose.split())
+    claude_flat = " ".join(claude.split())
+
+    # PRESENT — the run-loop spine + the new mechanisms + the surviving real levers:
+    for s in ("warmup", "work score", "taper", "control-return", "woken", "cluster",
+              "automatic meta", "gpt-5.5", "per-island",
+              "model_collapse", "never auto-corrected",
+              "snapshot_state", "fails closed",
+              "ending document", "orchestrator/run_archive",
+              "auto_meta", "meta_model", "repair_trigger_fraction",
+              "validity_floor", "reward_validity_floor", "reward_on_reject",
+              "island_policy_driven", "brief_compose_mode",
+              "--until-decision", "shared rhythm",
+              "ORCHESTRATOR", "FRAMEWORK-AUDIT", "Do NOT read prior",
+              "fed verbatim into the fix prompt",
+              "~$10", "mutation / meta / DR / fix"):
+        assert s in skill_flat, f"SKILL.md missing behavioral teaching: {s!r}"
+
+    # ABSENT in PROSE — the killed jargon:
+    for bad in ("role-2", "role 2", "rung ", "EvoX", "J_score", "target score reached",
+                "azure_partial_output_mode", "unpriced_cost_mode"):
+        assert bad not in skill_prose_flat, f"killed jargon survives in SKILL.md prose: {bad!r}"
+    assert not _re.search(r"WS[1-7]\b", skill_prose_flat), "WSn codename survives in SKILL.md prose"
+    assert not _re.search(r"\btau\b", skill_prose_flat), "tau survives in SKILL.md prose"
+
+    # CLAUDE.md: both roles + the do-not-read rule.
+    assert "FRAMEWORK-AUDIT" in claude_flat and "ORCHESTRATOR" in claude_flat, "CLAUDE.md roles missing"
+    assert "run_archive" in claude_flat and "prior run's archive" in claude_flat, "CLAUDE.md do-not-read missing"
+    return None
 
 
 def test_bandit_reward_ranking():
@@ -820,14 +1530,434 @@ def test_cnot_eval_budget_invariant():
         mod.PER_TRIAL_TIMEOUT_S, mod.EVAL_WALLCLOCK_BUDGET_S)
 
 
+def test_repair_db_ops():
+    """P5-T1 (FOUNDATION DB ops): append_program_error re-truncates the COMBINED traceback to
+    ~8KB and bumps repair_attempts; tombstone_program preserves island_idx + the row but
+    removes the archive entry (NOT _evict_island's null-island)."""
+    import dataclasses
+    import json as _j
+
+    from shinka.database import Program, ProgramDatabase, DatabaseConfig
+
+    with tempfile.TemporaryDirectory() as td:
+        cfg = DatabaseConfig(db_path=os.path.join(td, "p.sqlite"), num_islands=2)
+        db = ProgramDatabase(cfg, embedding_model="", read_only=False)
+        try:
+            kw = {}
+            for f in dataclasses.fields(Program):
+                if f.default is not dataclasses.MISSING or f.default_factory is not dataclasses.MISSING:
+                    continue
+                tn = getattr(f.type, "__name__", str(f.type))
+                kw[f.name] = {"str": "", "int": 0, "float": 0.0, "bool": False}.get(tn, None)
+            kw.update(id="bad", code="x = 1\n", correct=False, combined_score=0.0,
+                      error_traceback="A" * 6000)
+            db.add(Program(**kw))
+            db.cursor.execute("SELECT island_idx FROM programs WHERE id='bad'")
+            isl0 = db.cursor.fetchone()[0]
+
+            assert db.append_program_error("bad", "B" * 6000) == 1
+            assert db.append_program_error("bad", "C" * 6000) == 2  # repair_attempts bumped
+            db.cursor.execute("SELECT error_traceback, island_idx FROM programs WHERE id='bad'")
+            tb, isl = db.cursor.fetchone()
+            assert len(tb) <= 8300, len(tb)        # COMBINED text re-truncated head+tail to ~8KB
+            assert isl == isl0                     # island preserved across appends
+
+            db.tombstone_program("bad")
+            db.cursor.execute("SELECT island_idx, metadata FROM programs WHERE id='bad'")
+            isl2, md2 = db.cursor.fetchone()
+            assert isl2 == isl0                                       # island_idx NOT nulled
+            assert _j.loads(md2 or "{}").get("repair_tombstoned") is True
+            db.cursor.execute("SELECT COUNT(*) FROM archive WHERE program_id='bad'")
+            assert db.cursor.fetchone()[0] == 0                       # removed from archive
+        finally:
+            db.close()
+    return None
+
+
+def test_failure_type_buckets_producer():
+    """P2-T4 (producer + field-name contract): the eval-failure bucketer is what CREATES
+    timeout_count / wrong_answer_count. A result carrying `timed_out:True` (the field
+    `evaluate.py` synthesizes) flows through to timeout_count; a plain incorrect (no
+    timed_out) → wrong_answer_count; a correct slot increments neither. Guards the
+    field-name contract between evaluate.py and run_window's bucketer."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    orig_eval = run_window._evaluate_candidate
+
+    def _fake_eval(cfg, program_path, results_dir, iter_index, generation):
+        base = {"combined_score": 0.0, "public_metrics": {}, "private_metrics": {},
+                "stdout_log": "", "stderr_log": "", "runtime_sec": 0.1}
+        if generation == 1:  # an evaluate.main-shaped TIMEOUT result
+            return {**base, "correct": False, "error": "t",
+                    "error_traceback": "EvaluationTerminated: ...", "timed_out": True,
+                    "runtime_sec": 9.9}
+        if generation == 2:  # ran to completion but WRONG (no timed_out key)
+            return {**base, "correct": False, "error": "w",
+                    "error_traceback": "AssertionError: wrong"}
+        return {**base, "combined_score": 1.0, "correct": True, "error": None,
+                "error_traceback": None}
+
+    try:
+        run_window._evaluate_candidate = _fake_eval
+        with tempfile.TemporaryDirectory() as td:
+            rd = os.path.join(td, "run")
+            os.makedirs(rd, exist_ok=True)
+            ip = os.path.join(rd, "i.py")
+            open(ip, "w").write("# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n")
+            cfg = {
+                "results_dir": rd, "run_id": "ftb", "budget_usd": 100.0,
+                "task": {"eval_program_path": "unused.py", "init_program_path": ip,
+                         "task_sys_msg": "x", "language": "python"},
+                "db_config": {"num_islands": 1, "archive_size": 20},
+                "evo": {"window_size": 2, "patch_types": ["diff"], "patch_type_probs": [1.0],
+                        "embedding_model": "text-embedding-3-small", "enable_novelty": False,
+                        "seed": 0, "auto_meta": False, "fix_retry_budget": 0},
+                "mock": {"enabled": True, "mutate_cost": 0.0,
+                         "scores_by_generation": {str(i): 1.0 for i in range(40)}},
+                "cadence": {"mode": "until_decision", "max_windows_per_call": 1},
+                "window_state": {"window_index": 0, "prior_low_streak": 0},
+            }
+            d = run_window.main(cfg)
+            assert d["timeout_count"] == 1, d.get("timeout_count")
+            assert d["wrong_answer_count"] == 1, d.get("wrong_answer_count")
+    finally:
+        run_window._evaluate_candidate = orig_eval
+    return None
+
+
+def test_log_step_reader_and_cli():
+    """P2-T1: log_step writes steps.jsonl; read_steps filters by generation; the `steps`
+    CLI view returns the same records."""
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import journal
+
+    with tempfile.TemporaryDirectory() as td:
+        journal.log_step(td, {"step": "a", "generation": 5})
+        journal.log_step(td, {"step": "b", "generation": 5})
+        journal.log_step(td, {"step": "c", "generation": 6})
+        assert len(journal.read_steps(td)) == 3
+        assert len(journal.read_steps(td, generation=5)) == 2
+        assert len(journal.read_steps(td, last_n=1)) == 1
+        # the `steps` CLI view (journal __main__ dispatch) is a thin wrapper over
+        # read_steps and returns the same records; read_steps is the substance asserted here.
+    return None
+
+
+def test_no_score_reminder():
+    """P4-T2: after several control-returns with NO work_score recorded, the harness emits
+    a one-line stderr reminder (the taper has no signal so it wakes every window)."""
+    import contextlib
+    import io
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    with tempfile.TemporaryDirectory() as td:
+        rd = os.path.join(td, "run")
+        os.makedirs(rd, exist_ok=True)
+        ip = os.path.join(rd, "i.py")
+        open(ip, "w").write("# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n")
+        cfg = {
+            "results_dir": rd, "run_id": "nsr", "budget_usd": 100.0,
+            "task": {"eval_program_path": "unused.py", "init_program_path": ip,
+                     "task_sys_msg": "x", "language": "python"},
+            "db_config": {"num_islands": 1, "archive_size": 20},
+            "evo": {"window_size": 1, "patch_types": ["diff"], "patch_type_probs": [1.0],
+                    "embedding_model": "text-embedding-3-small", "enable_novelty": False,
+                    "seed": 0, "auto_meta": False, "fix_retry_budget": 0},
+            "mock": {"enabled": True, "mutate_cost": 0.0,
+                     "scores_by_generation": {str(i): 1.0 for i in range(40)}},
+            "cadence": {"mode": "until_decision", "base_low": 5, "low_threshold": 1},
+            "window_state": {"window_index": 0, "prior_low_streak": 0},
+        }
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            for _ in range(4):  # ≥3 control-returns, never recording a work_score
+                run_window.main(cfg)
+        assert "no work_score recorded" in buf.getvalue(), buf.getvalue()[-300:]
+    return None
+
+
+def test_tombstone_first_reclaim():
+    """P5-T5: when the archive is full, a repair-tombstoned (dead) program is reclaimed
+    FIRST — evicted ahead of any live program, regardless of fitness. With no tombstoned
+    members present, eviction order is byte-identical to today (a worse candidate is not
+    inserted)."""
+    import dataclasses
+    import json as _json
+
+    from shinka.database import Program, ProgramDatabase, DatabaseConfig
+
+    def _mk(pid, score, tomb=False):
+        kw = {}
+        for f in dataclasses.fields(Program):
+            if f.default is not dataclasses.MISSING or f.default_factory is not dataclasses.MISSING:
+                continue
+            tn = getattr(f.type, "__name__", str(f.type))
+            kw[f.name] = {"str": "", "int": 0, "float": 0.0, "bool": False}.get(tn, None)
+        kw.update(id=pid, code="# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n",
+                  combined_score=score, correct=True)
+        if "generation" in {f.name for f in dataclasses.fields(Program)}:
+            kw.setdefault("generation", 0)
+        if "language" in {f.name for f in dataclasses.fields(Program)}:
+            kw["language"] = "python"
+        p = Program(**kw)
+        p.metadata = {"repair_tombstoned": True} if tomb else {}
+        return p
+
+    def _archive_ids(db):
+        db.cursor.execute("SELECT program_id FROM archive")
+        return {r[0] for r in db.cursor.fetchall()}
+
+    # (1) tombstoned member is reclaimed first, ahead of a higher-fitness live program
+    with tempfile.TemporaryDirectory() as td:
+        cfg = DatabaseConfig(db_path=os.path.join(td, "p.sqlite"), num_islands=1, archive_size=3)
+        db = ProgramDatabase(cfg, embedding_model="", read_only=False)
+        try:
+            db.add(_mk("live1", 0.8))
+            db.add(_mk("live2", 0.7))
+            db.add(_mk("tomb", 0.9, tomb=True))  # highest score, but DEAD
+            # ensure the tombstone flag is on the row the prune reads
+            db.cursor.execute("UPDATE programs SET metadata=? WHERE id=?",
+                              (_json.dumps({"repair_tombstoned": True}), "tomb"))
+            db.conn.commit()
+            assert _archive_ids(db) == {"live1", "live2", "tomb"}
+            db.add(_mk("new", 0.5))  # worse than every LIVE member → would NOT enter by fitness
+            ids = _archive_ids(db)
+            assert "tomb" not in ids, ids          # the dead row was reclaimed first
+            assert "new" in ids, ids               # ...letting the new program in
+        finally:
+            db.close()
+
+    # (2) no tombstoned members → unchanged behavior: a worse candidate is not inserted
+    with tempfile.TemporaryDirectory() as td:
+        cfg = DatabaseConfig(db_path=os.path.join(td, "p.sqlite"), num_islands=1, archive_size=3)
+        db = ProgramDatabase(cfg, embedding_model="", read_only=False)
+        try:
+            for pid, s in (("a", 0.9), ("b", 0.8), ("c", 0.7)):
+                db.add(_mk(pid, s))
+            db.add(_mk("worse", 0.5))
+            assert _archive_ids(db) == {"a", "b", "c"}  # worse candidate rejected, as today
+        finally:
+            db.close()
+    return None
+
+
+def test_repair_success_and_escalation():
+    """P5-T4 (acceptance items 3 + 5): a repair that SUCCEEDS archives a correct child (no
+    tombstone); `repair_escalation_model` routes the strike-two repair mutation to the
+    stronger model (off by default = the normal selected arm)."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    def _cfg(rd, incorrect, escalation=None):
+        os.makedirs(rd, exist_ok=True)
+        ip = os.path.join(rd, "i.py")
+        open(ip, "w").write("# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n")
+        evo = {"window_size": 1, "patch_types": ["diff"], "patch_type_probs": [1.0],
+               "embedding_model": "text-embedding-3-small", "enable_novelty": False,
+               "seed": 0, "auto_meta": False, "repair_trigger_fraction": 0.2,
+               "repair_attempt_cap": 2, "fix_retry_budget": 0, "llm_models": ["m1"]}
+        if escalation:
+            evo["repair_escalation_model"] = escalation
+        return {"results_dir": rd, "run_id": "rep2", "budget_usd": 100.0,
+                "task": {"eval_program_path": "unused.py", "init_program_path": ip,
+                         "task_sys_msg": "x", "language": "python"},
+                "db_config": {"num_islands": 1, "archive_size": 20}, "evo": evo,
+                "mock": {"enabled": True, "mutate_cost": 0.0,
+                         "scores_by_generation": {str(i): 1.0 for i in range(40)},
+                         "incorrect_generations": incorrect},
+                "cadence": {"mode": "until_decision", "max_windows_per_call": 1},
+                "window_state": {"window_index": 0, "prior_low_streak": 0}}
+
+    def _summary(rd, cfg):
+        return run_window.archive_query.main({
+            "db_path": os.path.join(rd, "programs.sqlite"),
+            "db_config": cfg["db_config"], "embedding_model": "text-embedding-3-small",
+            "query_type": "summary"})["result"]
+
+    # (3) a SUCCESSFUL repair archives a correct child, no tombstone
+    with tempfile.TemporaryDirectory() as td:
+        rd = os.path.join(td, "ok")
+        cfg = _cfg(rd, incorrect=[1])  # gen1 errored → triggers repair; the repair gen is CORRECT
+        run_window.main(cfg)
+        before = _summary(rd, cfg)["total"]
+        d1 = run_window.main(cfg)
+        after = _summary(rd, cfg)["total"]
+        assert after == before + 1, (before, after)  # a repaired-correct child IS archived
+        assert d1.get("repair_fail_count", 0) == 0 and d1.get("repair_tombstoned_count", 0) == 0, d1
+
+    # (5) escalation routing on strike two
+    captured = []
+    orig_mut = run_window.mutate.main
+
+    def _cap_mut(p):
+        captured.append(p.get("model_name"))
+        return orig_mut(p)
+
+    try:
+        run_window.mutate.main = _cap_mut
+        with tempfile.TemporaryDirectory() as td:
+            rd = os.path.join(td, "esc")
+            cfg = _cfg(rd, incorrect=[1, 2, 3], escalation="azure-gpt-5.4-pro@high")
+            run_window.main(cfg)   # w0: gen1 errored
+            run_window.main(cfg)   # w1: repair strike-1 fails → parent repair_attempts=1
+            captured.clear()
+            run_window.main(cfg)   # w2: repair strike-2 → escalation model routed
+            # "@high" is parsed into reasoning_effort, so the mutate model_name is the bare model.
+            assert "azure-gpt-5.4-pro" in captured, captured
+    finally:
+        run_window.mutate.main = orig_mut
+    return None
+
+
+def test_validate_select_llm_negative():
+    """P7-T5 (negative half): a select_llm variant whose WEIGHTS mode drops `counts` (the
+    collapse data source) fails validation, naming the missing key."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import validate_strategy as vs
+
+    stub = (
+        "import json, sys\n"
+        "def main(payload):\n"
+        "    mode = payload.get('mode', 'select')\n"
+        "    models = payload.get('models', ['m1', 'm2'])\n"
+        "    if mode == 'weights':\n"
+        "        return {'weights': [0.5, 0.5], 'models': models}\n"  # MISSING counts
+        "    if mode == 'update':\n"
+        "        return {'updated': True}\n"
+        "    return {'model_name': models[0]}\n"
+        "if __name__ == '__main__':\n"
+        "    _p = json.loads(sys.stdin.read() or '{}')\n"
+        "    _out = main(_p)\n"
+        "    _out.setdefault('ok', True)\n"
+        "    print(json.dumps(_out))\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        cand = os.path.join(td, "select_llm.py")
+        open(cand, "w").write(stub)
+        r = vs.main({"candidate_path": cand, "target_filename": "select_llm.py"})
+        assert r["valid"] is False, r
+        assert any("counts" in str(e) for e in r.get("errors", [])), r
+    return None
+
+
+def test_dr_client_cost_on_failure():
+    """P7-T6 (transport): run_dr_call attaches the billed token cost to the raised error on
+    a terminal-failed status AND on timeout, so a DR call that burned tokens then failed
+    still reports its spend to the ledger (the cost reflects usage when the model is priced)."""
+    import asyncio
+
+    import shinka.llm.agent.dr_client as drc
+
+    class _Usage:
+        input_tokens, output_tokens = 1000, 2000
+
+    class _Resp:
+        id = "r1"
+
+        def __init__(self, status):
+            self.status = status
+            self.usage = _Usage()
+
+    class _Responses:
+        def __init__(self, status):
+            self._status = status
+
+        async def create(self, **k):
+            return _Resp(self._status)
+
+        async def retrieve(self, rid):
+            return _Resp(self._status)
+
+    class _Client:
+        def __init__(self, status):
+            self.responses = _Responses(status)
+
+    err = None
+    try:
+        asyncio.run(drc.run_dr_call(_Client("failed"), model="o3-deep-research",
+                                    system_msg="s", user_msg="u", poll_interval_sec=0.0))
+    except RuntimeError as e:
+        err = e
+    assert err is not None and hasattr(err, "cost") and err.cost is not None, err
+    assert isinstance(err.cost, float) and err.cost >= 0.0, getattr(err, "cost", None)
+
+    terr = None
+    try:
+        asyncio.run(drc.run_dr_call(_Client("in_progress"), model="o3-deep-research",
+                                    system_msg="s", user_msg="u",
+                                    poll_interval_sec=0.0, poll_timeout_sec=-1.0))
+    except TimeoutError as e:
+        terr = e
+    assert terr is not None and hasattr(terr, "cost") and terr.cost is not None, terr
+    return None
+
+
+def test_dr_refusal_folds_cost_to_ledger():
+    """P7-T6 (script): a refused DR call still folds its billed cost into the ledger and
+    logs exactly one `dr` pointer to calls.jsonl (with its query preserved)."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import deep_research
+    import journal
+    import shinka.llm.agent.dr_client as drc
+
+    orig_client, orig_run = drc.get_dr_async_client, drc.run_dr_call
+    try:
+        drc.get_dr_async_client = lambda: (object(), None)
+
+        async def _raise_cf(*a, **k):
+            e = RuntimeError("content_filter refused")
+            e.cost = 0.05
+            raise e
+
+        drc.run_dr_call = _raise_cf
+        with tempfile.TemporaryDirectory() as td:
+            out = deep_research.main({"query": "q", "program_context": "c", "results_dir": td})
+            assert out["refused"] is True and out["cost"] >= 0.05 - 1e-9, out
+            dr_pointers = [c for c in journal.read_calls(td) if c.get("kind") == "dr"]
+            assert len(dr_pointers) == 1, journal.read_calls(td)
+    finally:
+        drc.get_dr_async_client, drc.run_dr_call = orig_client, orig_run
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
         ("record_policy", test_record_policy),
         ("journal_roundtrip", test_journal_roundtrip),
+        ("journal_ledger_durability", test_journal_ledger_durability),
         ("concern_bundle", test_concern_bundle),
         ("cadence_policy", test_cadence_policy),
+        ("work_score_readers", test_work_score_readers),
         ("budget_hardstop", test_budget_hardstop),
+        ("apply_exhausted_truthful_recording", test_apply_exhausted_truthful_recording),
+        ("diagnostics_sensor_fields", test_diagnostics_sensor_fields),
+        ("warmup_trace_and_cleanup", test_warmup_trace_and_cleanup),
+        ("meta_island_directions", test_meta_island_directions),
+        ("auto_meta_per_window", test_auto_meta_per_window),
+        ("repair_mode_lifecycle", test_repair_mode_lifecycle),
+        ("boot_guard", test_boot_guard),
+        ("fix_prompt_reads_only_metadata_channels", test_fix_prompt_reads_only_metadata_channels),
+        ("snapshot_restore_state", test_snapshot_restore_state),
+        ("rollback_fail_closed_and_collapse", test_rollback_fail_closed_and_collapse),
+        ("validate_select_llm_all_modes", test_validate_select_llm_all_modes),
+        ("dr_refusal_graceful", test_dr_refusal_graceful),
+        ("deploy_bundle_rejected_guard", test_deploy_bundle_rejected_guard),
+        ("per_call_cost_cap", test_per_call_cost_cap),
+        ("nonfinite_score_guards", test_nonfinite_score_guards),
+        ("end_of_run_summary_and_archive", test_end_of_run_summary_and_archive),
         ("immediate_fix", test_immediate_fix),
         ("meta_summarize_parsing", test_meta_summarize_parsing),
         ("meta_direction_sampling", test_meta_direction_sampling),
@@ -845,11 +1975,20 @@ if __name__ == "__main__":
         ("reward_validity_floor", test_reward_validity_floor),
         ("bg_call_incomplete_returns_failed_raises_with_cost", test_bg_call_incomplete_returns_failed_raises_with_cost),
         ("rollback_basket_and_foundation_guard", test_rollback_basket_and_foundation_guard),
-        ("skill_doc_teaches_new_levers_and_role2", test_skill_doc_teaches_new_levers_and_role2),
+        ("skill_doc_teaches_run_loop_and_roles", test_skill_doc_teaches_run_loop_and_roles),
         ("bandit_reward_ranking", test_bandit_reward_ranking),
         ("meta_direction_sampling_weighted", test_meta_direction_sampling_weighted),
         ("validate_bundle", test_validate_bundle),
         ("cnot_eval_budget_invariant", test_cnot_eval_budget_invariant),
+        ("repair_db_ops", test_repair_db_ops),
+        ("failure_type_buckets_producer", test_failure_type_buckets_producer),
+        ("log_step_reader_and_cli", test_log_step_reader_and_cli),
+        ("no_score_reminder", test_no_score_reminder),
+        ("tombstone_first_reclaim", test_tombstone_first_reclaim),
+        ("repair_success_and_escalation", test_repair_success_and_escalation),
+        ("validate_select_llm_negative", test_validate_select_llm_negative),
+        ("dr_client_cost_on_failure", test_dr_client_cost_on_failure),
+        ("dr_refusal_folds_cost_to_ledger", test_dr_refusal_folds_cost_to_ledger),
     ]
     ok = True
     for name, fn in tests:

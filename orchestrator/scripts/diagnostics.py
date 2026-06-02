@@ -25,7 +25,12 @@ OUTPUT (stdout JSON, "ok": true): window_index, iters_completed, best_score_star
   novelty_rejected_cost, evaluation_failure_rate (post-repair), fix_rate,
   fix_success_rate, needs_fix_rate, llm_bandit_weights, llm_bandit_counts,
   island_health [{id, best, diversity, stagnation_count, count}], stagnation_flag,
-  low_streak, exhausted_retry_slots, exhausted_retry_count, trigger_metric,
+  low_streak, exhausted_retry_slots, exhausted_retry_count, apply_exhausted_count,
+  apply_failure_rate, timeout_count, wrong_answer_count, errored_fraction (cumulative,
+  over all NON-tombstoned programs — distinct from the per-window evaluation_failure_rate),
+  model_collapse {top_arm, top_share, n_arms_active, collapsed} (counts-share, SURFACED
+  for the framework-audit check, never auto-corrected in steady-state), repair_mode_on,
+  repair_fail_count, repair_tombstoned_count, trigger_metric,
   total_programs, correct_programs. (run_window additionally attaches window_cost,
   total_cost, budget_remaining, budget_hit, windows_run, return_reason.)
 """
@@ -44,6 +49,29 @@ except ImportError:
     import stagnation_detector  # type: ignore
     import archive_query  # type: ignore
     import island_policy  # type: ignore
+
+
+def _model_collapse(counts: Dict[str, Any], frac: float = 0.85, min_pulls: int = 8) -> Dict[str, Any]:
+    """Surfaced model-picker collapse signal from per-arm SUBMITTED counts (fall back
+    to completed). Counts-based on purpose: a single arm's posterior WEIGHT caps at
+    1-epsilon, so weights can never reveal a collapse. Read-only and SURFACED for the
+    agent's cadenced framework-audit check; never auto-corrected in steady-state (the
+    only automatic use is judging a just-deployed rewrite, in rollback_decision)."""
+    subs: Dict[str, float] = {}
+    for arm, c in (counts or {}).items():
+        if isinstance(c, dict):
+            subs[arm] = float(c.get("submitted", c.get("completed", 0)) or 0)
+        else:
+            subs[arm] = float(c or 0)
+    total = sum(subs.values())
+    n_active = sum(1 for v in subs.values() if v > 0)
+    if not subs or total <= 0:
+        return {"top_arm": None, "top_share": 0.0, "n_arms_active": n_active, "collapsed": False}
+    top_arm = max(subs, key=lambda a: subs[a])
+    top_share = subs[top_arm] / total
+    collapsed = bool(top_share >= frac and n_active >= 2 and total >= min_pulls)
+    return {"top_arm": top_arm, "top_share": top_share,
+            "n_arms_active": n_active, "collapsed": collapsed}
 
 
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -118,6 +146,33 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         embedding_model=embedding_model,
     )
 
+    # P2-T3: errored_fraction over ALL NON-tombstoned programs (errored programs are
+    # never archived). Tombstoned (repair-removed) programs are EXCLUDED from both
+    # numerator and denominator so the repair latch RELEASES once they are removed.
+    total_progs = int(summary.get("total", 0) or 0)
+    correct_progs = int(summary.get("correct", 0) or 0)
+    tombstoned = int(summary.get("tombstoned_count", 0) or 0)
+    live_total = max(0, total_progs - tombstoned)
+    errored_fraction = (
+        max(0, (total_progs - correct_progs) - tombstoned) / live_total
+    ) if live_total else 0.0
+
+    # Failure-type echoes (counters CREATED by run_window: apply_exhausted [P1-T1],
+    # timeout/wrong [P2-T4]). apply_failure_rate is over attempted-or-apply-failed
+    # slots — distinct from evaluation_failure_rate (post-repair, over EVALUATED slots).
+    apply_exhausted_count = int(payload.get("apply_exhausted", 0) or 0)
+    timeout_count = int(payload.get("timeout_count", 0) or 0)
+    wrong_answer_count = int(payload.get("wrong_answer_count", 0) or 0)
+    _apply_denom = eval_total + apply_exhausted_count
+    apply_failure_rate = (apply_exhausted_count / _apply_denom) if _apply_denom else 0.0
+
+    model_collapse = _model_collapse(
+        payload.get("llm_bandit_counts", {}),
+        frac=float(payload.get("model_collapse_frac", 0.85) or 0.85),
+        min_pulls=int(payload.get("model_collapse_min_pulls", 8) or 8),
+    )
+    repair_mode_on = errored_fraction >= float(payload.get("repair_trigger_fraction", 0.20) or 0.20)
+
     return {
         "window_index": int(payload.get("window_index", 0) or 0),
         "iters_completed": int(payload.get("iters_completed", 0) or 0),
@@ -126,7 +181,6 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "delta": stag["delta"],
         "J_score": stag["J_score"],
         "threshold": stag.get("threshold"),
-        "current_strategy_hash": payload.get("current_strategy_hash"),  # deprecated
         "strategy_fingerprint": payload.get("strategy_fingerprint", {}),
         "novelty_acceptance_rate": novelty_acceptance_rate,
         "novelty_rejected_cost": float(payload.get("novelty_rejected_cost", 0.0) or 0.0),
@@ -141,6 +195,16 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "low_streak": stag["low_streak"],
         "exhausted_retry_slots": payload.get("exhausted_retry_slots", []),
         "exhausted_retry_count": int(payload.get("exhausted_retry_count", 0) or 0),
+        # P2-T3 failure-type + structural sensor fields.
+        "apply_exhausted_count": apply_exhausted_count,
+        "apply_failure_rate": apply_failure_rate,
+        "timeout_count": timeout_count,
+        "wrong_answer_count": wrong_answer_count,
+        "errored_fraction": errored_fraction,
+        "model_collapse": model_collapse,
+        "repair_mode_on": repair_mode_on,
+        "repair_fail_count": int(payload.get("repair_fail_count", 0) or 0),
+        "repair_tombstoned_count": int(payload.get("repair_tombstoned_count", 0) or 0),
         # echo the active trigger metric (was threaded in but never emitted/read).
         "trigger_metric": payload.get("trigger_metric", "hybrid"),
         "total_programs": summary.get("total"),

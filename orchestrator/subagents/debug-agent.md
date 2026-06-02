@@ -18,6 +18,9 @@ decides what to do with it.
 - The full evaluator traceback / error message.
 - The parent program's code.
 - The window's diagnostics JSON (failure rate, exhausted_retry_slots).
+- The failing generation's per-step trace (`journal/steps.jsonl`, if tracing was on for
+  that window) — the assembled-prompt summary + the model's output for that gen, so you
+  can see what the prompt actually asked and what came back.
 - The run directory (so you can read `programs.sqlite` via the scripts below).
 
 ## How to investigate

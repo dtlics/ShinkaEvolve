@@ -25,7 +25,7 @@ INPUT (stdin JSON):
     "patch_types": ["diff","full","cross"],
     "patch_type_probs": [0.6,0.3,0.1],
     "language": "python",
-    "use_text_feedback": false,
+    "use_text_feedback": true,   # default true (repair feedback ON); false on a spoil-risk task
     "inspiration_sort_order": "ascending",
     "extra_guidance": str | null,   # appended to the system prompt (rewrite lever)
     "seed": int | null
@@ -75,7 +75,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         language=payload.get("language", "python"),
         patch_types=payload.get("patch_types"),
         patch_type_probs=payload.get("patch_type_probs"),
-        use_text_feedback=bool(payload.get("use_text_feedback", False)),
+        use_text_feedback=bool(payload.get("use_text_feedback", True)),
         inspiration_sort_order=payload.get("inspiration_sort_order", "ascending"),
     )
 

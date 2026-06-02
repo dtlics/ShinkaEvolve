@@ -136,6 +136,20 @@ CONTRACTS: Dict[str, Dict[str, Any]] = {
             "models": ["m1", "m2"], "state": {}, "seed": 0,
         },
         "invariant": None,
+        # P7-T5: also smoke the weights + update modes (the bandit-counts snapshot is the
+        # collapse + lock-out data source), so a rewrite that breaks them is caught before
+        # deploy. Each uses a FRESH state_path under the temp dir.
+        "extra_payloads": [
+            {"label": "weights", "required_keys": {"weights", "counts", "models"},
+             "build_payload": lambda ctx: {
+                 "mode": "weights", "models": ["m1", "m2"], "bandit_kwargs": {},
+                 "state_path": os.path.join(ctx["tmp_dir"], "bandit_weights.pkl")}},
+            {"label": "update", "required_keys": {"updated"},
+             "build_payload": lambda ctx: {
+                 "mode": "update", "models": ["m1", "m2"], "bandit_kwargs": {},
+                 "arm": "m1", "reward": 1.0, "baseline": 0.0, "cost": 0.1,
+                 "state_path": os.path.join(ctx["tmp_dir"], "bandit_update.pkl")}},
+        ],
     },
     "island_policy.py": {
         "required_keys": {"actions"},
@@ -166,12 +180,21 @@ CONTRACTS: Dict[str, Dict[str, Any]] = {
         "invariant": None,
     },
     "meta_summarize.py": {
-        "required_keys": {"recommendations", "directions", "failure_note"},
+        "required_keys": {"recommendations", "directions", "failure_note", "island_directions"},
         "needs_archive": False,
         "build_payload": lambda ctx: {
-            "mock": True, "mock_text": "1. try simulated annealing", "goal": "x",
+            "mock": True, "goal": "x",
+            "mock_text": (
+                '{"directions": [{"text": "try simulated annealing", "weight": 0.7}], '
+                '"failure_note": "timeouts dominated", '
+                '"island_directions": [{"island_idx": 0, "text": "greedy"}, '
+                '{"island_idx": 1, "text": "exact F2 elimination"}]}'
+            ),
         },
-        "invariant": None,
+        "invariant": lambda out, ctx: (
+            None if isinstance(out.get("island_directions"), list)
+            else "meta must return island_directions as a list"
+        ),
     },
     "cadence_policy.py": {
         "required_keys": {"return", "reason"},
@@ -319,6 +342,24 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             msg = inv(out, ctx)
             if msg:
                 errors.append(msg)
+
+        # P7-T5: smoke EXTRA modes (e.g. select_llm weights + update) so a rewrite that
+        # breaks the bandit-counts snapshot — the collapse + lock-out data source — is
+        # caught BEFORE deploy, not silently at runtime.
+        for extra in spec.get("extra_payloads", []):
+            _label = extra.get("label", "extra")
+            try:
+                _eproc = _run_candidate(candidate_path, extra["build_payload"](ctx))
+                _eout = json.loads(_eproc.stdout or "{}")
+            except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError) as _exc:
+                errors.append(f"{_label} mode failed: {_exc}")
+                continue
+            if not _eout.get("ok"):
+                errors.append(f"{_label} mode returned ok=false")
+                continue
+            _emiss = set(extra["required_keys"]) - set(_eout.keys())
+            if _emiss:
+                errors.append(f"{_label} mode missing keys: {sorted(_emiss)}")
 
     return {
         "valid": len(errors) == 0,

@@ -21,8 +21,15 @@ INPUT (stdin JSON):
     "db_path": str, "db_config": {..}, "embedding_model": str,
     "island_idx": int | null,     # null => auto-select uniformly among initialized islands
     "seed": int | null,           # for deterministic sampling (tests/parity)
-    "validity_floor": float | null  # O6 lever: floor VALID parents' scores; null = inert
+    "validity_floor": float | null,  # O6 lever: floor VALID parents' scores; null = inert
+    "select": "errored" | null,   # P5 repair mode: pick an ERRORED parent to fix in place
+                                  #   (no inspirations, needs_fix=True); skips tombstoned +
+                                  #   attempt-cap-reached rows. null = normal selection.
+    "repair_attempt_cap": int     # default 2; an errored parent past the cap is not picked
   }
+
+Repair mode (``select="errored"``) and the bootstrap fallback both SKIP tombstoned
+(repair-removed) programs so a dead row is never re-selected.
 
 OUTPUT (stdout JSON):
   {
@@ -58,6 +65,11 @@ def _stable_sigmoid(x: float) -> float:
     return z / (1.0 + z)
 
 
+def _is_tombstoned(p) -> bool:
+    """True if a program was repair-tombstoned (removed from the sampling pool, P5)."""
+    return (getattr(p, "metadata", None) or {}).get("repair_tombstoned") is True
+
+
 def _median(xs: List[float]) -> float:
     if not xs:
         return 0.0
@@ -65,6 +77,17 @@ def _median(xs: List[float]) -> float:
     n = len(s)
     mid = n // 2
     return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0
+
+
+def _finite_score(x: Any) -> float:
+    """Coerce a program score to a finite float (NaN / inf / None → 0.0). Defensive: a
+    resumed / foreign / shared archive could carry a non-finite score that would otherwise
+    NaN the whole weighted-probability vector (P10-T2)."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if math.isfinite(v) else 0.0
 
 
 def _weighted_probs(scores: List[float], children: List[int], lam: float) -> List[float]:
@@ -78,7 +101,7 @@ def _weighted_probs(scores: List[float], children: List[int], lam: float) -> Lis
         h_i = 1.0 / (1.0 + (n_i or 0))
         weights.append(s_i * h_i)
     total = sum(weights)
-    if total > 0:
+    if total > 0 and math.isfinite(total):
         return [w / total for w in weights]
     n = len(scores)
     return [1.0 / n] * n if n else []
@@ -133,6 +156,31 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     finally:
         db.close()
 
+    # P5-T3: REPAIR-mode selection. When the harness latches repair mode it asks for an
+    # ERRORED parent to fix IN PLACE (no inspirations — the repair prompt uses the
+    # program's OWN failure). Skip tombstoned (already-removed) rows and rows that have
+    # used up their repair attempts. If the errored pool is empty, fall through to the
+    # normal path so a spurious repair request can never crash.
+    if payload.get("select") == "errored":
+        cap = int(payload.get("repair_attempt_cap", 2) or 2)
+        errored_pool = [
+            p for p in programs
+            if not getattr(p, "correct", False)
+            and not _is_tombstoned(p)
+            and int(((getattr(p, "metadata", None) or {}).get("repair_attempts", 0)) or 0) < cap
+        ]
+        if errored_pool:
+            parent = max(errored_pool, key=lambda p: getattr(p, "generation", 0))
+            return {
+                "parent_id": parent.id,
+                "island_idx": getattr(parent, "island_idx", None),
+                "archive_inspiration_ids": [],
+                "top_k_inspiration_ids": [],
+                "needs_fix": True,
+                "n_candidates": len(errored_pool),
+                "selection_probs": [],
+            }
+
     archived_correct = [
         p for p in programs if getattr(p, "in_archive", False) and getattr(p, "correct", False)
     ]
@@ -141,11 +189,14 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not archived_correct:
         # Prefer the best correct program; else the earliest program (the seed).
         correct = [p for p in programs if getattr(p, "correct", False)]
+        # Exclude tombstoned (repair-removed) rows from the bootstrap fallback so a dead
+        # row is never re-selected as the seed (correct programs are never tombstoned).
+        live_incorrect = [p for p in programs if not _is_tombstoned(p)]
         if correct:
             parent = max(correct, key=lambda p: getattr(p, "combined_score", 0.0))
             needs_fix = False
-        elif programs:
-            parent = min(programs, key=lambda p: getattr(p, "generation", 0))
+        elif live_incorrect:
+            parent = min(live_incorrect, key=lambda p: getattr(p, "generation", 0))
             needs_fix = not getattr(parent, "correct", False)
         else:
             raise RuntimeError("archive is empty; cannot sample a parent")
@@ -178,7 +229,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     else:
         pool = archived_correct
 
-    scores = [float(getattr(p, "combined_score", 0.0) or 0.0) for p in pool]
+    scores = [_finite_score(getattr(p, "combined_score", 0.0)) for p in pool]
     # MUTABLE-LEVER (O6 — parent-selection score scale): clamp VALID parents'
     # scores to a floor so valid-but-no-gain candidates stay selectable above the
     # bottom of the pool. Default None = inert (preserves WeightedSamplingStrategy

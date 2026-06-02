@@ -39,6 +39,9 @@ OUTPUT (stdout JSON):
     "brief": [ {idea, rationale, reference_source, reference_snippet, gotchas} ],
     "raw_text": str, "cost": float, "model": str
   }
+  On a REFUSED/FAILED call (P7-T6): { "refused": true, "degraded": true,
+    "reason": "content_filter" | "dr_failed:<...>", "brief": [], "cost": <billed> } —
+    the query is preserved in the journal; RESHAPE the query, never re-fire the same one.
 """
 
 from __future__ import annotations
@@ -134,23 +137,43 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     import asyncio
     from shinka.llm.agent.dr_client import get_dr_async_client, run_dr_call
 
-    client, _base = get_dr_async_client()
-    text, token_cost = asyncio.run(
-        run_dr_call(
-            client,
-            model=model,
-            system_msg=system_msg,
-            user_msg=user_msg,
-            reasoning_effort=payload.get("reasoning_effort", "medium"),
-            max_tool_calls=int(payload.get("max_tool_calls", 20)),
-            background=bool(payload.get("background", True)),
-            call_metadata={"purpose": "dr_stage_c", "source": "orchestrator"},
-        )
-    )
-    # o3-deep-research always runs web_search internally (~10-30 calls/query at
-    # $10/1k = $0.10-0.30), which is NOT in token usage. Add a conservative
-    # surcharge so the budget over-estimates rather than under-counts DR spend.
+    # web-search surcharge (the DR model runs web_search internally; not in token usage).
     search_surcharge = float(payload.get("search_surcharge_usd", 0.30))
+    client, _base = get_dr_async_client()
+    try:
+        text, token_cost = asyncio.run(
+            run_dr_call(
+                client,
+                model=model,
+                system_msg=system_msg,
+                user_msg=user_msg,
+                reasoning_effort=payload.get("reasoning_effort", "medium"),
+                max_tool_calls=int(payload.get("max_tool_calls", 20)),
+                background=bool(payload.get("background", True)),
+                call_metadata={"purpose": "dr_stage_c", "source": "orchestrator"},
+            )
+        )
+    except Exception as exc:
+        # P7-T6: a refused/failed DR call must NOT crash the orchestrator. Classify the
+        # reason, fold the billed cost (the transport attached err.cost) into the ledger
+        # so the spend isn't lost, and return a DEGRADED result with the query preserved
+        # so the agent can RESHAPE the query — a content_filter refusal almost always
+        # means a "reproduce paper X" framing; never re-fire the same query shape.
+        _txt = str(exc).lower()
+        reason = ("content_filter" if ("content_filter" in _txt or "content filter" in _txt)
+                  else f"dr_failed:{exc}")
+        _billed = float(getattr(exc, "cost", 0.0) or 0.0)
+        if _billed > 0:
+            _billed += search_surcharge
+        _common.log_external_call(
+            payload.get("results_dir"), "dr",
+            {"query": query, "program_context": program_context, "model": model,
+             "reasoning_effort": payload.get("reasoning_effort", "medium")},
+            {"refused": True, "reason": reason, "error": str(exc)},
+            cost=_billed, summary=f"DR refused/failed: {reason}",
+        )
+        return {"brief": [], "raw_text": "", "cost": _billed, "model": model,
+                "refused": True, "degraded": True, "reason": reason}
     cost = float(token_cost) + search_surcharge
     brief = _parse_brief(text)
     # WS7: persist the FULL DR call (query + program_context + raw output) to the

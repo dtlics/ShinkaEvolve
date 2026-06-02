@@ -31,15 +31,15 @@
 
 ## Cell A — pure-code, MUTABLE (the strategy files)
 
-These implement decision policies with no LLM call. They are the EvoX rewrite
-targets. Each becomes a `scripts/*.py` with a stable JSON contract.
+These implement decision policies with no LLM call. They are the mutable
+strategy-rewrite targets. Each becomes a `scripts/*.py` with a stable JSON contract.
 
 | Subroutine | Wraps (from audit) | Policy it owns | Why mutable |
 |---|---|---|---|
 | `sample_parent.py` | `ProgramDatabase.sample_with_fix_mode` → island_sampler + parents + inspirations ([dbase.py:1372](shinka/database/dbase.py), [parents.py](shinka/database/parents.py), [island_sampler.py](shinka/database/island_sampler.py), [inspirations.py](shinka/database/inspirations.py)) | which island, which parent (power_law/weighted/beam/…), which inspirations + ordering, fix-mode fallback | exploration/exploitation balance is the #1 lever when search stalls |
 | `novelty_check.py` | `NoveltyJudge.assess_novelty_with_rejection_sampling` ([novelty_judge.py:60](shinka/core/novelty_judge.py)) | embedding-cosine threshold + accept/reject/resample logic | rejection rate directly throttles diversity; classic plateau knob |
 | `select_llm.py` | `AsymmetricUCB.select_llm`/`posterior`/`update` ([prioritization.py:170/601/470](shinka/llm/prioritization.py)) | arm-selection (UCB vs Thompson vs forced mix), reward shaping, cost blending | when the bandit collapses to one model and J is flat, re-exploration must be forced |
-| `stagnation_detector.py` | **new** (no Shinka equivalent; cf. `is_stagnant` [dbase.py](shinka/database/dbase.py)) | compute `J=Δ/√W` (INFORMATIONAL only — rollback uses the multi-signal `rollback_decision.py`, not J), set `stagnation_flag` when a window stays "low" (`Δ ≤ max(stagnation_abs_floor, stagnation_rel_frac·s_start)`) for `consecutive_required` windows | the meta-loop trigger; the hybrid floors are the tuning surface (the old `J<τ` guard and the `log(1+s_start)` J formula are DEPRECATED — F16) |
+| `stagnation_detector.py` | **new** (no Shinka equivalent; cf. `is_stagnant` [dbase.py](shinka/database/dbase.py)) | compute `J=Δ/√W` (INFORMATIONAL only — rollback uses the multi-signal `rollback_decision.py`, not J), set `stagnation_flag` when a window stays "low" (`Δ ≤ max(stagnation_abs_floor, stagnation_rel_frac·s_start)`) for `consecutive_required` windows | the meta-loop trigger; the hybrid floors are the tuning surface |
 | `island_policy.py` | `CombinedIslandManager` migrate/spawn/retire ([islands.py:498](shinka/database/islands.py)), `check_and_spawn_island_if_stagnant` | when to fork a fresh island, retire a collapsed one, migrate elites | population-structure repair when an island's diversity dies |
 
 **Non-obvious calls, justified:**
@@ -168,9 +168,9 @@ construction* is the evolvable part.
 ## Subroutines that are NEW (no existing code to wrap)
 
 `stagnation_detector.py` (cell A) and `diagnostics.py`'s window-JSON assembly
-(cell B) have no Shinka equivalent — they implement the EvoX window/J-score that
-the original Shinka codebase lacked. They are written fresh, drawing the J formula
-from the brief and the "gens since best improved" idea from `is_stagnant`.
+(cell B) have no Shinka equivalent — they implement the window/progress-score loop
+that the original Shinka codebase lacked. They are written fresh, drawing the
+"gens since best improved" idea from `is_stagnant`.
 
 ## Existing subsystems consciously left OUT of the new harness
 

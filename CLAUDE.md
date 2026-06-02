@@ -10,34 +10,52 @@ The outer `Shinka` repo at `/Users/dantongli/GIthub/Shinka/` is a thin shim that
 
 ## Your standing role: the evolutionary orchestrator
 
-When asked to run, optimize, evolve, or improve a program in this repo, **you are
-the orchestrator / outer loop** of the evolutionary system in [`orchestrator/`](orchestrator/).
-Read [`orchestrator/SKILL.md`](orchestrator/SKILL.md) — it is your operating
-playbook — before acting. In short:
+When asked to run, optimize, evolve, or improve a program in this repo, **you wear two
+hats** for the evolutionary system in [`orchestrator/`](orchestrator/): the **ORCHESTRATOR**
+(the operational, in-the-flow jobs the run can't proceed without — author the goal, write
+DR queries, triage briefs, spawn/ground islands) and the **OUTER-LOOP / FRAMEWORK-AUDIT**
+role (judge whether the deterministic framework code itself is flawed and rewrite the
+mutable strategy code; this runs on a tapering cadence — frequent early, sparse once the
+framework proves robust). Read [`orchestrator/SKILL.md`](orchestrator/SKILL.md) — your
+operating playbook — before acting. In short:
 
-- **You drive windows, not mutations.** The inner loop (`orchestrator/harness/run_window.py`)
-  runs W iterations per call and returns a diagnostics JSON. You read it between
-  windows and decide whether to intervene.
-- **Inner-loop LLM calls go to Azure, never to you.** Mutations/fixes/judges are
-  made by `orchestrator/scripts/*` calling Azure in background-poll mode. Never
-  simulate a mutation in your own context — that breaks the 100× cost asymmetry.
-  Your tokens are for window-level reasoning only.
-- **Your power is rewriting strategy CODE.** When the search stagnates, you
-  rewrite the mutable policy files in `orchestrator/scripts/` (sampling, novelty,
-  bandit, reward, prompt, stagnation, island, fix, record policies) — as whole
-  *concerns* (generation + consumption together), via the validate → deploy →
-  measure → rollback protocol. You must NOT touch the **foundation** (sqlite
-  schema, the JSON contract, the evaluator, the user's `evaluate.py`/`initial.*`).
-  Defer foundation ideas to the end-of-run `RUN_SUMMARY.md`.
-- **Do not stop until a termination criterion is met.** A run is one long
-  consecutive process; keep invoking windows. The healthiest run is fifty
-  windows read with no intervention.
-- **The budget is hard-capped in code.** Set `budget_usd` in the run config; the
-  harness keeps a cost ledger (`journal/run.json` → `total_cost`) summing every
-  LLM call (mutation/meta/deep-research/embeddings) + your logged interventions,
-  and `run_window` hard-stops at the cap (`return_reason="budget_exhausted"`).
-  Before any discretionary `meta_summarize`/`deep_research` call, check
-  `journal.budget_remaining(...)` and log its cost.
+- **The run loop:** warmup → background-launched window-cluster → automatic per-window
+  meta → framework-audit + DR checks (both on one shared, tapering rhythm at each
+  control-return) → record a work score → termination → end-of-run archive. The cluster
+  (`run_window.py --until-decision`) returns control by EXITING; you are woken, read the
+  diagnostics, and act. You are not in the path of every mutation.
+- **Boot is your first critical-path job — and it must not spoil the metric.** You author
+  the `task_sys_msg` (goal + hard constraints + the score *shape* + an abstract runtime
+  caution — never the held-out numbers). The harness **refuses to start** while
+  `task_sys_msg` is missing/empty or still the `__UNSET_AUTHOR_AT_BOOT__` sentinel the
+  starter ships. Run the spoiling-risk self-check first: the evaluator's error text rides
+  back into the fix/repair prompt (the harness backfills it into `stdout_log`/`stderr_log`,
+  gated by `use_text_feedback`, default on) — if that could leak the held-out metric, STOP
+  and ask the human; the complete mitigation is `use_text_feedback:false`. See SKILL.md "Boot".
+- **Inner-loop LLM calls go to Azure, never to you.** Mutations/fixes/meta are made by
+  `orchestrator/scripts/*` calling Azure in background-poll mode. Never simulate a mutation
+  in your own context — that breaks the 100× cost asymmetry. Your tokens are for
+  control-return reasoning + writing the DR query.
+- **The automatic meta round is per-window, not yours.** Deterministic code calls it each
+  window (default `azure-gpt-5.5` medium) → per-island directions auto-recorded as briefs,
+  so islands differentiate BY DEFAULT. You don't hand-author briefs.
+- **Your framework-audit power is rewriting strategy CODE.** When you spot a framework
+  flaw, rewrite the mutable policy files in `orchestrator/scripts/` — as whole *concerns* —
+  via the snapshot → reason → deploy → measure-awake → revert cycle. Rollback FAILS CLOSED
+  on no/NaN measure data; a revert is a full rewind of code + archive DB + bandit but NEVER
+  rewinds the cost ledger (spend stays counted). You must NOT touch the **foundation**
+  (sqlite schema, the JSON contract, the evaluator, the user's `evaluate.py`/`initial.*`).
+  Defer foundation ideas to the end-of-run **ending document**.
+- **Do not stop until a termination criterion is met:** budget exhausted; user says stop;
+  OR five consecutive control-returns each with an intervention (a DR round or a framework
+  change), at least one being a DR. Keep launching the next cluster.
+- **The budget is hard-capped in code and the ledger is crash-durable.** Set `budget_usd`;
+  the harness sums every LLM cost (mutation/meta/DR/embeddings) + your logged interventions
+  and hard-stops at the cap (`budget_exhausted`); a per-call ~$10 max-output-token cap
+  bounds any single call. Pass `results_dir` to `meta_summarize`/`deep_research` so they
+  self-log their cost — do NOT also `append_intervention` it (double-count). If `run.json`
+  is ever corrupted the ledger is rebuilt by recomputing from the journal streams; the only
+  spend a recompute can't recover is a boot-time embedding logged before the first window.
 - **This repo's shinka is the only one used.** `run_window` asserts `shinka`
   resolves to this worktree at startup; the orchestrator scripts force it onto
   `sys.path` first and the eval subprocess inherits a repo-root `PYTHONPATH`, so
@@ -89,7 +107,7 @@ Both endpoints' base_url is built by appending `/openai/v1` to the bare resource
 
 ### Reasoning-effort gotcha
 
-Setting `reasoning_effort: low` errors out for `azure-gpt-5.4-pro` (it rejects `low`). Use `medium` (or `high`) for any pool containing `gpt-5.4-pro`. The cheaper models support all three. For the meta / novelty helper calls (typically `azure-gpt-5.4-mini`), `low` is fine and saves cost.
+Setting `reasoning_effort: low` errors out for `azure-gpt-5.4-pro` (it rejects `low`). Use `medium` (or `high`) for any pool containing `gpt-5.4-pro`. The cheaper models support all three. The **automatic per-window meta round** defaults to `azure-gpt-5.5` at `medium` (raise `evo.meta_model` to `azure-gpt-5.4-pro@high` only when the directions are worth the high cost — pro rejects `low`); novelty embeddings need no reasoning effort.
 
 ### Smoke tests
 
@@ -111,42 +129,41 @@ windows:
 python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
 ```
 
-**Long / unattended runs — avoid the idle-sleep kill.** `run_window` *self-caffeinates*
-on macOS (holds a `PreventUserIdleSystemSleep` assertion for its lifetime), so a
-direct invocation won't be reaped by a host idle-sleep mid-run (the cause of
-earlier mid-run kills — the Mac idle-slept on battery and even on AC where
-`pmset sleep`=1 min). For runs you'll leave unattended, launch via the detached
-wrapper so the run also survives the agent shell/turn ending:
+**Long / unattended runs — stay alive, no deploy-and-walk-away.** `run_window`
+*self-caffeinates* on macOS (holds a `PreventUserIdleSystemSleep` assertion for its
+lifetime) so a long cluster isn't reaped by a host idle-sleep (the cause of earlier
+mid-run kills). The wake primitive is simply the **background-launched
+`run_window --until-decision`**: it returns control by EXITING at the cluster boundary
+and re-invokes you, so you stay alive and in the loop (warmup is fully hands-on; the real
+run is event-driven on the taper). Recover any kill with `run_window.py --resume`. Use
+`--warmup` (throwaway db, per-step trace) for the boot oversight and `--windows 1
+--trace-steps` for a framework-audit measure window. Caveat caffeinate can't beat: a
+**closed laptop lid** (clamshell, no external display) forces hardware sleep — keep the
+lid open (or on AC).
 
-```bash
-python orchestrator/harness/run_detached.py --config <run>/run.json --until-decision [--resume]
-# returns immediately with {detached_pid, log, ...}; monitor via journal/run.json +
-# windows.jsonl; recover from any kill with `run_window.py --resume`.
-```
-
-Caveat caffeinate can't beat: a **closed laptop lid** (clamshell, no external
-display) forces hardware sleep — keep the lid open (or on AC) for long runs.
-
-The inner loop runs windows autonomously and returns to you only on stagnation
-(or a window cap). You read the diagnostics, optionally rewrite a mutable
-strategy file via the validate → deploy → measure → rollback protocol, and
-continue until a termination criterion is met. Per-run artifacts (the archive
-`programs.sqlite`, `journal/`, per-strategy snapshots in
-`orchestrator/strategy_history/`) live under the run's `results_dir`
-(gitignored). The old `shinka_run` CLI was removed in the Azure-only prune.
+The cluster returns control on stagnation or at the work-score taper boundary; you read
+the diagnostics, optionally rewrite a mutable strategy file via the snapshot → reason →
+deploy → measure-awake → revert cycle, and continue until a termination criterion is met.
+Per-run artifacts (the archive `programs.sqlite`, `journal/`, per-strategy + per-state
+snapshots in `orchestrator/strategy_history/`) live under the run's `results_dir`
+(gitignored); a finished run is archived to `orchestrator/run_archive/` (also gitignored).
+The old `shinka_run` CLI was removed in the Azure-only prune.
 
 ### Active user task
 
 [`tasks/cnot_grid_synth/`](tasks/cnot_grid_synth/) — CNOT-equivalent linear-function synthesis on a 2D L×L grid. EVOLVE-BLOCK in [initial.py](tasks/cnot_grid_synth/initial.py); scoring + adjacency/Clifford gates in [evaluate.py](tasks/cnot_grid_synth/evaluate.py). Read [tasks/cnot_grid_synth/README.md](tasks/cnot_grid_synth/README.md) for the problem statement and score targets. [`examples/circle_packing/`](examples/circle_packing/) is a smaller reference task (its `evaluate.py`/`initial.py` drive the orchestrator smoke test).
 
-> The pre-prune `shinka_run` research-grounding flags (`use_agentic_proposer`,
-> `enable_deep_research`, `enable_literature_grounded`) and the `AgentLLMClient`
-> per-generation agentic architecture were **removed** in the orchestrator
-> rewrite + Azure-only prune. The inner-loop mutation is now the stateless
-> Azure background-poll call in `orchestrator/scripts/mutate.py`; deep research
-> is `orchestrator/scripts/deep_research.py` (called deliberately by the
-> orchestrator, not on a fixed cadence). Truncation still applies: `error_traceback`
-> ~8KB and `stderr_log` ~16KB (head+tail). See `orchestrator/SKILL.md`.
+> The pre-prune `shinka_run` `use_agentic_proposer` flag + `AgentLLMClient` agentic
+> architecture, the deep-research / `literature_grounded` config machinery, and the
+> prompt-evolution fields were **removed** in the orchestrator rewrite + Azure-only prune,
+> and the now-dead config surface was **deleted** from `shinka/core/config.py` (it read by
+> nothing). A future agent must NOT try to drive a Stage-A→D research machine — it no
+> longer exists. The
+> inner-loop mutation is the stateless Azure background-poll call in
+> `orchestrator/scripts/mutate.py`; the automatic per-window **meta** round is
+> `meta_summarize.py`; **deep research** (`deep_research.py`) is an AGENT DECISION made at
+> a control-return (you read the logs and decide), never a config-driven cadence.
+> Truncation still applies: `error_traceback` ~8KB (head+tail). See `orchestrator/SKILL.md`.
 
 ## Working in this repo
 
@@ -170,4 +187,5 @@ git push -u origin <branch>        # origin = dtlics/ShinkaEvolve.git
 - Do not install the shinka skills into `~/.claude/skills/` (global). They live at `.claude/skills/` in this repo and track this branch.
 - Do not edit `dr_client.py` to share env vars with the main endpoint — they're separate resources by design.
 - Do not re-add non-Azure providers or the old `shinka_run` / agentic-proposer code — this fork is Azure-only and orchestrator-driven.
-- Do not touch the FOUNDATION mid-run (sqlite schema, the scripts' JSON contract, `evaluate.py`, the user's `evaluate.py`/`initial.*`). Defer foundation ideas to `RUN_SUMMARY.md`.
+- Do not touch the FOUNDATION mid-run (sqlite schema, the scripts' JSON contract, `evaluate.py`, the user's `evaluate.py`/`initial.*`). Defer foundation ideas to the end-of-run **ending document**.
+- Do not read a prior run's archive (`orchestrator/run_archive/`) while running a new job — those are for the user's later reference only, not run inputs.

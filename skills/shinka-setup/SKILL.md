@@ -53,6 +53,11 @@ Invoke this skill when the user:
    `task.init_program_path` to this task's `evaluate.py` / `initial.<ext>`, a
    `task.language`, a `budget_usd`, and a precise `task_sys_msg`, then drive
    `python orchestrator/harness/run_window.py --config <run>/run.json --until-decision`.
+   The starter ships `task_sys_msg` as the sentinel `__UNSET_AUTHOR_AT_BOOT__` — the
+   harness REFUSES to start until the orchestrator authors a real goal (the goal + hard
+   constraints, WITHOUT spoiling the held-out metric). Running this task means BEING the
+   orchestrator/outer-loop under that run loop (warmup → wake-per-taper cluster →
+   automatic per-window meta → framework-audit + DR checks → end-of-run archive).
 
 ## What is ShinkaEvolve?
 A framework developed by SakanaAI that combines LLMs with evolutionary algorithms to propose program mutations, that are then evaluated and archived. The goal is to optimize for performance and discover novel scientific insights. 

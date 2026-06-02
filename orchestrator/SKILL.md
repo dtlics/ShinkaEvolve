@@ -1,89 +1,158 @@
 ---
 name: shinka-orchestrator
-description: Use this skill when running an LLM-driven evolutionary search on a code optimization problem in this repo. You drive a Shinka-style inner loop (parent sampling, mutation, evaluation, archive update) and have authority to rewrite the underlying strategy CODE mid-run when the inner loop stagnates. Invoke at problem onset, after each evaluation window, when a budget is exhausted, or to resume a run.
+description: Use this skill when running an LLM-driven evolutionary search on a code optimization problem in this repo. You wear two hats — the ORCHESTRATOR (the operational, in-the-flow jobs the run can't proceed without) and the OUTER-LOOP / FRAMEWORK-AUDIT role (judging whether the deterministic framework code itself is flawed and rewriting it). Invoke at problem onset, during warmup, when the inner loop returns control, when a budget is exhausted, or to resume a run.
 ---
 
 # Shinka Orchestrator
 
-You are the orchestrator / outer loop of an evolutionary search. The inner loop
-is fast and runs without you. Your job: set it up, watch it, intervene when it
-stagnates by **rewriting strategy code**, and stop it when it's done. You are not
-in the path of every mutation — you are in the path of every *window*.
+You drive an evolutionary search whose inner loop is fast, deterministic, and runs
+WITHOUT you. You set it up, oversee it, intervene when it needs you, and stop it when
+it's done. You are not in the path of every mutation — you are woken when a window-
+cluster returns control.
 
-A window is W iterations of the inner loop under a fixed strategy (W defaults to
-15, set in the run config's `evo.window_size`). After each window the inner loop
-returns a diagnostics JSON. You read it, decide, and continue / intervene /
-terminate.
+## Your two roles (you wear both hats)
+
+**ORCHESTRATOR — operational, in the critical path.** The jobs the run cannot proceed
+correctly without; if you skip them or do them wrong, the flow breaks. At boot: read the
+task's initial code + evaluator, infer the goal, and author the system-message problem
+statement (the goal, the hard constraints, the *shape* of the score) **without spoiling
+the held-out metric**, plus an abstract runtime-efficiency caution (no specific numbers).
+When you decide a deep-research (DR) round is warranted: write the DR query, triage the
+brief, seed/ground islands, fold results in. These fire **whenever the flow demands them
+— there is no cadence to them.**
+
+**OUTER-LOOP / FRAMEWORK-AUDIT — improvement, NOT in the critical path.** Read the logs
+and history to judge whether the deterministic **framework code itself** is flawed, and
+rewrite the mutable strategy code when it is. The canonical case: a model that is never
+being picked — is it *truly bad* (it ran enough and genuinely underperformed) or *locked
+out by a reward/selection flaw* (near-zero selection count but a positive reward the few
+times it ran)? The run continues without this role; it improves the framework over time.
+It runs on the **tapering control-return cadence** below: scrutinize the framework
+frequently early (the code is least proven), and less and less as it proves robust.
 
 ## Two rules that make this work
 
-1. **The inner loop's LLM calls go to Azure, never to you.** Every mutation,
-   fix, and judge call is made by a `scripts/` subroutine that calls Azure in
-   background-poll mode. You must NEVER "simulate" a mutation in your own
-   context — that would pay an agent turn (~100×) for a stateless API call and
-   destroy the cost economics. Your tokens are spent only on *window-level
-   reasoning*: reading diagnostics and deciding whether to rewrite code.
-2. **Do not stop until a termination criterion is met.** A run is a long,
-   consecutive process. The healthiest run is fifty windows read in a row with
-   no intervention. Keep invoking the next window. Idleness is not done-ness —
-   only the termination checklist is.
+1. **The inner loop's LLM calls go to Azure, never to you.** Every mutation, fix, repair,
+   and meta call is made by a `scripts/` subroutine that calls Azure in background-poll
+   mode. NEVER "simulate" a mutation in your own context — that would pay an agent turn
+   (~100×) for a stateless API call and destroy the cost economics. Your tokens are spent
+   only on control-return reasoning and on writing the DR query.
+2. **Do not stop until a termination criterion is met.** A run is a long, consecutive
+   process; the healthiest run is many control-returns read with no intervention. Keep
+   launching the next cluster. Idleness is not done-ness — only the termination checklist
+   is (see Termination).
 
-## Safety railguards (non-negotiable, enforced in code — NOT strategy knobs)
+## Safety railguards (enforced in code — NOT strategy knobs you can weaken)
 
-You cannot weaken these by rewriting a `scripts/` file:
+- **Budget hard cap + crash-durable ledger.** Set `budget_usd` in the run config. The
+  harness keeps a cumulative cost ledger (`journal/run.json` → `total_cost`) summing EVERY
+  LLM cost (mutation, the automatic meta round, deep research, embeddings) plus the
+  interventions you log. The harness **hard-stops** the moment cumulative spend ≥
+  `budget_usd` (`return_reason="budget_exhausted"`; overshoot ≤ one slot). The ledger is
+  crash-durable: `run.json` is written atomically and a missing/corrupt one is rebuilt by
+  recomputing `total_cost` from the durable journal streams — so a crash mid-write can
+  never silently zero the ledger and defeat the cap. The one accepted gap: a boot-time
+  embedding cost logged before the first window (on no durable window/intervention/call
+  line) is the only spend a recompute cannot recover.
+- **Per-call cost cap (~$10).** Every external LLM call (mutation / meta / DR / fix)
+  carries a per-call max-output-token cap sized so one call cannot exceed ~$10 (pro at its
+  50k cap ≈ $9; others incl. `gpt-5.5` at 200k ≈ $6; DR at its 200k cap ≈ $8). This is a
+  deliberate runaway guard — do not remove or shrink it.
+- **No unmonitored LLM calls.** Every call goes through a counted path whose cost lands in
+  the ledger; the eval subprocess runs the task's `evaluate.py` (no LLM).
+- **Worktree shinka.** The harness asserts `shinka` resolves to THIS repo at startup
+  (loud fail otherwise) — you never silently run a different checkout.
 
-- **Budget.** Set `budget_usd` in the run config. The harness keeps a cumulative
-  cost ledger (`journal/run.json` → `total_cost`) summing EVERY LLM cost
-  (mutations, the meta round, deep research, embeddings) plus interventions you
-  log. `run_window` **hard-stops** the inner loop the moment cumulative spend ≥
-  `budget_usd` and returns `return_reason="budget_exhausted"` (overshoot ≤ one full
-  SLOT: a mutation + its `fix_retry_budget` fix-retries + embeds — size `budget_usd`
-  with that headroom, especially on a grounding run with pinned pro). When YOU call
-  `meta_summarize`/`deep_research`, first check `journal.budget_remaining(run, budget)`,
-  and ALWAYS pass `results_dir` so the call SELF-LOGS its cost into the ledger. Do
-  **NOT** also `journal.append_intervention` that LLM cost — the self-log already
-  counted it, so appending it double-counts (`append_intervention` is for
-  rewrites/decisions, NEVER an LLM call's cost). On `budget_exhausted`, terminate and
-  write `RUN_SUMMARY.md`.
-- **No unmonitored LLM calls.** Every LLM call goes through a counted path
-  (`mutate`/`meta_summarize` → `_azure.bg_query`; `deep_research` → `dr_client`;
-  embeddings → `EmbeddingClient`) whose cost lands in the ledger. No daemon or
-  subprocess calls an LLM off-ledger; the eval subprocess runs the task's
-  `evaluate.py` (no LLM). Each bg+poll is a single bounded inference (poll
-  timeout 30 min); polling itself doesn't bill.
-- **Cost accuracy.** Costs = `usage` tokens × `pricing.csv` per-token rates;
-  `output_tokens` includes reasoning/thinking tokens. `o3-deep-research` is in
-  `pricing.csv` ($10/$40 per 1M) and DR adds a conservative web-search surcharge.
-- **Worktree shinka.** `run_window` asserts `shinka` resolves to THIS repo at
-  startup (loud fail otherwise) — you never silently run a different checkout.
+## The run loop, end to end
 
-## How you invoke the inner loop
+This is the single source of truth; the rest of this doc expands each step.
+
+1. **WARMUP — you are fully awake, inspecting each step.** Before the real run, oversee
+   ONE window in a **throwaway workspace** (its own db + journal under
+   `<results_dir>/warmup/`) with per-step tracing ON. You read the `steps.jsonl` trace
+   after the window — which parent the sampler chose and why, the assembled prompt summary,
+   the code/summary the model returned (and whether the patch applied), the eval result
+   and its failure type, and what the framework decided next. The moment a step looks
+   wrong you STOP and CORRECT the implicated policy file, then RESTART warmup until the
+   window is meaningful and the trace confirms it. Then CLEAN UP the warmup workspace.
+   Warmup's narrow job: confirm the inner loop is mechanically sound (sampler → prompt →
+   eval → novelty → record all wired correctly) on a FRESH archive. It cannot reproduce a
+   flaw that only emerges with a populated archive — those surface on the real run's
+   per-window diagnostics, which the orchestrator + framework-audit roles handle. (See
+   Warmup below for the launch + the common flaw-signals.)
+2. **ACTUAL RUN — event-driven; you are woken, you do not poll.** You launch a self-
+   caffeinated window-cluster (`run_window.py --until-decision`, background-launched). The
+   harness runs windows autonomously and **returns control by exiting** at the cluster
+   boundary; that exit re-invokes you — that exit-and-re-invoke IS the "wake". Initially
+   control returns after every window; as your recent work tapers it returns less often.
+   There is **no max-window cap** — a cluster is bounded only by the budget hard-stop, a
+   termination criterion, and stagnation (which always returns control immediately).
+   Recover from any kill with `--resume` (keep the lid open / stay on AC; a clamshelled
+   laptop hardware-sleeps regardless).
+3. **EACH WINDOW ENDS WITH AN AUTOMATIC META ROUND — run by the harness, not by you.**
+   Deterministic code composes the meta prompt from the current archive + the live island
+   list and calls the external LLM (default `azure-gpt-5.5` at medium effort). In one shot
+   it returns global directions + a failure caution + ONE differentiated direction per
+   live island, auto-recorded as per-island briefs so islands evolve in different
+   directions BY DEFAULT. Meta is NOT an orchestrator action and does NOT count as an
+   intervention.
+4. **WHEN CONTROL RETURNS you do two checks on one shared rhythm:** (a) the **framework-
+   audit check** (rewrite a mutable strategy file if a flaw is found), and (b) the **DR
+   check** (run a DR round if the stall looks algorithmic and warrants it). Both happen at
+   every control-return. Then **record a work score** for what you just did — recorded
+   AFTER acting (never let the score you intend to record influence what you choose to do).
+5. **THE TAPER.** Your recent work score drives the **next** cluster size: high recent
+   work → keep checking every window; as low work persists the cluster grows (e.g.
+   1 → 5 → 10 → 20 …) with no ceiling. The same cluster size is BOTH the framework-audit
+   cadence AND the DR-check cadence — one shared rhythm. If you forget to record a work
+   score the taper has no signal and conservatively wakes you every window (and the
+   harness prints a reminder).
+
+## The work score (record it after every control-return)
+
+After you act on a control-return, append an intervention entry to `interventions.jsonl`
+with the magnitude of what you did, so the taper can pace the next cluster:
+- `work_audit` — framework-audit magnitude: a full core-strategy rewrite ≈ 3, a tiny
+  param change ≈ 1, no change 0.
+- `work_dr` — DR magnitude: not run 0, run-but-nothing-new 1, new directions worth
+  combining into an existing program 2, new directions worth grounding as a NEW island 3.
+- `work_score` — their sum (the scalar the default taper reads via
+  `journal.recent_work_score`). `journal.work_low_streak` counts the recent low-work
+  returns the escalation uses.
+
+Record it AFTER acting, never before — the score must describe what happened, not steer
+what you do.
+
+## How you launch the inner loop
 
 ```
 python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
 ```
 
-`--until-decision` runs windows autonomously (no turn of yours) and returns only
-on stagnation or after `cadence.max_windows_per_call` windows — the normal mode.
-(Use `--windows 1` to step one window at a time when debugging.) Fresh subprocess
-each call — that is how a code rewrite takes effect: deploy the new file, the next
-invocation imports it. Diagnostics print to stdout and append to the run journal.
+`--until-decision` runs windows autonomously and returns control by **exiting** at the
+cluster boundary (no turn of yours per window). Background-launch it so the run survives
+your turn ending and re-invokes you on exit; recover any kill with `--resume`. A fresh
+subprocess each call is how a deployed code rewrite takes effect — the next invocation
+imports the new file. (`--windows 1` runs exactly one bounded window; `--windows 1
+--trace-steps` is the framework-audit MEASURE window — see the rewrite cycle.)
 
-**Idle-sleep safety.** `run_window` self-caffeinates on macOS (holds
-`PreventUserIdleSystemSleep` for its lifetime, auto-released on exit) so a long
-run is not reaped by a host idle-sleep. For unattended runs that must also survive
-the agent shell ending, launch via `python orchestrator/harness/run_detached.py
---config <run>/run.json --until-decision [--resume]` (detaches into its own
-session, returns immediately; monitor the journal, recover with `--resume`). A
-closed laptop lid still forces hardware sleep caffeinate can't override.
+`run_window` self-caffeinates on macOS (holds `PreventUserIdleSystemSleep` for its
+lifetime, auto-released on exit) so a long cluster is not reaped by host idle-sleep. There
+is no separate detached launcher — the background-launched `--until-decision` IS the wake
+primitive; it returns by exiting and re-invokes you. Keep the lid open / on AC for
+unattended runs.
 
-Diagnostics shape:
+Diagnostics shape (printed to stdout + appended to `journal/windows.jsonl`):
 
 ```
 { window_index, iters_completed, best_score_start, best_score_end, delta,
-  J_score (informational only), threshold, strategy_fingerprint,
+  J_score, threshold, strategy_fingerprint,
   novelty_acceptance_rate (null when no novelty events), novelty_rejected_cost,
-  evaluation_failure_rate, fix_rate, fix_success_rate, needs_fix_rate,
+  evaluation_failure_rate, apply_exhausted_count, apply_failure_rate,
+  timeout_count, wrong_answer_count, errored_fraction,
+  model_collapse:{top_arm, top_share, n_arms_active, collapsed},
+  repair_mode_on, repair_fail_count, repair_tombstoned_count,
+  fix_rate, fix_success_rate, needs_fix_rate,
   llm_bandit_weights, llm_bandit_counts,
   island_health:[{id,best,diversity,stagnation_count,count}],
   stagnation_flag, low_streak, exhausted_retry_slots, exhausted_retry_count,
@@ -91,317 +160,320 @@ Diagnostics shape:
   window_cost, total_cost, budget_remaining, budget_hit, windows_run, return_reason }
 ```
 
-`evaluation_failure_rate` is the **un-repairable** failure rate — the fraction of
-slots still incorrect *after* immediate fixes ran (WS1). `fix_rate` = repair
-attempts ÷ slots; `fix_success_rate` = repairs that recovered correctness ÷ attempts
-(`null` when no fix was attempted). A high `fix_rate` with a low `fix_success_rate`
-is the signal that the fix concern needs a rewrite (ladder rung 5).
+Read the **progress trajectory** as the best-score gain (`delta`) vs the low-window bar
+(`threshold`); rollback uses the multi-signal `rollback_decision.py`, not a single
+number. `evaluation_failure_rate` is the *post-repair* rate over EVALUATED slots; a
+patch that never applied is counted separately in `apply_exhausted_count` /
+`apply_failure_rate` (it produced no candidate, so it is not an eval failure). To see
+which KIND of failure dominates, read `timeout_count` (the harness's eval-time-limit
+signal) vs `wrong_answer_count` vs `apply_exhausted_count`. `errored_fraction` is
+cumulative over all NON-tombstoned programs (distinct from the per-window
+`evaluation_failure_rate`). `model_collapse` is a SURFACED counts-share signal (a single
+arm's weight caps at `1−epsilon`, so counts is the real signal) — you act on it on your
+cadenced check; it is **never auto-corrected** in steady-state. `stagnation_flag` fires
+when a window stays "low" for `consecutive_required` windows — low = best-score gain
+`Δ ≤ max(stagnation_abs_floor, stagnation_rel_frac·max(s_start,0))` (scale-free above the
+floor, so a small-but-real gain doesn't trip it; the floor is the opening-phase bar when
+the best score is ≈ 0). Carry `low_streak` → next config's `window_state.prior_low_streak`
+and bump `window_state.window_index` (or just pass `--resume`, which reads both from the
+journal).
 
-`stagnation_flag` fires automatically when a window is "low" for
-`consecutive_required` windows. A window is **low** when the best-score gain
-doesn't clear a hybrid bar: `Δ ≤ max(stagnation_abs_floor, stagnation_rel_frac ·
-max(s_start,0))` — the `rel_frac` term is scale-free (relative improvement)
-once a score exists, while `abs_floor` is the opening-phase bar when s_start≈0.
-`iters_completed` is the count of candidates actually attempted (may be < W on a
-budget break). `J_score = Δ/√W` is now a monotone, informational progress
-reading only — rollback no longer keys on J (it uses the multi-signal
-`rollback_decision.py`; see the rewrite protocol). `llm_bandit_weights` /
-`llm_bandit_counts` carry the live bandit posterior + per-arm tallies (read from
-`bandit_state.pkl`). Carry `low_streak` → next config's
-`window_state.prior_low_streak`, and bump `window_state.window_index`.
+## Warmup (your first real job after authoring the goal)
+
+```
+python orchestrator/harness/run_window.py --config <run>/run.json --warmup
+# runs ONE window in <results_dir>/warmup (its own db + journal), tracing ON, then prints
+# the workspace path. Read <results_dir>/warmup/journal/steps.jsonl, then either fix a
+# policy and rerun --warmup, or, when satisfied, clean up and start the real run.
+python orchestrator/harness/run_window.py --config <run>/run.json --cleanup-warmup
+```
+
+Read the per-step trace after each warmup window and stop-correct-restart on a bad step.
+Never fix the evaluator — if warmup fails because of the evaluator, STOP and report (the
+evaluator is foundation). Common flaw-signals (read off `steps.jsonl` + the window diag):
+
+- **High eval-failure rate (`wrong_answer_count` dominating)** → the synthesized code
+  rarely solves the task → suspect the mutation prompt (`construct_mutation_prompt.py`):
+  is the goal precise, are constraints stated, is the patch format right? Read the prompt
+  step.
+- **Rising `apply_exhausted_count` (mutations returning `applied:false`)** → the model's
+  patches don't apply at all → suspect the patch-type mix / diff-vs-full instructions.
+  Read the `llm_output` step + the per-slot apply error.
+- **Many generations reusing the SAME parent** → the search isn't spreading → suspect the
+  parent sampler (`sample_parent.py`): flat all-zero scores (try `validity_floor`) or too
+  sharp a `parent_selection_lambda`. Read the sampler step across generations.
+- **One model already winning after a few draws** → premature collapse → suspect the
+  reward (`compute_reward.py`) / selection (`select_llm.py`): a couple of early bad draws
+  may have starved an arm, or `cost_aware_coef` over-penalizes a pricier-but-better arm.
+- **Novelty rejecting most candidates** → near-duplicate flooding or too tight a gate →
+  suspect `code_embed_sim_threshold` (large programs cluster 0.96–0.98) or weak mutation
+  diversity. Read the dropped-on-novelty decision; watch `novelty_rejected_cost`.
+- **Eval timeouts (`timeout_count` rising)** → the synthesized code is too slow → confirm
+  the goal carries the abstract runtime caution and the fix prompt feeds the timeout
+  reason back.
+- **Per-island briefs all reading the same** → islands aren't differentiating → suspect
+  the meta producer prompt (confirm `island_directions` are genuinely distinct per island
+  in the meta call log).
+- **A "successful child" byte-identical to its parent with `num_applied==0`** → the
+  apply-exhausted-as-success bug → confirm the failed-apply slot is recorded as a failed
+  attempt (no archive row), not silently scored as the parent copy.
+- **A measure window with empty / NaN diagnostics or a non-zero exit** → the window
+  crashed → treat as no-usable-data and revert (the rewrite cycle fails closed).
+
+## Boot: author the goal (no-spoil) + a spoiling self-check
+
+1. **Author `task_sys_msg` — your first real job.** Read the task's `initial.<ext>` and
+   `evaluate.py`, then write a precise problem statement: the goal, the gate set / hard
+   constraints, the score's shape, and an abstract caution that each eval has a runtime
+   budget so the code must stay efficient (NO specific numbers). The harness REFUSES to
+   start with a missing / empty / placeholder `task_sys_msg` (the starter ships the
+   sentinel `__UNSET_AUTHOR_AT_BOOT__`); `task.require_sys_msg:false` overrides for a bare
+   debug smoke, and `--warmup` flips it off for its throwaway run only.
+2. **Do NOT spoil the eval criterion.** A fair-game system message states the gate set +
+   score shape + the initial docstring; off-limits are hidden seeds, private metrics, and
+   exact thresholds. While authoring, run the **spoiling self-check**: the evaluator's
+   error text rides back to the fix/repair prompt via the harness `stdout_log`/`stderr_log`
+   backfill, gated by `use_text_feedback` (default true). If that error text could leak
+   the held-out metric (let a mutation game the score), STOP and ask the human before
+   continuing. The mitigation is `use_text_feedback:false` — a COMPLETE suppression: it
+   blanks both channels the fix prompt reads. (Rare; the cnot task's slope feedback is
+   safe.)
+3. Decide whether to call deep research for SOTA at onset (see the DR section). Use any
+   brief to pick the initial program, `num_islands` (4 default; 8 if multiple algorithmic
+   families compete), and to sharpen the goal.
+4. Author `run.json` (schema below). Default strategy files as shipped. Then warmup.
 
 ## What you may change, and what you must not (tiered mutability)
 
 **FOUNDATION — never touch mid-run. Ruining it breaks the consecutive run.**
 - The sqlite schema and the JSON stdin/stdout contract (`scripts/_common.py`).
-- The evaluation subprocess (`scripts/evaluate.py`) and `archive_record.py` /
-  `archive_query.py` (DB ops), `diagnostics.py` (your sensor), `journal.py`,
-  `harness/*`.
+- `scripts/evaluate.py`, `archive_record.py`, `archive_query.py`, `diagnostics.py` (your
+  sensor), `repair_record.py`, `journal.py`, `harness/*`.
 - The user's task `evaluate.py` and `initial.<ext>` — provided inputs.
 - `deep_research.py` — a paid external service wrapper.
-If you believe the foundation is wrong, do NOT change it. Note it in the
-end-of-run `RUN_SUMMARY.md` under "Recommended framework changes (out of
-orchestrator scope)" — schema/contract redesign is a human's job between runs.
 
-**POLICY — freely rewritable, always through the rewrite protocol (validate →
-deploy → measure → rollback).** All `scripts/*.py` flagged MUTABLE below.
+If you believe the foundation is wrong, do NOT change it — note it in the end-of-run
+ending document under "Future fixes for the user before the next run" (schema/contract
+redesign is a human's job between runs).
+
+**POLICY — freely rewritable, always through the rewrite cycle (validate → snapshot →
+deploy → measure → revert).** All `scripts/*.py` flagged MUTABLE in the subroutine table.
 
 ## The concern map (change related code together, compatibly)
 
-A problem you spot (say, the reward signal looks wrong) usually lives across
-several files — where a signal is *generated* and everywhere it is *consumed*.
-When you rewrite, rewrite the whole concern as one atomic **bundle** so the
-pieces stay compatible. Use the journal to spot the problem, then change every
-file in the concern's row together.
+A problem usually lives across several files — where a signal is *generated* and
+everywhere it is *consumed*. Rewrite the whole concern as one atomic bundle so the pieces
+stay compatible.
 
-| Concern | Generation / decision | Consumption | Spot it in journal via |
+| Concern | Generation / decision | Consumption | Spot it via |
 |---|---|---|---|
-| **Scoring / reward** | `compute_reward.py` | `select_llm.py` (bandit), `sample_parent.py` (score→parent weight) | `reward_used` vs `improvement_over_parent` per candidate; bandit weights |
-| **Exploration / parent** | `sample_parent.py` | (feeds mutate) | flat J with high novelty acceptance |
-| **Diversity / novelty** | `novelty_check.py` | `record_policy.py` (logs sim), `diagnostics` (rate) | `novelty_acceptance_rate` (window diag; **null** when no novelty events). `novelty_max_similarity` is PER-PROGRAM metadata — read it via `archive_query` `include_metadata`, not the window diag |
+| **Scoring / reward** | `compute_reward.py` | `select_llm.py` (bandit), `sample_parent.py` (score→parent weight) | per-program `reward_used` vs `improvement_over_parent`; bandit counts |
+| **Exploration / parent** | `sample_parent.py` | (feeds the prompt) | flat progress with high novelty acceptance |
+| **Diversity / novelty** | `novelty_check.py` | `record_policy.py`, `diagnostics` | `novelty_acceptance_rate` (null when no events); `novelty_rejected_cost` |
 | **Prompt** | `construct_mutation_prompt.py` | `mutate.py` (sends it) | `evaluation_failure_rate`, recurring `exhausted_retry_slots` |
-| **Fix / repair** | `run_window.py` `_attempt_immediate_fixes` (the immediate repair loop + `evo.fix_retry_budget`) | `construct_mutation_prompt.py` (`sample_fix` prompt), `mutate.py` (apply-retry budget) | `fix_rate`, `fix_success_rate` |
-| **Stagnation trigger** | `stagnation_detector.py` | `diagnostics.py` | `J_score`, `low_streak` |
-| **Memory** | `record_policy.py` | `sample_parent`/`novelty`/`diagnostics` readers | what metadata fields exist |
-| **Island structure** | `island_policy.py` | executed by `archive_record` (foundation) | `island_health` per-island trajectory |
-| **New directions (meta)** | `meta_summarize.py` (cheap, REACTIVE — summarizes recent attempts incl. failures) | you write its `directions` → `evo.meta_directions` (run_window samples ONE per gen by weight) + its `failure_note` → `evo.meta_failure_note` (fed forward every gen) | persistent flat `J_score` after framework rewrites |
-| **New directions (DR)** | `deep_research.py` (web-grounded, rare) | you TRIAGE its brief immediately (novel → new island grounded by pro+websearch; history-similar → pro improves an existing gen; else ignore — see Boot/DR) | flat `J_score` that meta can't lift |
+| **Fix / repair** | the immediate-fix loop in `run_window.py` (`evo.fix_retry_budget`) + repair mode (`sample_parent` `select:"errored"`) | `construct_mutation_prompt.py` (the `sample_fix` prompt), `mutate.py`, `repair_record.py` | `fix_rate`, `fix_success_rate`, `repair_fail_count` |
+| **Stagnation trigger** | `stagnation_detector.py` | `diagnostics.py` | the progress trajectory + `low_streak` |
+| **Cadence (taper)** | `cadence_policy.py` | `run_window` (reads the work score) | how often control returns vs your work score |
+| **Memory** | `record_policy.py` | sampler / novelty / diagnostics readers | which metadata fields exist |
+| **Island structure** | `island_policy.py` (+ per-island briefs auto-written by meta) | the foundation DB | `island_health` per-island trajectory |
+| **New directions (meta)** | `meta_summarize.py` (automatic per-window) | the harness records its per-island briefs + global directions; you don't author them | persistently flat progress after rewrites |
+| **New directions (DR)** | `deep_research.py` (web-grounded, rare) | you TRIAGE its brief (new → ground in a new island; similar → combine; else ignore) | flat progress that meta can't lift |
 
-Every concern above is **orchestrator-mutable** via the rewrite protocol —
-including the **fix / repair** policy (whether a candidate is fixed or abandoned
-= `sample_parent`'s `needs_fix` + the `sample_fix` prompt in
-`construct_mutation_prompt.py` + the `max_patch_attempts` retry budget). The only
-thing you cannot change is the FOUNDATION (sqlite schema, the JSON contract, the
-evaluator, the user's `evaluate.py`/`initial.<ext>`).
+## The automatic meta round (not yours to trigger)
 
-## The phases of a run
+Every window, the harness calls `meta_summarize.py` once → global `directions` + a
+`failure_note` + one differentiated direction per live island, auto-recorded as per-island
+briefs so islands diverge by default. You don't hand-author briefs anymore. Your only meta
+levers: `evo.meta_model` / `evo.meta_reasoning_effort` (default `azure-gpt-5.5` medium;
+raise to `pro@high` when the directions are worth the high cost — pro rejects `low`), or
+`evo.auto_meta:false` (which suppresses the WHOLE round — global directions AND per-island
+briefs; islands keep their last brief / the global direction). Its cost folds
+automatically; it's budget-gated and wrapped so a meta failure never aborts a window.
 
-### Boot
-1. **Author `task_sys_msg` — your first real job.** READ the task's `initial.<ext>`
-   and `evaluate.py`, then write a precise problem statement: the goal, the gate set
-   / hard constraints, the score's shape, and an **abstract** caution that each eval
-   has a runtime budget so the synthesized code must stay efficient (NO specific
-   numbers — the limit isn't useful to leak and timeouts were a top failure mode last
-   run). Do NOT spoil the eval criterion (don't reveal held-out specifics or anything
-   that lets a mutation game the score instead of solving the problem).
-2. Decide whether to call `deep_research.py` for SOTA (see the DR section). Use the
-   brief to pick the initial program, `num_islands` (4 default, 8 if multiple
-   algorithmic families compete), and to sharpen `task_sys_msg`.
-3. Author `run.json` (schema below). Default strategy files as shipped.
-4. Warmup: `run_window.py --config <run>/run.json --windows 1 --iters 1`. If it
-   fails, STOP and report — never fix the evaluator (foundation).
+## Is a model never being picked? (the framework-audit check)
 
-### Main loop
-Invoke `run_window.py --config <run>/run.json --until-decision` — the **normal mode**:
-it runs windows autonomously and returns only on stagnation or after the cadence cap.
-Do NOT step `--windows 1` per turn (that pays an agent turn per window and erodes the
-100× cost asymmetry rule 1 protects; `--windows 1` is for debugging only). Read the
-returned diagnostics. Healthy (`stagnation_flag` false, `evaluation_failure_rate` < 0.3,
-J holding/rising) → do nothing, invoke the next `--until-decision` call. **Then keep
-going** (rule 2).
+This is your flagship framework-flaw check, and it is **independent of stagnation** — do
+it on your cadenced control-return even on a healthy, rising run. Watch the surfaced
+`model_collapse` flag and `llm_bandit_counts`: if one arm's `submitted`/`completed` count
+is stuck near zero while the others climb, decide WHY:
+- **Locked out (a reward/selection flaw):** the arm has a near-zero count BUT, on the few
+  times it ran, shows positive `reward_used` / `improvement_over_parent` (read a program's
+  metadata via `archive_query` `include_metadata`). A few early bad draws drove its
+  posterior down and the bandit stopped sampling it — the model isn't bad, the selection
+  is starving it. **Recover with a CONFIG FLIP first, not a rewrite:** raise `epsilon`, or
+  set `evo.force_explore:true` (optionally with `evo.llm_subset:["<that arm>"]`) for a
+  window; lower `cost_aware_coef` if a pricier arm is starved on cost. Only if flips don't
+  recover it do you rewrite `select_llm.py`.
+- **Truly bad:** the arm ran ENOUGH and genuinely underperformed (low reward, high
+  per-slot `evaluation_failure_rate`). Leave it starved — that's the bandit working.
 
-### Meta check (escalation ladder)
-`stagnation_flag` fires when a window stays "low" for `consecutive_required`
-windows — low = `Δ ≤ max(stagnation_abs_floor, stagnation_rel_frac·max(s_start,0))`
-(Δ = best-score gain; the hybrid bar is scale-free above the floor, so it does
-NOT false-fire on a small-but-real gain the way a fixed `tau` did). `J_score`
-(=Δ/√W) is informational only — rollback uses the multi-signal basket below.
+The reward floor (`reward_validity_floor`) and the rejected-slot cost feed exist to make
+lock-out less likely — but watch for it anyway. "Is it the model, or our framework?" is
+the canonical judgment only the framework-audit role makes. `model_collapse` is surfaced
+for you to act on; the framework never auto-corrects it in steady-state.
 
-**Two hard rules for what you do on stagnation:**
-- You rewrite **mutable framework code only** (`scripts/*.py` flagged MUTABLE).
-  You NEVER touch the task's `evaluate.py` / `initial.<ext>` or the foundation.
-- You do **not invent new algorithmic directions yourself** — that burns your
-  turns and is the external LLM's job. When the plateau needs *new ideas*, you
-  gather context and call the meta round (`meta_summarize.py`, cheap) or
-  `deep_research.py` (≈$5, web-grounded), then act on what it returns.
+## Deep research (the DR check on control-return)
 
-Walk this ladder; take the FIRST applicable rung; at most one intervention per
-window. Condition every rewrite on `strategy_history/index.json` (prior
-strategies + their J — the EvoX H) and the journal (the population descriptor).
-1. `evaluation_failure_rate` > 0.5 with a recurring error → rewrite the **prompt
-   concern** (`construct_mutation_prompt.py`).
-2. An island stuck with low diversity (`island_health`) → rewrite the **island
-   concern** (`island_policy.py`).
-3. Bandit collapsed to one model + flat J → rewrite the **scoring concern**
-   (likely `select_llm.py` with `force_explore`, and check `compute_reward.py`).
-4. Reward looks miscalibrated (journal: high reward, low improvement) → rewrite
-   the **scoring concern** as a bundle (`compute_reward.py` + `select_llm.py` +
-   `sample_parent.py`).
-5. Fixes are wasteful or never succeed (`fix_rate` high, `fix_success_rate` low) →
-   rewrite the **fix concern**: tune `evo.fix_retry_budget`, edit the `sample_fix`
-   repair prompt in `construct_mutation_prompt.py`, or (rarely) the immediate-fix
-   loop `_attempt_immediate_fixes` in `run_window.py`. If failures are *timeouts*,
-   the repair prompt already feeds the error back — but also confirm `task_sys_msg`
-   carries the abstract runtime-budget caution (see Boot).
-6. Generic stagnation → rewrite the **exploration concern** (`sample_parent.py`).
-7. Framework rewrites aren't breaking the plateau → you need NEW IDEAS. Call
-   `meta_summarize.py` (cheap) — pass `db_path`/`db_config` and it SELF-GATHERS the
-   recent attempts (failures FIRST, then top performers), so it always sees the
-   failure signal. It returns `directions` (weighted) + a `failure_note` (prose:
-   what's been failing and why). Write `directions` → `evo.meta_directions` (run_window
-   samples ONE per gen by weight — your "best shots" get tried more) and `failure_note`
-   → `evo.meta_failure_note` (rides into every gen as a caution). If meta isn't
-   enough, escalate to `deep_research.py` and TRIAGE its brief (Boot/DR section).
-8. Deep research + rewrites exhausted over several windows → terminate and write
-   `RUN_SUMMARY.md` (including foundation-change recommendations).
+DR is web-grounded *discovery* (find SOTA), not *instantiation* (write the code). It is
+your decision at a control-return, on the same tapering rhythm as the framework-audit
+check.
 
-### Is an arm NEVER selected — locked out, or truly bad? (the role-2 duty)
-This is your flagship framework-flaw check, and it is **independent of stagnation** —
-run it even on a healthy, rising-J run (the ladder above is J-gated and will miss it).
-Watch `llm_bandit_counts` across windows: if one arm's `submitted`/`completed` count is
-stuck near zero while the others climb, decide WHY:
-- **Locked out (a reward/selection flaw):** the arm has a near-zero count BUT, on the
-  few times it ran, shows positive `reward_used` / `improvement_over_parent` (read a
-  program's metadata via `archive_query` `include_metadata`). A few early bad draws
-  drove its posterior down and the bandit stopped sampling it before it could recover —
-  the model isn't bad, the *selection* is starving it. **Recover it with a CONFIG FLIP
-  first, not a rewrite:** raise `epsilon` (exploration floor) or set
-  `evo.force_explore: true` (optionally with `evo.llm_subset: ["<that arm>"]`) for a
-  window to re-open it; lower `cost_aware_coef` if a pricier arm is being starved on
-  cost. Only if config flips don't recover it do you rewrite `select_llm.py`.
-- **Truly bad:** the arm ran ENOUGH (non-trivial count) and genuinely underperformed
-  (low reward, high per-slot `evaluation_failure_rate`). Leave it starved — that's the
-  bandit working; optionally drop it from `llm_models`.
-The reward floor (`compute_reward.py`: a correct-but-worse candidate now scores strictly
-above a *failed* one) and the rejected-slot cost feed (novelty rejects bill the arm)
-exist precisely to make this lock-out *less* likely — but watch for it anyway. "Is it
-the model, or our framework?" is the canonical judgment only you (the outer loop) make.
+**When.** When the search is stuck and the gap looks *algorithmic* (a technique the search
+won't invent) — normally after a meta round and at least one cheaper move haven't moved
+the best score. You DECIDE by reading the logs/history yourself (there is no automated
+similarity helper — DR returns a text idea, the archive holds code, so only you judge
+whether the idea already exists). Examine `journal.read_calls`, `archive_query`
+`top_n`/`recent_failures`, and the directions already in `evo.meta_directions`. Always
+pass `results_dir` so the call self-logs (query + brief) to `journal/calls/` and folds
+cost into the ledger. DR is bounded by the run budget (no hard count cap).
 
-### Deep research: when to call, how to prompt, and triaging the brief
-DR is the web-grounded escalation above meta. It is *discovery* (find SOTA), not
-*instantiation* (write the code) — that split drives everything below.
+**How to write the DR query (you write this).** Ask for the *general SOTA techniques for
+the task* — or for a well-defined sub-problem — in the model's OWN words with a citation
+(author/year/arXiv id). Do NOT ask for "the exact algorithm from [named paper]" or a
+verbatim snippet: that shape reads as "reproduce copyrighted text" and Azure's content
+filter refuses it deterministically. Keep it concise — the problem, the constraints, what
+you've tried, the sub-question. **Pre-flight self-check before every DR call:** re-read
+your drafted query and confirm its GOAL is general SOTA for the task/sub-task, not
+"reproduce a specific named paper"; if it asks to reproduce one paper's algorithm
+verbatim, STOP and reshape it. A refused/failed DR call returns `refused:true` + a `reason`
+(logged with its query intact, no crash) — a `content_filter` refusal almost always means
+a reproduce-paper framing, so RESHAPE the query; never re-fire the same shape.
 
-**When.** After meta + ≥1 rewrite haven't moved J, and the gap looks *algorithmic*
-(you need a technique the search won't invent). Always pass `results_dir` so the call
-self-logs (prompt + brief) to `journal/calls/` and folds cost into the ledger (WS7).
-
-**How to write the DR query (this is where round-2 went wrong).** Ask for the
-*general SOTA techniques for the problem* — or for a well-defined **sub-problem** —
-described in the model's OWN words, with a citation (author/year/arXiv id). Do NOT ask
-for "the **exact** algorithm from [named paper]" or for a verbatim `reference_snippet`:
-that shape reads as "reproduce copyrighted text" and Azure's content filter refuses it
-**deterministically** (verified — re-firing the blocked query refused again, same text,
-~$0.8 wasted). There is therefore NO DR-retry: a `content_filter`/refusal means
-*rewrite the query shape*, not retry. Keep it concise — state the problem, the
-constraints, what you've tried, and the sub-question; don't dump the whole codebase.
-A DR query may target a sub-direction (e.g. "SOTA for parallel F2 Gaussian elimination
-on a grid") whose answer you then compose into the task's solution.
-
-**Pre-flight self-check — run this BEFORE every DR call (the protector).** Re-read your
-own drafted query and confirm its GOAL is *general SOTA for the task or a well-defined
-sub-task*, not "reproduce a specific named paper." If you catch the query asking to
-reproduce/restate one paper's algorithm verbatim: STOP, recall WHY this DR was triggered
-(which task/sub-problem needs external knowledge), and REWRITE it into the general-SOTA
-form. Reproducing a specific reference is the job of the *follow-up pro grounding run*
-(below) — NOT the DR call. DR finds the technique; grounding implements it. This runtime
-check is what stops you re-introducing the `content_filter`-refusing shape, regardless of
-the prompt templates.
-
-**The `reference_snippet` field is NOT yours to set.** It is requested by the IMMUTABLE
-Stage-C system prompt (`shinka/prompts/prompts_deep_research.py`), not by your query, so
-you cannot soften it from the query side. Your lever is the QUERY shape; on a
-`content_filter` refusal, rewrite the QUERY (drop any named-paper / reproduce framing) —
-never retry the same shape.
-
-**Triage the returned brief — your job, per technique** (DR is infrequent, so judge
-each deliberately; EXAMINE THE STRUCTURED LOGS rather than guessing — read
-`journal.read_calls`, `archive_query` `top_n`/`recent_failures`, and the directions
-already in `evo.meta_directions`):
+**Triage the returned brief — per technique, deliberately:**
 - **Novel** (no archived program or prior direction resembles it) → GROUND it (the
-  grounding run below: pro + web search + the reference, `fix_retry_budget: 3`), then
-  give it **its own island** so it isn't out-competed before it matures: feed the
-  grounded program's id to `spawn_island.py` (foundation `spawn_island_from_program`).
-- **History-similar** (resembles something already tried/archived) → use pro + web
-  search to COMBINE it into the closest existing program (parent = that gen),
-  `fix_retry_budget: 1` (counts as an ordinary improvement).
-- **Otherwise → ignore it.** Don't dilute the search with low-promise directions.
+  grounding run below), then give it **its own island** via `spawn_island.py` so it isn't
+  out-competed before it matures.
+- **History-similar** → combine it into the closest existing program with the grounding
+  run (`fix_retry_budget:1`).
+- **Otherwise → ignore it.** Don't dilute the search.
 
-**The grounding run (executable recipe, no new machinery).** Author a small `run.json`
-(or override the live one) with: `llm_models: ["azure-gpt-5.4-pro@high"]` (pinned — the
-one time pro is in the mutation pool), a single weighted direction
-`evo.meta_directions: [{text: "<technique + the reference + concrete steps>", weight: 1}]`,
-`evo.mutation_web_search: true`, `fix_retry_budget: 3` (novel) or `1` (similar), and a
-short window (`--iters 1..3`). Web search fires on the mutation + its fixes; pro reads
-the reference and implements it; the immediate-fix loop recovers correctness. **Never
-run pro with web search on a direction that has NO solid reference** — that's the only
-sanctioned pro+websearch use. Then fold the grounded program back into the main run
-(the archive is shared) and resume normal evolution.
+**The grounding run.** Author/override a small `run.json` with `llm_models:
+["azure-gpt-5.4-pro@high"]` (pinned — the one time pro is in the mutation pool), a single
+weighted direction `evo.meta_directions:[{text:"<technique + reference + steps>",
+weight:1}]`, `evo.mutation_web_search:true`, `fix_retry_budget:3` (novel) or `1`
+(similar), and a short window. Web search fires on the mutation + its fixes; pro reads the
+reference and implements it. Never run pro with web search on a direction with NO solid
+reference — that's the only sanctioned pro+websearch use. Then fold the grounded program
+back into the shared archive and resume normal evolution.
 
-**On-demand island spawning (foundation).** `spawn_island.py` (stdin
-`{db_path, db_config, embedding_model, program_id}`) seeds a NEW island with a copy of
-the grounded program as its root — true per-direction isolation. It honors
-`db_config.max_islands`: at the cap it RETIRES the worst island (lowest best-fitness,
-or fewest members via `island_evict_strategy`) NON-DESTRUCTIVELY — de-archived + island
-freed, rows preserved for lineage — and reuses that index; island 0 and the global-best
-island are protected. `max_islands: 0` (default) = unbounded (always a fresh index).
-Set `max_islands` (e.g. `num_islands + a few`) when you expect to ground several DR
-directions, so the island count stays bounded and the weakest tracks recycle.
+`spawn_island.py` (stdin `{db_path, db_config, embedding_model, program_id}`) seeds a NEW
+island with a copy of the grounded program as its root. It honors `db_config.max_islands`:
+at the cap it retires the worst island non-destructively (rows preserved for lineage) and
+reuses the index; island 0 and the global-best island are protected. `max_islands:0`
+(default) = unbounded.
 
-### Strategy rewrite protocol
-Helpers: `harness/strategy_store.py`, `harness/validate_strategy.py`.
-1. **Check history**: read `strategy_history/index.json`; don't re-deploy a hash
-   that was already `rejected`.
-2. **Generate** the candidate file(s) — same entry point + output keys as the
-   current file (the docstring is the contract). Write to
-   `strategy_history/candidate_<target>.py`, never directly to `scripts/`.
-3. **Validate** each: `python orchestrator/harness/validate_strategy.py
-   strategy_history/candidate_<target>.py <target>.py`. Mechanical error → fix,
-   retry ≤2. Structural → abandon, try another rung.
-4. **Deploy.** Single file: `strategy_store.deploy(candidate, target, reason,
-   window_index, prior_J, concern="<concern>")`. A whole concern (multiple files):
-   `validate_bundle` then `strategy_store.deploy_bundle([{candidate_path,target},
-   ...], reason, window_index, prior_J, concern=...)`. Pass `concern` so the index
-   narrates the change. You do NOT hand-maintain a strategy hash — the harness
-   stamps the full `strategy_fingerprint` ({target: hash} over all mutable files)
-   into every window automatically (F4). Log it: `journal.append_intervention(...)`.
-5. **Measure**: run one window; capture its diagnostics.
-6. **Roll back or accept** via the multi-signal basket, NOT a J comparison.
-   Call `rollback_decision.decide(prior_window_diag, measure_window_diag)` (or pipe
-   JSON to `harness/rollback_decision.py`): it flags a regression if the rewrite
-   collapsed correctness (eval-success dropped/floored), collapsed diversity
-   (novelty-acceptance dropped), or regressed score while the prior window was
-   genuinely progressing. Crucially it fires **even when Δ≈0** (early/flat phase),
-   which the old `new_J < prior_J·0.8` guard could not. If `regressed`:
-   `strategy_store.rollback` / `rollback_bundle` +
-   `record_outcome(new_hash, J, accepted=False, decision=<the decide() result>,
-   measure_diagnostics=<measure window>)` (or `record_bundle_outcome(...)` for a
-   bundle). Else the same call with `accepted=True`. `new_hash` (the deploy's returned
-   new_hash) and `J` (the measure window's J_score) are REQUIRED positional args; always
-   also pass `decision` + `measure_diagnostics` so the index records WHY and the
-   evidence (F4). **Rollback is the step that prevents a bad rewrite from poisoning
-   the rest of the run — never skip it.**
+## The framework-audit rewrite cycle
+
+When you decide to rewrite a mutable strategy file, run this cycle — it is what stops a bad
+rewrite from poisoning the run. Helpers: `harness/strategy_store.py`,
+`harness/validate_strategy.py`, `harness/rollback_decision.py`.
+
+1. **Check history** — read `strategy_history/index.json`; don't re-deploy a hash already
+   `rejected` (both `deploy` and `deploy_bundle` refuse it unless you pass `force=True`).
+2. **Generate** the candidate file(s) — same entry point + output keys as the current file
+   (the docstring is the contract). Write to `strategy_history/candidate_<target>.py`,
+   never directly to `scripts/`.
+3. **Validate** — `python orchestrator/harness/validate_strategy.py
+   strategy_history/candidate_<target>.py <target>.py`. (Validation smokes ALL of a
+   target's modes — e.g. `select_llm`'s select + weights + update — so a rewrite that
+   breaks the bandit-counts snapshot is caught before deploy.) Mechanical error → fix,
+   retry ≤2; structural → abandon.
+4. **Snapshot + deploy.** Pass `results_dir=` so `deploy` first calls `snapshot_state`,
+   which snapshots the framework files AND the run state (archive DB + bandit + ledger) so
+   the rewrite is recoverable (snapshot only when no window subprocess is live). Single
+   file: `strategy_store.deploy(candidate, target, reason, window_index, prior_J,
+   concern=, results_dir=)`. A whole concern: `validate_bundle` then
+   `deploy_bundle([...], reason, window_index, prior_J, concern=, results_dir=)`. The
+   harness stamps the full `strategy_fingerprint` into every window; log the rewrite with
+   `journal.append_intervention(...)`.
+5. **Measure, STAYING AWAKE.** Run exactly ONE measure window with tracing on so its step
+   logs exist: `run_window.py --config <run>/run.json --windows 1 --trace-steps`. Read its
+   `steps.jsonl` — do not go to wait-mode yet. (If the effect needs more than one window,
+   mark it to check next round — rare.)
+6. **Accept or revert.** Call `rollback_decision.decide(prior_window_diag,
+   measure_window_diag)` (pass `measure_crashed=true` if the measure subprocess crashed /
+   exited non-zero / produced unparseable output). It flags a regression if the rewrite
+   collapsed correctness, collapsed diversity, regressed score while the prior window was
+   progressing, or collapsed model selection (counts-share) — and it **FAILS CLOSED**: a
+   measure window with no usable data (crash / empty / NaN) is assumed worst-case and
+   reverted. If `regressed`: `restore_state(results_dir, snap_id)` — a FULL rewind of code
+   + archive DB + bandit to the snapshot, **except the cost ledger, which is never rewound
+   (spend stays counted; a revert can't be used to exceed the budget)** — then
+   `record_outcome(new_hash, J, accepted=False, decision=…, measure_diagnostics=…)` (or
+   the bundle variants). Else accept with the same call. After execution, only return to
+   wait-mode once you have a satisfactory version; if it broke something, revert to the
+   snapshot and redo with the new information. (The one place a collapse signal triggers an
+   automatic action is judging THIS just-deployed rewrite's measure window — never
+   steady-state, where `model_collapse` is surfaced for your judgment.)
 
 The archive is NEVER reset across strategy changes.
 
-### Failure escalation
-Two repair layers run *inside* the window before you ever see a failure: (1) `mutate.py`
-retries a broken APPLY (patch doesn't apply), bounded, error fed back; (2) WS1's
-`_attempt_immediate_fixes` repairs an EVAL failure in-place — re-prompting the same
-model with the failed code + its error (timeout reason or tableau mismatch), up to
-`evo.fix_retry_budget` times (default 1), re-evaluating each time. So
-`evaluation_failure_rate` is the *post-repair* rate, and `fix_success_rate` says
-whether the repairs worked. You see failures only via these rates +
-`exhausted_retry_slots`.
-Escalate to `subagents/debug-agent.md` only when one candidate exhausts its retry
-budget across two parents. Write its report to `strategy_history/debug_<w>.md`,
-act on its one recommendation, forget the detail. For periodic structural reads,
-spawn `subagents/archive-analyst.md` (write to `strategy_history/analyst_<w>.md`).
+## Failure handling: truthful recording + repair mode
 
-### Termination
-Stop when: budget exhausted; `stagnation_flag` true for five straight windows
-after deep research + ≥2 rewrites; target score reached; or user says stop. Then write
-`RUN_SUMMARY.md` to the run dir (you can seed it from
-`journal.build_run_summary(results_dir)`): final best program, J trajectory,
-every rewrite (hash, motive, outcome — from `strategy_history/index.json`), every
-deep research call, a postmortem, AND a **"Recommended framework changes (out of
-orchestrator scope)"** section for foundation ideas (schema, contract, new
-primitives) you couldn't act on.
+Two repair layers run *inside* the window before you see a failure: (1) `mutate.py` retries
+a broken APPLY (patch doesn't apply), bounded, error fed back; if those retries are
+exhausted, NO candidate was produced — the slot is recorded as a TRUE failed attempt (the
+model's cost charged to the arm, no reward, nothing archived; never a parent-copy
+duplicate), surfaced via `apply_exhausted_count`. (2) the immediate-fix loop repairs an
+EVAL failure in-place by re-prompting with the error, up to `evo.fix_retry_budget` times
+(default 1). So `evaluation_failure_rate` is the post-repair rate.
+
+**Repair mode** turns ON when `errored_fraction ≥ repair_trigger_fraction` (default 0.20,
+with tombstoned programs EXCLUDED so the mode RELEASES once dead programs are removed). A
+repair generation picks an errored program, uses NO inspirations, and prompts the model
+with that program's own failure info. If the repair FAILS, no new child is added; the
+truncated error is appended to the errored parent's own record and its repair count goes
+up. After it fails repair `repair_attempt_cap` times (default 2) the parent is
+TOMBSTONED — a non-destructive removal from the sampling pool (its row + island_idx +
+lineage are preserved, it just stops being selectable, and it's reclaimed first when an
+island is over capacity). `repair_escalation_model` (off by default) routes the last
+attempt before removal to a stronger model. The single combined failure-rate is enough to
+read at a glance *because* each trial's specific failure detail is logged and fed verbatim
+into the fix prompt; open a failing slot's record for the failure kind.
+
+Escalate to `subagents/debug-agent.md` only when one candidate exhausts its retry budget
+across two parents; write its report to `strategy_history/debug_<w>.md`, act on its one
+recommendation, forget the detail. For periodic structural reads, spawn
+`subagents/archive-analyst.md`.
+
+## Termination + end of run
+
+**Stop when:** the budget is exhausted; the user says stop; OR there have been **five
+consecutive control-returns each of which involved an intervention** (a DR round or a
+framework change), with **at least one of the five being a DR** → stop before the sixth
+return. This is your judgment, read from `interventions.jsonl` (the harness keeps returning
+control; there is no counter in it). The automatic per-window meta round does NOT count as
+an intervention. A pre-assumed/reference score in the docs does NOT end the run early.
+
+**End of run:** review the whole history and write an **ending document** — the run's
+outcome + a "Future fixes for the user before the next run" section (foundation/outer-loop
+changes you could not make mid-run). Seed it from `journal.build_run_summary(results_dir)`,
+flip the run's status with the `finalize_run` journal view (the harness auto-finalizes only
+on the budget-exhausted terminal return), then **archive** the run's history/logs/artifacts
+with the `archive_run` view into `orchestrator/run_archive/<run_id>__<finished_at>/`. **Do
+NOT read prior runs' archives while running a new job** — they exist only for the user's
+later reference.
 
 ## The run journal (your long-term memory, read at any granularity)
+
 `scripts`/grep or `harness/journal.py`:
-- `journal/run.json` — run summary (status, windows, best, last J, total_cost).
+- `journal/run.json` — run summary (status, windows, best, total_cost) — crash-durable.
 - `journal/windows.jsonl` — per-window diagnostics (the trajectory).
-- `journal/interventions.jsonl` — every rewrite/decision you took + outcome.
-- `journal/calls.jsonl` — WS7: compact POINTER index of every external LLM call
-  (meta / deep_research): `{kind, timestamp, file, cost, summary}`. The full prompt
-  + raw output live in `journal/calls/<kind>_<ts>_<rand>.json` (never overwritten).
+- `journal/interventions.jsonl` — every rewrite/decision + your work score + outcome.
+- `journal/calls.jsonl` — compact POINTER index of every external LLM call (meta / dr):
+  `{kind, timestamp, file, cost, summary}`. Full prompt + raw output live in
+  `journal/calls/<kind>_<ts>_<rand>.json`.
+- `journal/steps.jsonl` — the per-step oversight trace, present ONLY under tracing (warmup
+  and the measure window); cleaned up after warmup.
 - `journal/islands/island_<i>.jsonl` — per-island trajectory.
 - `strategy_history/` — per-strategy-version snapshots + `index.json`.
 
-**Read efficiently — don't pull big prompts into your context unless you need them.**
-Start with the compact views: `journal.j_trajectory(rd)` for J; `journal.read_calls(rd[, kind])`
-to see WHAT meta/DR runs happened (and their cost) WITHOUT their prompts. Only when
-you need a specific prompt or raw output do you open it with
-`journal.read_call(rd, row["file"])`. Drill into `windows.jsonl` or a program's
-`metadata` (`archive_query` with `include_metadata`) to diagnose a cross-cutting
-problem before rewriting a concern.
-
-**Logging is automatic — don't hand-roll it.** When you call `meta_summarize.py` /
-`deep_research.py`, pass `results_dir`; they SELF-LOG the full call to `journal/calls/`
-AND fold the cost into the ledger. So do NOT also `append_intervention` with the same
-cost (double-count). Never stash a prompt only in an ephemeral runner script — that's
-how round-1's DR prompt was lost. `append_intervention` is for rewrites/decisions, not
-LLM calls.
+Read efficiently — start with the compact views (`journal.read_windows`,
+`journal.read_calls`, `journal.read_steps`); only open a full call detail when you need its
+prompt. **Logging is automatic — don't hand-roll it.** When you call `meta_summarize.py` /
+`deep_research.py`, pass `results_dir`; they self-log AND fold cost into the ledger, so do
+NOT also `append_intervention` with the same cost (double-count). `append_intervention` is
+for your rewrites/decisions + the work score, never an LLM call's cost.
 
 ## The subroutines
 
@@ -412,129 +484,121 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
 | `evaluate.py` | run candidate → score+artifacts | No (foundation) | No |
 | `archive_record.py` | persist a candidate | No (foundation) | No |
 | `archive_query.py` | read archive (id/score/lineage/failures/summary; `include_metadata`) | No (foundation) | No |
-| `diagnostics.py` | assemble window diagnostics | No (foundation) | No |
+| `repair_record.py` | record a failed repair (append-to-parent / tombstone) | No (foundation) | No |
+| `diagnostics.py` | assemble window diagnostics (your sensor) | No (foundation) | No |
 | `_common.py` | JSON contract | No (foundation) | No |
-| `sample_parent.py` | parent + inspirations + `needs_fix` | **Yes** | No |
+| `sample_parent.py` | parent + inspirations + `needs_fix` (+ `select:"errored"` repair mode) | **Yes** | No |
 | `novelty_check.py` | reject near-duplicates | **Yes** | No |
 | `select_llm.py` | pick model; learn (bandit) | **Yes** | No |
 | `compute_reward.py` | reward signal for selection | **Yes** | No |
 | `record_policy.py` | derived signals → metadata | **Yes** | No |
-| `stagnation_detector.py` | Δ trigger + J (rollback scalar) | **Yes** | No |
+| `stagnation_detector.py` | the low-window trigger | **Yes** | No |
 | `island_policy.py` | fork/migrate/retire decision | **Yes** | No |
-| `cadence_policy.py` | WHEN to return control to you (not the budget) | **Yes** | No |
-| `construct_mutation_prompt.py` | build mutation/fix prompt | **Yes** | No |
+| `cadence_policy.py` | WHEN control returns (the work-score taper; not the budget) | **Yes** | No |
+| `island_brief.py` | record a per-island direction (auto-called by the meta round) | **Yes** | No |
+| `spawn_island.py` | seed a new island from a grounded program | No (foundation) | No |
+| `construct_mutation_prompt.py` | build the mutation/fix prompt | **Yes** | No |
 | `mutate.py` | call Azure (bg+poll), parse, apply, retry | Body no, prompt yes | **Yes (Azure)** |
-| `meta_summarize.py` | propose directions (the cheap meta round) | prompt yes | **Yes (Azure)** |
+| `meta_summarize.py` | the automatic per-window meta round (per-island directions) | prompt yes | **Yes (Azure)** |
 | `deep_research.py` | deep-research model (web-grounded directions) | No (paid service) | **Yes (Azure DR)** |
 | `_azure.py` | shared Azure background-poll transport | No (foundation) | — |
 
 ## The run config (you author this)
+
 ```json
 { "results_dir": "<run dir>", "run_id": "<id>", "budget_usd": 50,
   "task": {"eval_program_path": "...evaluate.py", "init_program_path": "...initial.py",
-           "task_sys_msg": "<precise goal>", "language": "python", "eval_time": "00:05:00"},
+           "task_sys_msg": "<precise goal>", "require_sys_msg": true,
+           "language": "python", "eval_time": "00:05:00"},
   "db_config": {"num_islands": 4, "archive_size": 40, "parent_selection_lambda": 10.0,
-                "migration_interval": 10, "enable_dynamic_islands": false, "stagnation_threshold": 100,
+                "migration_interval": 10, "enable_dynamic_islands": false,
                 "max_islands": 0, "island_evict_strategy": "worst_best_fitness"},
   "evo": {"window_size": 15, "patch_types": ["diff","full","cross"], "patch_type_probs": [0.6,0.3,0.1],
-          "llm_models": ["azure-gpt-5.4-mini","azure-gpt-5.5"], "llm_dynamic_selection_kwargs": {"cost_aware_coef": 0.5},
+          "llm_models": ["azure-gpt-5.4-mini","azure-gpt-5.5"], "llm_dynamic_selection_kwargs": {"cost_aware_coef": 0.25, "epsilon": 0.2},
           "reasoning_effort": "medium", "max_patch_attempts": 3, "fix_retry_budget": 1, "reward_mode": "absolute",
+          "auto_meta": true, "meta_model": "azure-gpt-5.5", "meta_reasoning_effort": "medium",
+          "repair_trigger_fraction": 0.20, "repair_attempt_cap": 2, "repair_escalation_model": null,
           "embedding_model": "azure-text-embedding-3-small", "enable_novelty": true,
           "code_embed_sim_threshold": 0.99, "stagnation_abs_floor": 0.001,
           "stagnation_rel_frac": 0.05, "consecutive_required": 2},
-  "cadence": {"mode": "until_decision", "max_windows_per_call": 3},
-  "strategy_hash": null,  // deprecated; the harness auto-stamps strategy_fingerprint
+  "cadence": {"mode": "until_decision", "base_low": 5, "low_threshold": 1},
   "window_state": {"window_index": 0, "prior_low_streak": 0} }
 ```
-`llm_models` set → bandit picks per candidate; `enable_novelty` → embedding gate.
-Reasoning models (e.g. `azure-gpt-5.4-pro`) require `reasoning_effort` ≥ "medium".
-**WS6 — effort is part of the arm.** An `llm_models` entry may be `"model@effort"`
-(e.g. `"azure-gpt-5.3-codex@medium"`, `"azure-gpt-5.4-pro@high"`); the bandit then
-learns each (model, effort) separately and run_window splits it for the call. A bare
-`"model"` uses the global `evo.reasoning_effort`. Only encode VALID combos (pro
-rejects `low`). **Pro policy:** keep `azure-gpt-5.4-pro` OUT of the normal mutation
-pool by default — it's slow/expensive and reserved for ideation (meta/DR) and for
-*grounding a DR reference* (Boot/DR). This is a default, not a lock: a future
-outer-loop may add `pro@high` to the pool if a task warrants it.
-`fix_retry_budget` (default 1) = immediate repair attempts on an eval failure
-before the slot is recorded as incorrect (WS1); the orchestrator passes a larger
-budget only when grounding a novel DR direction as a new island (WS5).
-`evo.meta_directions` (`[{text, weight}]`) and `evo.meta_failure_note` (str) are
-NOT authored upfront — you WRITE them from a `meta_summarize` call's output when
-the search stalls (ladder rung 7). run_window samples one direction per gen by
-weight and prepends the failure_note. The legacy `evo.meta_recommendations` single
-string is still honored (whole blob to every gen) when `meta_directions` is absent.
 
-**Web search (WS4) is OFF by default and gated to two scenarios:** (1) the DR call
-itself; (2) pro nailing a DR reference (the grounding run, Boot/DR). Two run.json
-switches drive scenario 2: `evo.mutation_web_search` (the grounding run's mutation
-calls) and `evo.fix_web_search` (its fix-retries) — both default false and only set
-on a deliberate grounding run. `mutate.py` takes `enable_web_search`, plumbed to
-`_azure.bg_query`. Web search never fires on a normal meta-sampled mutation. Caveat:
-tool support is per-deployment — enable it only for a model you've confirmed accepts
-`web_search_preview`.
+`llm_models` set → the bandit picks per candidate; `enable_novelty` → the embedding gate.
+An `llm_models` entry may be `"model@effort"` (e.g. `"azure-gpt-5.4-pro@high"`); the bandit
+learns each (model, effort) arm separately. Only encode valid combos (pro rejects `low`).
+**Pro policy:** keep `azure-gpt-5.4-pro` OUT of the normal mutation pool by default — it's
+reserved for the meta round (when you escalate `meta_model`) and the DR grounding run; a
+future outer-loop may add `pro@high` to the pool if a task warrants it.
 
-**Window size & cadence (EvoX-tuned).** `window_size` (W) is the stagnation unit;
-EvoX uses W ≈ 10% of the total iteration budget — set it accordingly (default 15).
-`cadence.max_windows_per_call` controls how often the inner loop hands control
-back to you on a *healthy* run; with `--until-decision` it returns only on
-stagnation or after this many windows. Tune so `max_windows_per_call × W ≈ 50`
-generations between healthy check-ins (default 3 × 15 ≈ 45) — frequent enough to
-stay adaptive, sparse enough not to burn your turns. Stagnation always returns
-control immediately.
+`cadence.max_windows_per_call` is an OPTIONAL explicit ceiling — unset by default, so the
+work-score taper is uncapped (bounded by budget / termination / stagnation).
 
 ### Config levers — flip a knob before you rewrite code
-Many decisions that *look* like they need a strategy-code rewrite are already
-exposed as `evo.*` config knobs. Prefer adjusting a knob (cheap, instant, no
-protocol) over rewriting a `scripts/` policy. The full set added for the
-agentic-control work, all **mutable** and defaulted conservative:
+
+Many decisions that *look* like a code rewrite are already `evo.*` knobs. Prefer a knob
+(cheap, instant, no protocol) over rewriting a policy.
 
 | Knob | Default | What it does | When to flip |
 |---|---|---|---|
-| `fix_retry_budget` | 1 | immediate eval-failure repair attempts per slot | raise for a hard task; the grounding run uses 3 |
-| `meta_directions` / `meta_failure_note` | — | per-gen sampled directions + persistent caution (you write them from a `meta_summarize` output) | every meta escalation (rung 7) |
-| `llm_models` `model@effort` arms | bare model | makes reasoning effort part of the bandit arm | when a model is great at one effort, slow at another |
-| `mutation_web_search` | false | web search on the main mutation call | ONLY on a grounding run nailing a DR reference |
-| `fix_web_search` | false | web search on fix-retries | a future call: let repairs consult the web |
-| `cost_aware_coef` | 0.25 | bandit reward-vs-cheapness blend | raise→0.7 if cheapness should dominate; lower→0 if a pricier arm is the only one improving and is being starved |
-| `code_embed_sim_threshold` | 0.99 | novelty cosine gate | false-rejects (large programs cluster 0.96–0.98) → raise. Watch `novelty_rejected_cost`: near-duplicate rejection has eaten ~half a real run's spend — if it is high, raise this OR push bolder-mutation guidance |
+| `auto_meta` | true | run the automatic per-window meta round | false to pause meta entirely (suppresses global + per-island briefs) |
+| `meta_model` / `meta_reasoning_effort` | `azure-gpt-5.5` / medium | the model for the automatic meta round | raise to `azure-gpt-5.4-pro` / high when directions are worth the high cost |
+| `repair_trigger_fraction` | 0.20 | errored-fraction at which repair mode turns on | raise if repairs churn; lower to repair sooner |
+| `repair_attempt_cap` | 2 | failed repairs before a parent is tombstoned | raise to give a hard failure more tries |
+| `repair_escalation_model` | null | stronger model on the last repair before removal | set to e.g. `azure-gpt-5.4-pro@high` for a stubborn class |
+| `fix_retry_budget` | 1 | immediate eval-failure repairs per slot | raise for a hard task; the grounding run uses 3 |
+| `mutation_web_search` / `fix_web_search` | false | web search on the mutation / fix calls | ONLY on a grounding run nailing a DR reference |
+| `cost_aware_coef` | 0.25 shipped (engine default 0.0 when `llm_dynamic_selection_kwargs` is unset) | bandit reward-vs-cheapness blend | raise→0.7 if cheapness should dominate; lower→0 if a pricier arm is the only one improving and is being starved |
+| `epsilon` | 0.2 | bandit exploration floor | an arm's share decaying toward 0 while it still occasionally improves → raise to 0.4–0.6 |
+| `code_embed_sim_threshold` | 0.99 | novelty cosine gate | false-rejects (large programs cluster 0.96–0.98) → raise; watch `novelty_rejected_cost` |
 | `stagnation_abs_floor`/`rel_frac` | 0.001 / 0.05 | the "low window" bar | recalibrate to the task's natural per-window climb |
-| `db_config.max_islands` | 0 (unbounded) | cap on active islands; at the cap, `spawn_island.py` evicts the worst | set when grounding several DR directions, to bound island count |
-| `validity_floor` | none (inert) | floors VALID parents' selection score (`sample_parent`) so valid-no-gain stays selectable above invalid | many correct programs pinned at score 0 and selection can't separate them |
+| `validity_floor` | none (inert) | floors VALID parents' selection score (`sample_parent`) | many correct programs pinned at 0 and selection can't separate them |
 | `reward_validity_floor` | 0.001 | floors a correct candidate's bandit reward so correct-but-worse beats *failed* | an arm with high eval-success is starved because its children rarely beat the parent |
-| `reward_on_reject` | cost_only | novelty-rejected slot bills the arm's COST only (neutral) vs `penalize` (impute worst reward) | a duplicate-prone arm should be penalized for waste |
-| `force_explore` / `llm_subset` | false / null | ignore the collapsed bandit (uniform) / restrict to a subset of arms | re-open a starved/locked-out arm (role-2 section) |
-| `epsilon` (in `llm_dynamic_selection_kwargs`) | 0.2 | bandit exploration floor | an arm's share decaying toward 0 while it still occasionally improves → raise to 0.4–0.6 |
-| `use_text_feedback` | true | feed the evaluator's failure reason into the prompt | feedback huge, or risks spoiling a held-out metric → false |
-| `island_policy_driven` | false | drive spawn/migrate/retire via MUTABLE `island_policy.py` at window boundaries (use with the db_config auto-triggers OFF) | repairing population structure via rung 2 |
-| per-island brief (via `island_brief.py`) | none | author a DISTINCT direction for one island so islands differentiate | `island_health` shows two islands converging |
+| `reward_on_reject` | cost_only | a novelty-rejected slot bills the arm's COST only (neutral) vs `penalize` | a duplicate-prone arm should be penalized for waste |
+| `force_explore` / `llm_subset` | false / null | ignore the collapsed bandit (uniform) / restrict to a subset | re-open a starved/locked-out arm (the framework-audit check) |
+| `use_text_feedback` | true | feed the evaluator's failure reason into the fix prompt | false on a spoil-risk task (a complete suppression) |
+| `island_policy_driven` | false | drive spawn/migrate/retire via mutable `island_policy.py` at window boundaries | repairing population structure |
 | `brief_compose_mode` | replace | a per-island brief replaces vs augments the global direction | a strong per-island direction is being diluted by a stale global one |
 | `island_selection_strategy` / `enforce_island_separation` | uniform / true | island selection pressure / same-island vs cross-island inspirations | one island dominates → `weighted`; want cross-pollination → separation `false` |
-| `azure_partial_output_mode` | return | use a cap-hit `incomplete` response's partial text (always billed) vs treat as failure | partial mutations corrupting the archive → `raise` |
-| `unpriced_cost_mode` | warn | warn vs hard-fail on a billed response with no pricing entry | repeated "$0-priced" warnings for a real deployment → `raise` |
-| `meta_failures_first_frac` | 0.5 | how much of meta's context is recent failures vs top performers | failure-dominated window where the failure_note comes back vague → 0.75 |
+| `meta_failures_first_frac` | 0.5 | how much of the meta context is recent failures vs top performers | failure-dominated window where the failure_note comes back vague → 0.75 |
 | `extra_guidance` | none | free text appended to the next window's mutation system prompt | nudge the search without a code rewrite |
 
-The rollback basket also has tuning knobs passed to `rollback_decision.decide()` (NOT
-`evo.*`): `abs_eval_floor` (0.05, the absolute correctness-collapse floor — keep far
-below a hard task's healthy floor so it isn't auto-rolled-back), `bandit_collapse_frac`
-(0.85) / `bandit_collapse_rise` (0.25) for the bandit-collapse arm, and the existing
-`min_eval_success`/`eval_drop`/`nov_drop`/`score_ratio`.
+**Islands differentiate BY DEFAULT** — the automatic per-window meta round writes a
+distinct per-island brief for every live island, and `brief_compose_mode` (replace) makes
+a brief replace the global direction for that island. Hand-authoring a brief via
+`island_brief.py` is now the override, not the default path. (A cap-hit incomplete model
+response always returns its billed partial text, and an unpriced billed response logs a
+warning and is billed $0 — neither is a tunable knob.)
 
-Reserve code rewrites for when no knob fits the problem (the concern map).
+The rollback basket has tuning knobs passed to `rollback_decision.decide()` (NOT `evo.*`):
+`abs_eval_floor` (0.05), `bandit_collapse_count_frac` (0.85) / `bandit_collapse_min_pulls`
+(8) for the primary counts-share collapse arm (the weights-fraction arm is legacy /
+near-unreachable because a single arm's weight caps at `1−epsilon`), `measure_crashed`
+(fail-closed), and `min_eval_success`/`eval_drop`/`nov_drop`/`score_ratio`.
+
+### Scalability — deferred
+
+Per-generation novelty is an O(N) cosine over CACHED embeddings of a size-capped archive
+with bounded per-island membership, so it's cheap and intentionally left as-is; evaluation
+is serial. Revisit only at a full inspection; the end-of-run document lists scalability as
+a standing future-fix candidate (trigger: `archive_size` raised enough to bottleneck
+novelty or serial eval).
 
 ## What never to do
-- Never modify a `scripts/` file directly without the rewrite protocol.
+
+- Never modify a `scripts/` file directly without the rewrite cycle.
 - Never edit FOUNDATION files (schema, contract, evaluate, archive_record/query,
-  diagnostics, journal, harness, deep_research, the task's evaluate/init).
-  Defer foundation ideas to the RUN_SUMMARY remark.
-- Never run an inner-loop mutation in your own context. Always call `mutate.py`
-  (it calls Azure). If you're tempted to sequence `scripts/` by hand, you're
-  about to make a per-candidate decision — that should be a code rewrite instead.
-- Never make two rewrites in one window. Never call deep research twice per
+  diagnostics, repair_record, journal, harness, deep_research, the task's evaluate/init).
+  Defer foundation ideas to the ending document.
+- Never run an inner-loop mutation in your own context. Always call `mutate.py`.
+- Never make two rewrites in one control-return. Never call deep research twice per
   stagnation cluster. Never let subagent output linger in your context.
+- Never read a prior run's archive while running a new job.
 - Never stop while a termination criterion is unmet.
 
 ## When in doubt
-Do less. Your value is the rare code change the inner loop's hand-coded policies
-cannot make. Every intervention you skip is one less chance to break something.
+
+Do less. Your value is the rare code change the inner loop's hand-coded policies cannot
+make, and the rare DR call that brings in knowledge the search can't invent. Every
+intervention you skip is one less chance to break something.

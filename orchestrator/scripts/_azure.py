@@ -75,6 +75,9 @@ def _usage_cost(response: Any, api_model_name: str) -> float:
     except Exception as e:
         # D4 (M10): a billed response that fails to price (unknown/renamed/typo'd
         # deployment) must NOT silently log $0 and lie to the budget ledger. Warn.
+        # P10-T5: this WARN-and-bill-$0 is FIXED behavior — there is NO tunable toggle
+        # (the prior `unpriced_cost_mode` lever was removed); add the deployment to
+        # pricing.csv to fix the undercount.
         if int(in_tok) or int(out_tok):
             logger.warning(
                 "unpriced billed Azure call (model=%s in=%s out=%s): %s — ledger may "
@@ -135,10 +138,11 @@ async def _bg_call(
             response = await client.responses.retrieve(rid)
             status = getattr(response, "status", "unknown") or "unknown"
         if status == "incomplete":
-            # D0.6/H2: a max-output-tokens cap-hit is USABLE (partial text) and BILLED.
-            # Return it like a completed call so the cost lands in the ledger and the
-            # partial output can still be parsed/applied (azure_partial_output_mode lets
-            # the caller treat it as failure, but the cost is billed either way).
+            # A max-output-tokens cap-hit is USABLE (partial text) and BILLED. Return it
+            # like a completed call so the cost lands in the ledger and the partial output
+            # can still be parsed/applied. P10-T5: this is FIXED behavior — there is NO
+            # tunable toggle (the prior `azure_partial_output_mode` lever was removed; the
+            # cost is billed either way).
             return _extract_text(response), _usage_cost(response, api_model_name)
         if status != "completed":
             # Genuine terminal failure (failed/cancelled/expired): unusable, but may

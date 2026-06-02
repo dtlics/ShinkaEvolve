@@ -637,11 +637,13 @@ class ProgramDatabase:
         except sqlite3.Error as e:
             logger.error(f"Error during error_traceback migration: {e}")
 
-        # Migration 6: Add deep-research tables (phase 2 of research-grounding).
-        # ``meta_briefs`` records the structured Stage A→D output per island
-        # per generation; ``dr_brief_cache`` caches DR query→brief pairs
-        # keyed on the embedded research question so two islands that
-        # drift in the same direction reuse a single expensive DR call.
+        # Migration 6: the ``meta_briefs`` table — the LIVE per-island DIRECTION
+        # ("brief") store. ``record_meta_brief`` writes one row per island/generation
+        # (driven by orchestrator/scripts/island_brief.py) and ``archive_query`` reads
+        # the most recent brief per island, which is how islands stay differentiated.
+        # The ``stage`` column is now just a free-form label; the multi-stage research
+        # pipeline (and its companion ``dr_brief_cache`` table) that once also wrote
+        # here was removed in the Azure-only prune.
         try:
             self.cursor.execute(
                 """
@@ -664,29 +666,9 @@ class ProgramDatabase:
                 ON meta_briefs(island_idx, generation)
                 """
             )
-            self.cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS dr_brief_cache (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    query_text TEXT NOT NULL,
-                    query_embedding BLOB,
-                    brief_json TEXT,
-                    model_used TEXT,
-                    cost REAL,
-                    hits INTEGER NOT NULL DEFAULT 0,
-                    created_at REAL NOT NULL
-                )
-                """
-            )
-            self.cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_dr_brief_cache_created_at
-                ON dr_brief_cache(created_at)
-                """
-            )
             self.conn.commit()
         except sqlite3.Error as e:
-            logger.error(f"Error during deep-research tables migration: {e}")
+            logger.error(f"Error during meta_briefs table migration: {e}")
 
     @db_retry()
     def _load_metadata_from_db(self):
@@ -842,6 +824,68 @@ class ProgramDatabase:
             ),
         )
         self.conn.commit()
+
+    @db_retry()
+    def append_program_error(self, program_id: str, traceback_chunk: str) -> int:
+        """Repair-mode (P5): append a FAILED repair attempt's (truncated) error to an
+        existing program's record and bump its ``repair_attempts``. Single-row UPDATE,
+        NO schema change. The COMBINED error_traceback is re-truncated head+tail to
+        ~8KB each append so the field stays bounded. Returns the new repair_attempts
+        count. Caller: orchestrator/scripts/repair_record.py (IMMUTABLE plumbing)."""
+        if self.read_only:
+            raise PermissionError("append_program_error requires a writable database")
+        if not self.cursor or not self.conn:
+            raise ConnectionError("DB not connected.")
+        prog = self.get(program_id)
+        if prog is None:
+            return 0
+        combined = (
+            (prog.error_traceback or "")
+            + "\n--- repair attempt failure ---\n"
+            + (traceback_chunk or "")
+        )
+        limit = 8000  # re-truncate the COMBINED text head+tail (keep first + latest)
+        if len(combined) > limit:
+            half = max(1, (limit - 40) // 2)
+            combined = combined[:half] + "\n...[truncated]...\n" + combined[-half:]
+        md = dict(prog.metadata or {})
+        md["repair_attempts"] = int(md.get("repair_attempts", 0) or 0) + 1
+        md["last_repair_failure"] = (traceback_chunk or "")[:2000]
+        self.cursor.execute(
+            "UPDATE programs SET error_traceback = ?, metadata = ? WHERE id = ?",
+            (combined, json.dumps(md), program_id),
+        )
+        self.conn.commit()
+        return int(md["repair_attempts"])
+
+    @db_retry()
+    def tombstone_program(self, program_id: str) -> bool:
+        """Repair-mode (P5): non-destructively remove a program from the SAMPLING pool
+        after it failed its repair attempts. Sets metadata.repair_tombstoned=True and
+        de-archives it (DELETE FROM archive) but PRESERVES the row + island_idx +
+        lineage — UNLIKE island eviction, which nulls island_idx. Returns True if the
+        program existed. Caller: orchestrator/scripts/repair_record.py."""
+        if self.read_only:
+            raise PermissionError("tombstone_program requires a writable database")
+        if not self.cursor or not self.conn:
+            raise ConnectionError("DB not connected.")
+        prog = self.get(program_id)
+        if prog is None:
+            return False
+        md = dict(prog.metadata or {})
+        md["repair_tombstoned"] = True
+        self.cursor.execute("DELETE FROM archive WHERE program_id = ?", (program_id,))
+        self.cursor.execute(
+            "UPDATE programs SET metadata = ? WHERE id = ?",
+            (json.dumps(md), program_id),
+        )
+        self.conn.commit()
+        logger.info(
+            "repair-tombstoned program %s; row + island_idx preserved, removed from "
+            "sampling pool",
+            program_id,
+        )
+        return True
 
     @db_retry()
     def get_latest_meta_brief(self, island_idx: int) -> Optional[Dict[str, Any]]:
@@ -2390,6 +2434,25 @@ class ProgramDatabase:
             self.conn.commit()
             return
 
+        # P5-T5: a repair-tombstoned program (dead — removed from the sampling pool) is
+        # the natural FIRST thing to reclaim when the archive is full: evict it ahead of
+        # any LIVE program. (tombstone_program already de-archives on tombstone, freeing
+        # the slot immediately — this is a belt-and-suspenders guarantee that a
+        # tombstoned row can never hold an archive slot ahead of a live program.)
+        _tombstoned = [
+            p for p in archive_programs
+            if (getattr(p, "metadata", None) or {}).get("repair_tombstoned") is True
+        ]
+        if _tombstoned:
+            self.cursor.execute(
+                "DELETE FROM archive WHERE program_id = ?", (_tombstoned[0].id,)
+            )
+            self.cursor.execute(
+                "INSERT OR IGNORE INTO archive (program_id) VALUES (?)", (program.id,)
+            )
+            self.conn.commit()
+            return
+
         # Find the worst program using ranked scoring
         criteria = getattr(self.config, "archive_criteria", {"combined_score": 1.0})
 
@@ -2453,6 +2516,23 @@ class ProgramDatabase:
 
         # Get archive for ranked comparison
         archive_programs = self._get_archive_programs()
+
+        # P5-T5: reclaim a repair-tombstoned program FIRST, in parity with the fitness
+        # path — a dead (repair-removed) row must never hold an archive slot ahead of a
+        # live program, regardless of the selection strategy.
+        _tombstoned = [
+            p for p in archive_programs
+            if (getattr(p, "metadata", None) or {}).get("repair_tombstoned") is True
+        ]
+        if _tombstoned:
+            self.cursor.execute(
+                "DELETE FROM archive WHERE program_id = ?", (_tombstoned[0].id,)
+            )
+            self.cursor.execute(
+                "INSERT OR IGNORE INTO archive (program_id) VALUES (?)", (program.id,)
+            )
+            self.conn.commit()
+            return
 
         # Only replace if better than the similar program (niching)
         if self._is_better(program, most_similar, archive_programs):

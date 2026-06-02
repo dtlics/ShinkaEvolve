@@ -19,6 +19,12 @@ not retried here — an applied-but-incorrect candidate is recorded and handled 
 the FIX-mode policy on a later generation (see sample_parent.needs_fix +
 construct_mutation_prompt fix branch).
 
+If those apply-retries are EXHAUSTED (the patch never applies), NO usable candidate
+was produced: this returns ``applied: False`` with ``candidate_code`` set to the
+unchanged parent ONLY as a placeholder path. The CALLER (run_window) must treat that
+as a TRUE failed attempt — charge the model's token cost to the picking arm, give no
+reward, archive nothing — and must NOT evaluate / reward / archive the placeholder.
+
 A ``mock`` mode makes the harness + offline tests run with no API.
 
 INPUT (stdin JSON):
@@ -36,7 +42,11 @@ INPUT (stdin JSON):
 
 OUTPUT (stdout JSON):
   {
-    "ok": true, "applied": bool, "num_applied": int,
+    "ok": true,
+    "applied": bool,          # FALSE => apply exhausted: NO candidate produced;
+                              #   candidate_code is the unchanged parent placeholder —
+                              #   caller MUST record a failed attempt, NOT evaluate it.
+    "num_applied": int,
     "candidate_code": str, "candidate_path": str,
     "name": str|null, "description": str|null,
     "cost": float, "attempts": int, "transport": "background"|"legacy"|"mock",
@@ -192,7 +202,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "Re-read the code and emit a patch that applies cleanly."
         )
 
-    # exhausted attempts — return the parent unchanged as a failed slot.
+    # Apply exhausted: the patch never applied. Return applied=False with the
+    # unchanged parent ONLY as a placeholder path — NO usable candidate was produced.
+    # The caller records a true failed attempt (cost charged, nothing archived).
     path = _write_candidate(patch_dir, language, parent_code)
     return {"applied": False, "num_applied": 0, "candidate_code": parent_code,
             "candidate_path": path, "name": name, "description": description,

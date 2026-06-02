@@ -32,16 +32,8 @@ from .prompts_meta import (
 )
 from .prompts_novelty import NOVELTY_SYSTEM_MSG, NOVELTY_USER_MSG
 from .prompts_deep_research import (
-    DR_STAGE_A_SYS_MSG,
-    DR_STAGE_A_USER_MSG,
     DR_STAGE_C_SYS_MSG,
     DR_STAGE_C_USER_MSG,
-    DR_STAGE_D_SYS_MSG,
-    DR_STAGE_D_USER_MSG,
-)
-from .prompts_literature import (
-    LIT_GROUNDED_SYS_FORMAT,
-    LIT_GROUNDED_ITER_MSG,
 )
 
 __all__ = [
@@ -71,14 +63,7 @@ __all__ = [
     "META_STEP3_USER_MSG",
     "NOVELTY_SYSTEM_MSG",
     "NOVELTY_USER_MSG",
-    # Deep-research meta cycle prompts (phase 2 of research-grounding)
-    "DR_STAGE_A_SYS_MSG",
-    "DR_STAGE_A_USER_MSG",
+    # Deep-research (DR) prompt — the single web-grounded research call
     "DR_STAGE_C_SYS_MSG",
     "DR_STAGE_C_USER_MSG",
-    "DR_STAGE_D_SYS_MSG",
-    "DR_STAGE_D_USER_MSG",
-    # literature_grounded mutation prompts (phase 3 of research-grounding)
-    "LIT_GROUNDED_SYS_FORMAT",
-    "LIT_GROUNDED_ITER_MSG",
 ]

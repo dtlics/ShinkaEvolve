@@ -139,9 +139,16 @@ def _dispatch(db, query_type: str, payload: Dict[str, Any]):
                 sc = getattr(p, "combined_score", 0.0)
                 if bucket["best"] is None or sc > bucket["best"]:
                     bucket["best"] = sc
+        tombstoned = sum(
+            1 for p in programs
+            if ((getattr(p, "metadata", None) or {}).get("repair_tombstoned") is True)
+        )
         return {
             "total": len(programs),
             "correct": len(correct),
+            # P5: repair-tombstoned programs, EXCLUDED from the errored_fraction trigger
+            # (diagnostics) so repair mode releases once dead programs are removed.
+            "tombstoned_count": tombstoned,
             "best_score": best,
             "islands": sorted(per_island.values(), key=lambda b: b["island_idx"]),
         }

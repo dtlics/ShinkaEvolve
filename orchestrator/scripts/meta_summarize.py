@@ -10,10 +10,15 @@ ideation an LLM call should do. So when the search needs *new ideas* (not just a
 framework tweak), the orchestrator calls THIS (cheap) or `deep_research.py`
 (expensive, web-grounded).
 
-Meta is REACTIVE / aftermath: it summarizes what the search has ALREADY tried
-(recent attempts, including failures) into directions for the next batch. It is
-NOT the per-gen idea source — the per-gen choice is a weighted SAMPLE over the
-directions it returns (run_window samples one direction per mutation).
+Meta is the AUTOMATIC per-window round run by the HARNESS (not an orchestrator
+decision): after each window the harness calls this ONCE → global ``directions`` +
+a ``failure_note`` caution + ONE differentiated direction per live island
+(``island_directions``), auto-recorded as per-island briefs so islands evolve in
+DIFFERENT directions by default. It summarizes what the search has ALREADY tried
+(recent attempts, including failures). It is NOT the per-gen idea source — the
+per-gen choice is a weighted SAMPLE over the global directions (run_window samples
+one per mutation) plus the per-island brief for that island. Default model
+``azure-gpt-5.5`` at ``medium`` effort, mutable to a stronger model (e.g. pro@high).
 
 WS2/WS3 OUTPUT CONTRACT (changed from the old single-blob string):
   * ``directions``    — a WEIGHTED list ``[{text, weight}]``. The orchestrator
@@ -43,12 +48,14 @@ orchestrator only decides WHEN to call and how to use the output.
 
 INPUT (stdin JSON):
   {
-    "model_name": "azure-gpt-5.4-mini",
-    "reasoning_effort": "low" | null,
+    "model_name": "azure-gpt-5.5",          # default; mutable to pro@high when worth it
+    "reasoning_effort": "medium" | null,     # default medium (pro rejects "low")
     "goal": "<task goal / system message>",
     # context — supply recent_programs explicitly, OR db_path to self-gather:
     "db_path": str | null, "db_config": {..} | null, "embedding_model": str | null,
     "recent_programs": [ {generation, combined_score, correct, error_traceback, metadata} ] | null,
+    "islands": [ {"id": int, "best": float, "count": int} ] | null,  # live islands to differentiate
+    "num_islands": int | null,
     "best_program": {"combined_score": float, "code": str} | null,
     "n_recent": 16,
     "prior_recommendations": str | null,
@@ -62,6 +69,7 @@ OUTPUT (stdout JSON):
   {
     "directions": [ {"text": str, "weight": float} ],
     "failure_note": str,
+    "island_directions": [ {"island_idx": int, "text": str} ],  # one distinct dir per live island
     "recommendations": str,   # legacy joined string (logging / back-compat)
     "cost": float, "model": str
   }
@@ -92,19 +100,25 @@ _ERR_CHARS = 160
 
 _SYS = (
     "You are a research strategist for an LLM-driven evolutionary code search. "
-    "Given the optimization goal, the current best program, and recent attempts "
-    "(including FAILURES with their error), produce STRICT JSON and nothing else:\n"
+    "Given the optimization goal, the current best program, recent attempts "
+    "(including FAILURES with their error), and the live islands, produce STRICT JSON "
+    "and nothing else:\n"
     '{{\n'
     '  "directions": [ {{"text": "<one concrete, actionable direction — name the '
     'technique/structure/parameters; do NOT write code>", "weight": <number 0..1, '
     'relative promise>}}, ... up to {n} items ],\n'
     '  "failure_note": "<2-4 sentences of PROSE: what tended to cause the recent '
     'failures (e.g. runtime/timeout vs broken correctness) and what future attempts '
-    'should be careful about. Empty string if there were no failures.>"\n'
+    'should be careful about. Empty string if there were no failures.>",\n'
+    '  "island_directions": [ {{"island_idx": <int — one of the live island ids listed '
+    'below>, "text": "<a DISTINCT direction for THIS island so the islands explore '
+    'genuinely DIFFERENT families/approaches in parallel; name the technique, do NOT '
+    'write code>"}}, ... EXACTLY ONE entry per live island id ]\n'
     '}}\n'
     "Rules: prioritize directions NOT already tried (see prior recommendations). "
     "Weight = your confidence it pays off ('best shots' get higher weight); weights "
-    "need not sum to 1. Output ONLY the JSON object."
+    "need not sum to 1. For island_directions, give EXACTLY ONE entry per live island id "
+    "and make them genuinely distinct from one another. Output ONLY the JSON object."
 )
 
 
@@ -183,6 +197,16 @@ def _build_user_msg(payload: Dict[str, Any], recents: List[Dict[str, Any]]) -> s
                 f"{patch}{err}"
             )
         parts.append("\n# Recent attempts (failures + top performers)\n" + "\n".join(lines))
+    islands = payload.get("islands") or []
+    if islands:
+        ilines = [
+            f"- island {it.get('id')}: best={it.get('best')} members={it.get('count')}"
+            for it in islands
+        ]
+        parts.append(
+            "\n# Live islands (give EXACTLY ONE distinct direction per island id, in "
+            "island_directions — make them genuinely different)\n" + "\n".join(ilines)
+        )
     if prior:
         parts.append(f"\n# Prior recommendations (avoid repeating)\n{prior}")
     return "\n".join(parts)
@@ -193,6 +217,7 @@ def _parse_meta(text: str, max_n: int) -> Dict[str, Any]:
     Falls back to treating the whole response as one direction so a non-JSON reply
     never crashes the meta cycle (it just yields a single unweighted direction)."""
     directions: List[Dict[str, Any]] = []
+    island_directions: List[Dict[str, Any]] = []
     failure_note = ""
     blob = text or ""
     fenced = re.search(r"```(?:json)?\s*(.*?)```", blob, re.DOTALL)
@@ -218,18 +243,29 @@ def _parse_meta(text: str, max_n: int) -> Dict[str, Any]:
             elif isinstance(d, str) and d.strip():
                 directions.append({"text": d.strip(), "weight": 1.0})
         failure_note = str(data.get("failure_note") or "").strip()
+        for d in (data.get("island_directions") or []):
+            if isinstance(d, dict) and d.get("text") is not None:
+                try:
+                    idx = int(d.get("island_idx"))
+                except (TypeError, ValueError):
+                    continue  # drop a malformed entry without crashing
+                txt = str(d.get("text") or "").strip()
+                if txt:
+                    island_directions.append({"island_idx": idx, "text": txt})
     if not directions:
         # Fallback: no parseable JSON — keep the raw text as a single direction so
         # the orchestrator still gets *something* usable, and log nothing lost.
         txt = (text or "").strip()
         if txt:
             directions = [{"text": txt[:2000], "weight": 1.0}]
-    return {"directions": directions, "failure_note": failure_note}
+    return {"directions": directions, "failure_note": failure_note,
+            "island_directions": island_directions}
 
 
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     n = int(payload.get("max_recommendations", 5))
-    model = payload.get("model_name", "azure-gpt-5.4-mini")
+    model = payload.get("model_name", "azure-gpt-5.5")
+    effort = payload.get("reasoning_effort") or "medium"  # default medium (pro rejects "low")
 
     if payload.get("mock"):
         text = payload.get("mock_text", "") or ""
@@ -237,6 +273,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "directions": parsed["directions"],
             "failure_note": parsed["failure_note"],
+            "island_directions": parsed["island_directions"],
             "recommendations": text,
             "cost": 0.0,
             "model": model,
@@ -250,8 +287,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         _rem = _common.budget_remaining(_rd, _bud)
         _est = float(payload.get("meta_estimated_cost_usd", payload.get("estimated_cost_usd", 1.0)))
         if _rem is not None and _rem < _est:
-            return {"directions": [], "failure_note": None, "recommendations": "",
-                    "cost": 0.0, "model": model, "skipped": "budget",
+            return {"directions": [], "failure_note": None, "island_directions": [],
+                    "recommendations": "", "cost": 0.0, "model": model, "skipped": "budget",
                     "budget_remaining": _rem, "estimated_cost": _est}
     # F3: auto-populate prior_recommendations from recent meta calls so meta doesn't
     # re-propose directions it already gave (an explicit caller value always wins).
@@ -272,7 +309,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             model_name=model,
             system_msg=system_msg,
             user_msg=user_msg,
-            reasoning_effort=payload.get("reasoning_effort"),
+            reasoning_effort=effort,
             call_metadata=call_metadata,
         )
     except Exception as exc:
@@ -286,8 +323,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             {"error": str(exc)}, cost=_cost, summary="meta transport FAILED",
         )
         return {
-            "directions": [], "failure_note": None, "recommendations": "",
-            "cost": _cost, "model": model, "degraded": True, "error": str(exc),
+            "directions": [], "failure_note": None, "island_directions": [],
+            "recommendations": "", "cost": _cost, "model": model,
+            "degraded": True, "error": str(exc),
         }
     parsed = _parse_meta(text, n)
     # Legacy joined string — handy for logging and for any caller that still wants
@@ -298,16 +336,18 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     _common.log_external_call(
         payload.get("results_dir"), "meta",
         {"system": system_msg, "user": user_msg, "model": model,
-         "reasoning_effort": payload.get("reasoning_effort")},
+         "reasoning_effort": effort},
         {"directions": parsed["directions"], "failure_note": parsed["failure_note"],
-         "raw_text": text},
+         "island_directions": parsed["island_directions"], "raw_text": text},
         cost=float(cost),
-        summary=f"{len(parsed['directions'])} directions"
+        summary=f"{len(parsed['directions'])} directions, "
+        f"{len(parsed['island_directions'])} island"
         + ("; +failure_note" if parsed["failure_note"] else ""),
     )
     return {
         "directions": parsed["directions"],
         "failure_note": parsed["failure_note"],
+        "island_directions": parsed["island_directions"],
         "recommendations": joined,
         "cost": float(cost),
         "model": model,

@@ -12,10 +12,24 @@ so it can be read with grep/Read (no unpickling, no query layer):
                               outcome. The orchestrator appends to this.
   journal/islands/island_<i>.jsonl  per-island per-window best/diversity — the
                               "regional" view for spotting a collapsing island.
+  journal/steps.jsonl         (OPTIONAL — written only when per-step tracing is on:
+                              warmup, and the framework-audit measuring window) one
+                              line per inner-loop decision (sampler / prompt summary
+                              / llm output / eval / framework decision). Absent in a
+                              normal run; cleaned up after warmup. Folds no cost.
 
 `strategy_history/` (separate) holds the per-strategy-version snapshots. Together
 they let the orchestrator zoom from "how's the run overall" → "what did window 37
 look like" → "every reward-related intervention" → "is island 2 dying."
+
+run.json durability contract (so the hard budget cap can never be silently lost):
+every run.json write is atomic (write a temp file, fsync, then os.replace), and a
+missing-or-corrupt run.json is REPAIRED on read by recomputing total_cost from the
+durable append-only streams (windows.jsonl window_cost + interventions.jsonl cost +
+calls.jsonl cost). The only spend not recoverable that way is a cost added directly
+via add_cost outside any window/intervention/call (e.g. the one boot-time embedding
+cost) — a deliberately accepted small loss. read_run returns {} only when run.json
+is genuinely absent AND no journal streams exist.
 
 MUTABILITY: harness plumbing. Not a strategy file; do not rewrite.
 """
@@ -24,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -51,6 +66,8 @@ def _append_jsonl(path: str, obj: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a") as f:
         f.write(json.dumps(obj) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
 
 
 def _read_jsonl(path: str) -> List[Dict[str, Any]]:
@@ -66,6 +83,71 @@ def _read_jsonl(path: str) -> List[Dict[str, Any]]:
                 except json.JSONDecodeError:
                     continue
     return out
+
+
+def _write_json_atomic(path: str, obj: Dict[str, Any]) -> None:
+    """Crash-safe JSON write: write a temp file, fsync it, then atomically rename
+    over the target. A crash mid-write leaves either the old file or the new one
+    intact — never a truncated run.json that would zero the cost ledger."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2, default=str)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+def _has_journal_streams(results_dir: str) -> bool:
+    jd = journal_dir(results_dir)
+    return any(
+        os.path.exists(os.path.join(jd, name))
+        for name in ("windows.jsonl", "interventions.jsonl", "calls.jsonl")
+    )
+
+
+def _recompute_total_cost(results_dir: str) -> float:
+    """Rebuild the cumulative cost from the durable append-only streams. Each cost
+    source lives in exactly one stream (window_cost ← windows.jsonl, orchestrator
+    actions ← interventions.jsonl, external LLM calls ← calls.jsonl), so the sum is
+    the true total with no double-counting."""
+    jd = journal_dir(results_dir)
+    total = 0.0
+    for w in _read_jsonl(os.path.join(jd, "windows.jsonl")):
+        total += float(w.get("window_cost", 0.0) or 0.0)
+    for it in _read_jsonl(os.path.join(jd, "interventions.jsonl")):
+        total += float(it.get("cost", 0.0) or 0.0)
+    for c in _read_jsonl(os.path.join(jd, "calls.jsonl")):
+        total += float(c.get("cost", 0.0) or 0.0)
+    return total
+
+
+def _reconstruct_run(results_dir: str, prior: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Repair a missing/corrupt run.json from the durable streams and write it back
+    atomically, so the budget railguard keeps a truthful (never-zeroed) ledger."""
+    import sys as _sys
+
+    run: Dict[str, Any] = dict(prior) if isinstance(prior, dict) else {}
+    windows = _read_jsonl(os.path.join(journal_dir(results_dir), "windows.jsonl"))
+    run["total_cost"] = _recompute_total_cost(results_dir)
+    if not run.get("windows_completed"):
+        run["windows_completed"] = len(windows)
+    if windows:
+        last = windows[-1]
+        run["last_window_index"] = last.get("window_index")
+        run["total_programs"] = last.get("total_programs")
+        if run.get("best_score") is None:
+            run["best_score"] = last.get("best_score_end")
+    run.setdefault("status", "running")
+    run["recovered_from_corruption"] = True
+    run["updated_at"] = time.time()
+    _write_json_atomic(_run_path(results_dir), run)
+    print(
+        f"[journal] run.json missing/corrupt — reconstructed total_cost="
+        f"{run['total_cost']:.4f} from journal streams ({results_dir})",
+        file=_sys.stderr,
+    )
+    return run
 
 
 # --- writers ---------------------------------------------------------------
@@ -89,8 +171,7 @@ def init_run(results_dir: str, meta: Dict[str, Any]) -> None:
         "budget_usd": meta.get("budget_usd"),
         "config_digest": meta.get("config_digest"),
     }
-    with open(_run_path(results_dir), "w") as f:
-        json.dump(run, f, indent=2)
+    _write_json_atomic(_run_path(results_dir), run)
 
 
 def append_window(results_dir: str, diag: Dict[str, Any]) -> None:
@@ -126,8 +207,7 @@ def append_window(results_dir: str, diag: Dict[str, Any]) -> None:
         run["strategy_fingerprint"] = diag.get("strategy_fingerprint")
     run["total_cost"] = float(run.get("total_cost", 0.0)) + float(diag.get("window_cost", 0.0) or 0.0)
     run["updated_at"] = time.time()
-    with open(_run_path(results_dir), "w") as f:
-        json.dump(run, f, indent=2)
+    _write_json_atomic(_run_path(results_dir), run)
 
 
 def append_intervention(results_dir: str, entry: Dict[str, Any]) -> None:
@@ -149,9 +229,7 @@ def add_cost(results_dir: str, amount: float) -> float:
     run = read_run(results_dir) or {}
     run["total_cost"] = float(run.get("total_cost", 0.0)) + float(amount or 0.0)
     run["updated_at"] = time.time()
-    os.makedirs(journal_dir(results_dir), exist_ok=True)
-    with open(_run_path(results_dir), "w") as f:
-        json.dump(run, f, indent=2)
+    _write_json_atomic(_run_path(results_dir), run)
     return run["total_cost"]
 
 
@@ -188,12 +266,11 @@ def log_call(
     ts = time.time()
     fname = f"{kind}_{int(ts)}_{uuid.uuid4().hex[:6]}.json"
     fpath = os.path.join(cdir, fname)
-    with open(fpath, "w") as f:
-        json.dump(
-            {"kind": kind, "timestamp": ts, "cost": float(cost or 0.0),
-             "request": request, "response": response},
-            f, indent=2, default=str,
-        )
+    _write_json_atomic(
+        fpath,
+        {"kind": kind, "timestamp": ts, "cost": float(cost or 0.0),
+         "request": request, "response": response},
+    )
     pointer = {
         "kind": kind, "timestamp": ts,
         "file": os.path.join("calls", fname),  # relative to journal/
@@ -204,6 +281,16 @@ def log_call(
     if cost:
         add_cost(results_dir, float(cost))
     return fpath
+
+
+def log_step(results_dir: str, record: Dict[str, Any]) -> None:
+    """Append ONE per-step trace record to journal/steps.jsonl. Written ONLY when
+    step tracing is on (warmup, and the framework-audit measuring window); absent in
+    a normal run. Folds NO cost. The orchestrator reads it after each traced window
+    to oversee one window step-by-step (sampler → prompt → llm output → eval →
+    framework decision)."""
+    rec = {**record, "timestamp": record.get("timestamp", time.time())}
+    _append_jsonl(os.path.join(journal_dir(results_dir), "steps.jsonl"), rec)
 
 
 def total_cost(results_dir: str) -> float:
@@ -223,20 +310,27 @@ def finalize_run(results_dir: str, status: str, summary: Optional[Dict[str, Any]
     run["finished_at"] = time.time()
     if summary:
         run["summary"] = summary
-    os.makedirs(journal_dir(results_dir), exist_ok=True)
-    with open(_run_path(results_dir), "w") as f:
-        json.dump(run, f, indent=2)
+    _write_json_atomic(_run_path(results_dir), run)
 
 
 # --- readers (multi-granularity) -------------------------------------------
 def read_run(results_dir: str) -> Dict[str, Any]:
     p = _run_path(results_dir)
     if not os.path.exists(p):
-        return {}
+        # Genuinely absent → {} ONLY if no durable streams exist either. If run.json
+        # vanished mid-run but the journal streams survive, rebuild it from them.
+        if not _has_journal_streams(results_dir):
+            return {}
+        return _reconstruct_run(results_dir, None)
     try:
-        return json.loads(open(p).read())
-    except json.JSONDecodeError:
-        return {}
+        data = json.loads(open(p).read())
+    except (json.JSONDecodeError, ValueError):
+        data = None
+    if not isinstance(data, dict) or "total_cost" not in data:
+        # Truncated/corrupt (a crash mid-write) or a pre-ledger format → rebuild the
+        # cost ledger from the durable streams so the budget cap is never zeroed.
+        return _reconstruct_run(results_dir, data if isinstance(data, dict) else None)
+    return data
 
 
 def read_windows(results_dir: str, last_n: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -259,6 +353,54 @@ def j_trajectory(results_dir: str) -> List[Dict[str, Any]]:
 
 def read_interventions(results_dir: str) -> List[Dict[str, Any]]:
     return _read_jsonl(os.path.join(journal_dir(results_dir), "interventions.jsonl"))
+
+
+def _work_scores(results_dir: str) -> List[float]:
+    return [float(it["work_score"]) for it in read_interventions(results_dir)
+            if isinstance(it.get("work_score"), (int, float))]
+
+
+def recent_work_score(results_dir: str, n: int = 1, decay: Optional[float] = None) -> Optional[float]:
+    """The per-control-return WORK SCORE the agent records on interventions.jsonl
+    (how much real work the last control-return did — framework-audit + DR magnitude).
+    Returns the last (n=1), the plain mean of the last n, or a recency-decayed mean
+    when ``decay`` is given. None when none recorded yet — the taper's no-signal
+    default (which the harness reads as "wake every window")."""
+    scores = _work_scores(results_dir)
+    if not scores:
+        return None
+    tail = scores[-int(max(1, n)):]
+    if n == 1:
+        return tail[-1]
+    if decay is None:
+        return sum(tail) / len(tail)
+    weights = [decay ** (len(tail) - 1 - i) for i in range(len(tail))]
+    wsum = sum(weights) or 1.0
+    return sum(s * w for s, w in zip(tail, weights)) / wsum
+
+
+def recent_work_axes(results_dir: str, n: int = 1) -> Optional[Dict[str, Any]]:
+    """The last recorded {work_audit, work_dr} two-axis work magnitudes (the hook for
+    a future finer, two-axis cadence rule); None when none recorded."""
+    for it in reversed(read_interventions(results_dir)):
+        if "work_audit" in it or "work_dr" in it:
+            return {"work_audit": it.get("work_audit"), "work_dr": it.get("work_dr")}
+    return None
+
+
+def work_low_streak(results_dir: str, low_threshold: float = 1.0) -> int:
+    """Count of consecutive most-recent control-returns whose recorded work_score is
+    <= low_threshold (0 if the latest was high, or none recorded). The escalation
+    counter the UNCAPPED taper uses: the longer recent work stays low, the larger the
+    next window-cluster grows — with no ceiling (bounded only by budget / termination
+    / stagnation)."""
+    streak = 0
+    for s in reversed(_work_scores(results_dir)):
+        if s <= low_threshold:
+            streak += 1
+        else:
+            break
+    return streak
 
 
 def read_calls(results_dir: str, kind: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -287,6 +429,16 @@ def read_island(results_dir: str, island_id: int) -> List[Dict[str, Any]]:
     )
 
 
+def read_steps(results_dir: str, generation: Optional[int] = None,
+               last_n: Optional[int] = None) -> List[Dict[str, Any]]:
+    """The per-step oversight trace (present only when tracing was on). Filter to a
+    single generation, and/or take the last N records."""
+    rows = _read_jsonl(os.path.join(journal_dir(results_dir), "steps.jsonl"))
+    if generation is not None:
+        rows = [r for r in rows if r.get("generation") == generation]
+    return rows[-last_n:] if last_n else rows
+
+
 def build_run_summary(results_dir: str) -> str:
     """Assemble a Markdown RUN_SUMMARY draft from the journal. The orchestrator
     writes this to the run dir and then augments it with a postmortem and the
@@ -299,17 +451,15 @@ def build_run_summary(results_dir: str) -> str:
     lines.append(f"- run_id: {run.get('run_id')}")
     lines.append(f"- goal: {run.get('goal')}")
     lines.append(f"- status: {run.get('status')}")
+    lines.append(f"- finished_at: {run.get('finished_at')}")
     lines.append(f"- windows completed: {run.get('windows_completed')}")
     lines.append(f"- best score: {run.get('best_score')}")
     lines.append(f"- total programs: {run.get('total_programs')}")
+    lines.append(f"- total cost (USD): {run.get('total_cost')}  /  budget: {run.get('budget_usd')}")
     lines.append("")
-    lines.append("## J trajectory (window: J / best / stagnation)")
+    lines.append("## Progress trajectory (window: best-score / stagnation)")
     for w in traj:
-        lines.append(
-            f"- w{w['window_index']}: J={w['J']:.4f} best={w['best']} stagnant={w['stagnation']}"
-            if isinstance(w.get("J"), (int, float))
-            else f"- w{w['window_index']}: {w}"
-        )
+        lines.append(f"- w{w['window_index']}: best={w['best']} stagnant={w['stagnation']}")
     lines.append("")
     lines.append("## Interventions")
     if interventions:
@@ -324,13 +474,55 @@ def build_run_summary(results_dir: str) -> str:
     lines.append("## Postmortem")
     lines.append("_(orchestrator: what worked, what didn't, why)_")
     lines.append("")
-    lines.append("## Recommended framework changes (out of orchestrator scope)")
+    lines.append("## Future fixes for the user before the next run")
     lines.append(
-        "_(orchestrator: foundation ideas you could not act on — sqlite schema, "
-        "the JSON contract, new primitives, evaluator changes — for a human pass "
-        "between runs)_"
+        "_(orchestrator: foundation/outer-loop changes you could NOT make mid-run — "
+        "sqlite schema, the JSON contract, new primitives, evaluator changes, scalability "
+        "(serial eval / O(N) novelty if it ever bottlenecks) — for a human pass between "
+        "runs)_"
     )
     return "\n".join(lines)
+
+
+def archive_run(
+    results_dir: str,
+    dest_root: str = "orchestrator/run_archive",
+    run_id: Optional[str] = None,
+    finished_at: Optional[float] = None,
+) -> str:
+    """Archive a COMPLETED run's COMPACT history into ``<dest_root>/<run_id>__<ts>/`` for
+    the user's later reference. Copies the journal (MINUS the bulky calls/<x>.json detail
+    blobs — keeps calls.jsonl) + programs.sqlite + the ending document (RUN_SUMMARY.md) +
+    strategy_history/index.json. Does NOT copy per-version code snapshots or gen_* eval
+    dirs. Defaults run_id/finished_at from run.json (then the results_dir basename / now),
+    so the dir name never does int(None). Teach the agent: do NOT read prior archives
+    while running a NEW job — they exist only for the user's later reference."""
+    run = read_run(results_dir)
+    rid = run_id or run.get("run_id") or os.path.basename(os.path.normpath(results_dir))
+    fin = finished_at if finished_at is not None else (run.get("finished_at") or time.time())
+    dest = os.path.join(dest_root, f"{rid}__{int(fin)}")
+    os.makedirs(dest, exist_ok=True)
+    jd = journal_dir(results_dir)
+    if os.path.isdir(jd):
+        dest_j = os.path.join(dest, "journal")
+        os.makedirs(dest_j, exist_ok=True)
+        for name in os.listdir(jd):
+            if name == "calls":  # skip the heavy per-call detail blobs; keep calls.jsonl
+                continue
+            src = os.path.join(jd, name)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(dest_j, name))
+            elif os.path.isdir(src):
+                shutil.copytree(src, os.path.join(dest_j, name), dirs_exist_ok=True)
+    for rel in ("programs.sqlite", "RUN_SUMMARY.md"):
+        src = os.path.join(results_dir, rel)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(dest, os.path.basename(rel)))
+    sidx = os.path.join(results_dir, "strategy_history", "index.json")
+    if os.path.exists(sidx):
+        os.makedirs(os.path.join(dest, "strategy_history"), exist_ok=True)
+        shutil.copy2(sidx, os.path.join(dest, "strategy_history", "index.json"))
+    return dest
 
 
 # --- CLI for orchestrator convenience --------------------------------------
@@ -360,6 +552,10 @@ if __name__ == "__main__":
             return {"result": read_calls(rd, payload.get("kind"))}
         if view == "call":
             return {"result": read_call(rd, payload["file"])}
+        if view == "steps":
+            return {"result": read_steps(rd, payload.get("generation"), payload.get("last_n"))}
+        if view == "step_tail":
+            return {"result": read_steps(rd, last_n=int(payload.get("last_n", 20)))}
         if view == "append_intervention":
             append_intervention(rd, payload["entry"])
             return {"appended": True}
@@ -370,6 +566,15 @@ if __name__ == "__main__":
                 payload.get("summary"),
             )
             return {"logged": True, "file": path}
+        if view == "build_run_summary":
+            return {"result": build_run_summary(rd)}
+        if view == "finalize_run":
+            finalize_run(rd, payload["status"], payload.get("summary"))
+            return {"finalized": True, "status": payload["status"]}
+        if view == "archive_run":
+            dest = archive_run(rd, payload.get("dest_root", "orchestrator/run_archive"),
+                               payload.get("run_id"), payload.get("finished_at"))
+            return {"archived": True, "dest": dest}
         raise ValueError(f"unknown view: {view}")
 
     _common.run_main(main)

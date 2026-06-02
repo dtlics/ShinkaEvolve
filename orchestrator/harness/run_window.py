@@ -61,10 +61,18 @@ import compute_reward as compute_reward_script  # noqa: E402
 import record_policy as record_policy_script  # noqa: E402
 import cadence_policy as cadence_policy_script  # noqa: E402
 import island_policy as island_policy_script  # noqa: E402
+import meta_summarize as meta_summarize_script  # noqa: E402  (P3-T2 automatic per-window meta)
+import island_brief as island_brief_script  # noqa: E402  (P3-T2 auto-record per-island briefs)
+import repair_record as repair_record_script  # noqa: E402  (P5-T4 record failed repairs)
 import journal  # noqa: E402  (harness sibling)
 import strategy_store  # noqa: E402  (harness sibling — for the strategy fingerprint)
 
 FOLDER_PREFIX = "gen"
+
+# P6-T1: the starter run.json ships task_sys_msg as this sentinel; the harness refuses
+# to start until the orchestrator authors a real goal (the boot first-job), so a paid
+# run never proceeds with a placeholder goal.
+STARTER_SYS_MSG_SENTINEL = "__UNSET_AUTHOR_AT_BOOT__"
 
 
 def _read_code(path: str) -> str:
@@ -347,6 +355,10 @@ def _attempt_immediate_fixes(
     # matches the inter-candidate railguard in _one_window.
     prior_total = journal.total_cost(cfg["results_dir"])
     fix_cost = 0.0
+    # P6-T3: when use_text_feedback is False, suppress BOTH the evaluator's stdout and
+    # stderr/error text from the fix prompt (sample_fix reads ONLY these two channels),
+    # making disabling feedback a COMPLETE spoil mitigation. Default True (feedback on).
+    _utf = bool((cfg.get("evo") or {}).get("use_text_feedback", True))
     fix_used = 0
     while (not ev.get("correct")) and fix_used < int(fix_budget):
         if budget is not None and (prior_total + counters.get("cost", 0.0)) >= float(budget):
@@ -362,8 +374,9 @@ def _attempt_immediate_fixes(
             "combined_score": ev.get("combined_score", 0.0) or 0.0,
             "generation": generation,
             "metadata": {
-                "stdout_log": ev.get("stdout_log", "") or "",
-                "stderr_log": ev.get("error_traceback") or ev.get("text_feedback") or ev.get("stderr_log") or "",
+                "stdout_log": (ev.get("stdout_log", "") or "") if _utf else "",
+                "stderr_log": (ev.get("error_traceback") or ev.get("text_feedback")
+                               or ev.get("stderr_log") or "") if _utf else "",
             },
         }
         fix_prompt = construct_mutation_prompt.main(
@@ -412,7 +425,8 @@ def _attempt_immediate_fixes(
     return ev, mut, fix_cost
 
 
-def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str, int]) -> None:
+def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str, int],
+                       repair: bool = False) -> None:
     db_path = cfg["db_path"]
     db_config = cfg["db_config"]
     evo = cfg["evo"]
@@ -425,26 +439,55 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     _seed = evo.get("seed")
     gseed = (int(_seed) + generation) if _seed is not None else None
 
+    # Per-step oversight trace — written ONLY when tracing is on (warmup, and the
+    # framework-audit measuring window via --trace-steps); a harmless no-op otherwise.
+    # The orchestrator reads steps.jsonl after a traced window to oversee one window
+    # step by step. Folds no cost. (Call sites are added through the candidate flow.)
+    _trace_on = bool(cfg.get("trace_steps"))
+
+    def _trace(record: Dict[str, Any]) -> None:
+        if not _trace_on:
+            return
+        try:
+            journal.log_step(cfg["results_dir"], {**record, "generation": generation})
+        except Exception:
+            pass
+
     gen_dir = os.path.join(cfg["results_dir"], f"{FOLDER_PREFIX}_{generation}")
     results_dir = os.path.join(gen_dir, "results")
     os.makedirs(results_dir, exist_ok=True)
 
-    # 1. sample parent + inspirations (MUTABLE policy)
-    sp = sample_parent.main(
-        {
-            "db_path": db_path,
-            "db_config": db_config,
-            "embedding_model": embedding_model,
-            "seed": gseed,
-            "validity_floor": evo.get("validity_floor"),
-        }
-    )
+    # 1. sample parent + inspirations (MUTABLE policy). In repair mode, ask the sampler
+    # for an ERRORED parent to fix IN PLACE (no inspirations).
+    _sp_payload = {
+        "db_path": db_path,
+        "db_config": db_config,
+        "embedding_model": embedding_model,
+        "seed": gseed,
+        "validity_floor": evo.get("validity_floor"),
+    }
+    if repair:
+        _sp_payload["select"] = "errored"
+        _sp_payload["repair_attempt_cap"] = int(evo.get("repair_attempt_cap", 2) or 2)
+    sp = sample_parent.main(_sp_payload)
+    # A repair generation = repair requested AND the sampler returned an errored parent
+    # to fix (empty errored pool → needs_fix False → this behaves as a normal slot).
+    _repair_gen = bool(repair and sp.get("needs_fix"))
     parent = archive_query.main(
         {
             "db_path": db_path, "db_config": db_config, "embedding_model": embedding_model,
             "query_type": "get", "program_id": sp["parent_id"], "include_code": True,
+            # P5-T4: the repair escalation hook below reads parent.metadata.repair_attempts
+            # to detect strike-two; without this the hook could never fire.
+            "include_metadata": True,
         }
     )["result"]
+
+    _trace({"step": "sampler", "parent_id": sp.get("parent_id"),
+            "parent_score": parent.get("combined_score"),
+            "island_idx": sp.get("island_idx"), "needs_fix": bool(sp.get("needs_fix")),
+            "archive_inspiration_ids": sp.get("archive_inspiration_ids", []),
+            "top_k_inspiration_ids": sp.get("top_k_inspiration_ids", [])})
 
     def _fetch(ids: List[str]) -> List[Dict[str, Any]]:
         out = []
@@ -475,8 +518,14 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         # sample_fix reads metadata.stderr_log; the parent summary carries
         # error_traceback as a top-level field (no include_metadata here), so route
         # it in (mirrors the immediate-fix path's stderr_log chain).
+        _utf = bool(evo.get("use_text_feedback", True))
         _pmd = parent.get("metadata") or {}
-        if not _pmd.get("stderr_log"):
+        if not _utf:
+            # P6-T3: feedback suppressed → blank BOTH channels sample_fix reads, so
+            # use_text_feedback:false is a COMPLETE spoil mitigation on the repair path.
+            _pmd["stdout_log"] = ""
+            _pmd["stderr_log"] = ""
+        elif not _pmd.get("stderr_log"):
             # M5: a domain failure (the common cnot class) carries no traceback — fall
             # back to the persisted text_feedback so this repair prompt isn't blind.
             _pmd["stderr_log"] = (
@@ -508,6 +557,9 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             brief_text = None
 
     # 2. construct mutation prompt (MUTABLE policy; fix-mode picks the repair prompt)
+    # Capture the per-gen sampled meta direction ONCE (the sampler draws randomly per
+    # gen — recomputing it for the trace would show a different draw than was used).
+    _meta_for_gen = _compose_meta_for_gen(evo, generation)
     prompt = construct_mutation_prompt.main(
         {
             "parent": parent,
@@ -518,7 +570,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             # WS2/WS3: per-gen weighted sample of ONE meta direction. The persistent
             # failure caution rides separately as `failure_note` (always-on, never
             # dropped) rather than embedded in the direction string (M1/M2/M3/M4).
-            "meta_recommendations": _compose_meta_for_gen(evo, generation),
+            "meta_recommendations": _meta_for_gen,
             "failure_note": evo.get("meta_failure_note"),
             # H1: per-island direction (None unless the orchestrator authored one).
             "island_brief": brief_text,
@@ -532,6 +584,12 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             "seed": gseed,
         }
     )
+    _trace({"step": "prompt", "patch_type": prompt.get("patch_type"),
+            "meta_direction_present": bool(_meta_for_gen),
+            "island_brief_present": bool(brief_text),
+            "failure_note_present": bool(evo.get("meta_failure_note")),
+            "sys_len": len(prompt.get("patch_sys") or ""),
+            "msg_len": len(prompt.get("patch_msg") or "")})
 
     # 2b. select LLM (MUTABLE policy). Bandit only when a model pool is given;
     # otherwise fall back to a fixed model_name (mock path uses neither).
@@ -556,6 +614,15 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     # update below) keys on arm_id, so it learns per (model,effort); the actual call
     # uses the clean model_name + that arm's effort (default when the arm has no @).
     model_name, reasoning_effort = _parse_arm(arm_id, evo.get("reasoning_effort"))
+    # P5-T4: escalation hook (present-but-off, default None). On a repair generation's
+    # LAST attempt before the tombstone fires (the parent's repair_attempts would reach
+    # the cap this round), optionally route the repair to a stronger model.
+    if _repair_gen and evo.get("repair_escalation_model"):
+        _cap = int(evo.get("repair_attempt_cap", 2) or 2)
+        _att = int(((parent.get("metadata") or {}).get("repair_attempts", 0)) or 0)
+        if _att >= _cap - 1:
+            model_name, reasoning_effort = _parse_arm(
+                evo.get("repair_escalation_model"), evo.get("reasoning_effort"))
 
     # 3. mutate: LLM call + apply (IMMUTABLE body, MUTABLE prompt) — mockable
     mut_payload = {
@@ -590,6 +657,34 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     _mut_cost = float(mut.get("cost", 0.0) or 0.0)
     counters["cost"] = counters.get("cost", 0.0) + _mut_cost
     _slot_mut_cost = _mut_cost  # arm's total model spend for this slot (+= fix cost below)
+    _trace({"step": "llm_output", "applied": mut.get("applied"),
+            "num_applied": mut.get("num_applied"), "name": mut.get("name"),
+            "transport": mut.get("transport"), "attempts": mut.get("attempts"),
+            "cost": _mut_cost})
+
+    # 3a. TRUTHFUL RECORDING (F-INNER-1): if the patch never applied even after the
+    # bounded apply-retries, NO candidate was produced. mutate returns the parent code
+    # UNCHANGED with applied=False — record a TRUE failed/exhausted attempt: charge the
+    # model's token cost to the picking arm (cost-only, NO reward), archive NOTHING,
+    # surface it via the exhausted-retry signals, and drop the slot. Branch ONLY on
+    # `applied is False` — a deliberate identity patch returns applied=True with
+    # num_applied=0 and must still be evaluated.
+    if mut.get("applied") is False:
+        counters["apply_exhausted"] = counters.get("apply_exhausted", 0) + 1
+        counters.setdefault("exhausted_retry_slots", []).append(f"gen{generation}")
+        counters["exhausted_retry_count"] = counters.get("exhausted_retry_count", 0) + 1
+        if llm_models and arm_id:
+            # cost-only bandit feed (mirrors the novelty-reject feed): the arm pays its
+            # real spend with NO fabricated reward.
+            select_llm_script.main({
+                "mode": "update", "models": llm_models, "state_path": state_path,
+                "bandit_kwargs": evo.get("llm_dynamic_selection_kwargs", {}),
+                "arm": arm_id, "cost": _slot_mut_cost,
+                "cost_only": True, "reward": None, "baseline": None,
+            })
+        _trace({"step": "framework_decision", "action": "failed_apply_no_candidate",
+                "cost": _slot_mut_cost, "attempts": mut.get("attempts")})
+        return  # no novelty, no eval, no reward, no record, no archive
 
     # 3b. novelty check (MUTABLE policy) — gated; live runs enable it. On reject,
     # the slot is dropped before evaluation (matches shinka's rejection sampling).
@@ -628,6 +723,8 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                     "arm": arm_id, "cost": _rej_cost,
                     "cost_only": (not _penalize), "reward": None, "baseline": None,
                 })
+            _trace({"step": "framework_decision", "action": "dropped_novelty",
+                    "max_similarity": nov.get("max_similarity"), "rejected_cost": _rej_cost})
             return  # drop this slot; no eval, no record (cost fed to the bandit)
 
     # 4. evaluate (IMMUTABLE plumbing)
@@ -662,6 +759,15 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     counters["eval_total"] += 1
     if not ev["correct"]:
         counters["eval_failures"] += 1
+        # P2-T4: classify the un-repairable eval failure for the agent's sensor — a
+        # timeout (the harness eval-time-limit signal `timed_out`) vs a wrong answer
+        # (ran to completion but incorrect). Apply-exhausted is a distinct bucket
+        # handled before eval (step 3a). Coarse on purpose — do NOT parse the
+        # traceback into sub-types (that would couple the harness to the evaluator).
+        if ev.get("timed_out"):
+            counters["timeout_count"] = counters.get("timeout_count", 0) + 1
+        else:
+            counters["wrong_answer_count"] = counters.get("wrong_answer_count", 0) + 1
         # G1 (H7): this candidate is un-repairable (still incorrect AFTER the immediate-
         # fix loop / apply-retries exhausted their budget). Record its generation id so
         # the debug-agent escalation ("a candidate exhausts its retry budget") can fire
@@ -669,6 +775,39 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         counters.setdefault("exhausted_retry_slots", []).append(f"gen{generation}")
         counters["exhausted_retry_count"] = counters.get("exhausted_retry_count", 0) + 1
     counters["novelty_accepts"] += 1
+    _trace({"step": "eval", "correct": ev.get("correct"),
+            "combined_score": ev.get("combined_score"), "timed_out": ev.get("timed_out"),
+            "failure_kind": (None if ev.get("correct")
+                             else ("timeout" if ev.get("timed_out") else "wrong"))})
+
+    # 4a'. REPAIR generation that FAILED → do NOT archive a new child. Append the
+    # failure (truncated) to the errored PARENT's own record + bump its repair count;
+    # after the attempt cap the parent is tombstoned (de-archived, lineage preserved).
+    # A repair that SUCCEEDED falls through and is archived as a normal correct child.
+    if _repair_gen and not ev.get("correct"):
+        counters["repair_fail_count"] = counters.get("repair_fail_count", 0) + 1
+        try:
+            _rr = repair_record_script.main({
+                "db_path": db_path, "db_config": db_config,
+                "embedding_model": embedding_model,
+                "program_id": sp["parent_id"], "action": "append_fail",
+                "traceback_chunk": (ev.get("error_traceback") or ev.get("text_feedback") or ""),
+                "attempt_cap": int(evo.get("repair_attempt_cap", 2) or 2),
+            })
+            if _rr.get("tombstoned"):
+                counters["repair_tombstoned_count"] = counters.get("repair_tombstoned_count", 0) + 1
+        except Exception:
+            pass
+        if llm_models and arm_id:  # charge the arm's spend (cost-only, no reward)
+            select_llm_script.main({
+                "mode": "update", "models": llm_models, "state_path": state_path,
+                "bandit_kwargs": evo.get("llm_dynamic_selection_kwargs", {}),
+                "arm": arm_id, "cost": _slot_mut_cost,
+                "cost_only": True, "reward": None, "baseline": None,
+            })
+        _trace({"step": "framework_decision", "action": "repair_failed_no_archive",
+                "program_id": sp.get("parent_id")})
+        return  # NO new child archived — the failure rode onto the errored parent's record
 
     # 4b. compute reward (MUTABLE — scoring concern, generation half)
     reward = compute_reward_script.main(
@@ -728,6 +867,9 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             "program": program_fields,
         }
     )
+    _trace({"step": "framework_decision",
+            "action": "recorded_correct" if ev.get("correct") else "recorded_incorrect",
+            "reward": reward.get("reward"), "arm": arm_id})
 
     # 6. bandit update (MUTABLE — scoring concern, consumption half) using the
     # reward from compute_reward.py (NOT a hardcoded score).
@@ -748,6 +890,23 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     # Install-isolation guarantee: fail loudly if `shinka` is not this repo's.
     # Pass the harness's repo root (always correct, even when scripts/ is a copy).
     _common.assert_worktree_shinka(_REPO_ROOT)
+
+    # P6-T1: BOOT guard. The orchestrator's first job is to author task_sys_msg (the
+    # goal + hard constraints, without spoiling the held-out metric). Refuse to start —
+    # spending NOTHING (before bootstrap/init_run) — if it was never authored: None,
+    # empty, or the starter sentinel. require_sys_msg (default True) is the override for
+    # a bare debug smoke; --warmup flips it off for its throwaway run only (P2-T2).
+    _task0 = cfg.get("task") or {}
+    _sysmsg = _task0.get("task_sys_msg")
+    if (_sysmsg is None or str(_sysmsg).strip() == ""
+            or str(_sysmsg).strip() == STARTER_SYS_MSG_SENTINEL):
+        _msg = ("task_sys_msg is unset/placeholder — author the goal + hard constraints "
+                "(no-spoil) before running; set task.require_sys_msg=false to override "
+                "for a bare debug smoke.")
+        if _task0.get("require_sys_msg", True):
+            raise SystemExit(f"[boot] refusing to start: {_msg}")
+        sys.stderr.write(f"[boot] WARNING: {_msg}\n")
+
     db_path = cfg.setdefault(
         "db_path", os.path.join(cfg["results_dir"], "programs.sqlite")
     )
@@ -814,6 +973,11 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "needs_fix_count": 0,  # M9: sampled incorrect parents routed to repair mode
             "exhausted_retry_slots": [],  # G1/H7: gen ids of un-repairable slots this window
             "exhausted_retry_count": 0,
+            "apply_exhausted": 0,  # P1-T1: slots where the patch never applied (no candidate produced)
+            "timeout_count": 0,       # P2-T4: un-repairable eval failures that timed out
+            "wrong_answer_count": 0,  # P2-T4: un-repairable eval failures that ran but were wrong
+            "repair_fail_count": 0,       # P5-T4: repair generations that failed to fix
+            "repair_tombstoned_count": 0, # P5-T4: parents tombstoned after the attempt cap
         }
         # HARD budget railguard (immutable safety, NOT a strategy knob): stop
         # starting candidates once cumulative spend (this window so far + all
@@ -822,12 +986,18 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         prior_total = journal.total_cost(cfg["results_dir"])
         budget_hit = False
         iters_run = 0  # actual candidates attempted (may be < window_size on budget break)
+        # P5-T4: repair-mode gate — ON when the PRIOR window's errored_fraction (which
+        # EXCLUDES tombstoned programs, so the latch can RELEASE once dead programs are
+        # removed) is >= the trigger. Only the FIRST slot of the window repairs.
+        _prev_win = journal.read_windows(cfg["results_dir"], last_n=1)
+        _errored_frac = float((_prev_win[-1].get("errored_fraction", 0.0) if _prev_win else 0.0) or 0.0)
+        repair_on = _errored_frac >= float(evo.get("repair_trigger_fraction", 0.20))
         for i in range(window_size):
             if budget is not None and (prior_total + counters["cost"]) >= float(budget):
                 budget_hit = True
                 break
             counters["iter_index"] = i
-            _run_one_candidate(cfg, next_gen + i, counters)
+            _run_one_candidate(cfg, next_gen + i, counters, repair=(repair_on and i == 0))
             iters_run += 1
 
         # H8/O3 (opt-in): drive island spawn/migrate via the MUTABLE island_policy
@@ -874,7 +1044,6 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 # constant window_size (they differ on a budget/early break).
                 "window_index": widx, "iters_completed": iters_run,
                 "best_score_start": best_start, "window_size": window_size,
-                "current_strategy_hash": cfg.get("strategy_hash"),  # deprecated
                 "strategy_fingerprint": strategy_fingerprint,
                 "tau": evo.get("tau", 0.0),  # deprecated abs_floor alias
                 "stagnation_abs_floor": evo.get("stagnation_abs_floor"),
@@ -894,11 +1063,75 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 "llm_bandit_counts": bandit_counts,
                 "exhausted_retry_slots": counters.get("exhausted_retry_slots", []),
                 "exhausted_retry_count": counters.get("exhausted_retry_count", 0),
+                "apply_exhausted": counters.get("apply_exhausted", 0),
+                "timeout_count": counters.get("timeout_count", 0),
+                "wrong_answer_count": counters.get("wrong_answer_count", 0),
+                "repair_fail_count": counters.get("repair_fail_count", 0),
+                "repair_tombstoned_count": counters.get("repair_tombstoned_count", 0),
+                # P2-T3 sensor knobs threaded for diagnostics (collapse + repair trigger):
+                "model_collapse_frac": evo.get("model_collapse_frac", 0.85),
+                "model_collapse_min_pulls": evo.get("model_collapse_min_pulls", 8),
+                "repair_trigger_fraction": evo.get("repair_trigger_fraction", 0.20),
             }
         )
         diag["window_cost"] = counters["cost"]
         diag["budget_hit"] = budget_hit
         journal.append_window(cfg["results_dir"], diag)  # folds window_cost into the ledger
+
+        # P3-T2: AUTOMATIC per-window meta round — run by the HARNESS, not the agent. One
+        # call → global directions + a failure caution + ONE distinct direction per live
+        # island, auto-recorded as per-island briefs so islands diverge BY DEFAULT. The
+        # call self-logs + folds its own cost into the ledger (do NOT append_intervention
+        # it). Wrapped so a meta/parse/brief bug can NEVER crash a window. auto_meta:false
+        # skips the WHOLE round (global + per-island briefs). It runs AFTER append_window
+        # so diag's island_health is final; total_cost is refreshed below to include it.
+        if evo.get("auto_meta", True):
+            try:
+                _mock = cfg.get("mock", {}) or {}
+                _meta_gen = (next_gen + iters_run - 1) if iters_run else next_gen
+                _meta_payload = {
+                    "model_name": evo.get("meta_model", "azure-gpt-5.5"),
+                    "reasoning_effort": evo.get("meta_reasoning_effort", "medium"),
+                    "goal": cfg["task"].get("task_sys_msg"),
+                    "db_path": db_path, "db_config": db_config,
+                    "embedding_model": embedding_model,
+                    "results_dir": cfg["results_dir"],  # self-logs + folds cost into the ledger
+                    "budget_usd": budget,                # meta self-skips near the cap
+                    "run_id": cfg.get("run_id"),
+                    "meta_failures_first_frac": evo.get("meta_failures_first_frac", 0.5),
+                    "islands": [{"id": h.get("id"), "best": h.get("best"), "count": h.get("count")}
+                                for h in diag.get("island_health", []) or []],
+                    "num_islands": len(diag.get("island_health", []) or []),
+                }
+                if _mock.get("enabled"):  # offline runs/tests: no Azure call
+                    _meta_payload["mock"] = True
+                    _meta_payload["mock_text"] = _mock.get("meta_mock_text", "")
+                _meta = meta_summarize_script.main(_meta_payload)
+                if not (_meta.get("skipped") or _meta.get("degraded")):
+                    # Write global output into the LIVE evo dict (don't clobber a non-empty
+                    # prior with None). run_window samples meta_directions per gen; the
+                    # failure_note rides into every gen.
+                    if _meta.get("directions"):
+                        evo["meta_directions"] = _meta["directions"]
+                    if _meta.get("failure_note"):
+                        evo["meta_failure_note"] = _meta["failure_note"]
+                    # Auto-record ONE distinct brief per live island so islands diverge.
+                    for _isl in _meta.get("island_directions", []) or []:
+                        try:
+                            island_brief_script.main({
+                                "db_path": db_path, "db_config": db_config,
+                                "embedding_model": embedding_model,
+                                "island_idx": int(_isl["island_idx"]),
+                                "generation": _meta_gen,
+                                "content": _isl.get("text", ""),
+                                "stage": "auto_meta", "cost": 0.0,
+                            })
+                        except Exception:
+                            pass  # one bad island entry must not abort the rest
+            except Exception:
+                pass  # a meta/parse/brief failure must NEVER crash a window
+
+        # Refresh AFTER the meta round so the returned diag includes meta spend.
         diag["total_cost"] = journal.total_cost(cfg["results_dir"])
         diag["budget_remaining"] = journal.budget_remaining(cfg["results_dir"], budget)
         return diag
@@ -910,26 +1143,52 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     # NOT delegated — it always hard-stops.
     cadence = cfg.get("cadence", {}) or {}
     until_decision = cadence.get("mode") == "until_decision"
-    max_per_call = int(cadence.get("max_windows_per_call", 3))
+    # OPTIONAL explicit ceiling (default: none → the work-score taper is UNCAPPED,
+    # bounded only by the budget hard-stop / stagnation / termination). legacy knob.
+    max_per_call = cadence.get("max_windows_per_call")  # None unless the user sets one
+    base_low = float(cadence.get("base_low", 5) or 5)
+    low_threshold = float(cadence.get("low_threshold", 1) or 0.0)
 
     last_diag: Dict[str, Any] = {}
     if until_decision:
+        # The next cluster's size is driven by the LAST control-return's work score
+        # (recorded by the agent before this call) + how long work has stayed low.
+        _recent_work = journal.recent_work_score(cfg["results_dir"])
+        _low_streak = journal.work_low_streak(cfg["results_dir"], low_threshold)
+        # No-score reminder: if the agent completed several control-returns but never
+        # recorded a work score, the taper has no signal (and wakes every window).
+        if _recent_work is None and len(journal.read_windows(cfg["results_dir"])) >= 3:
+            sys.stderr.write(
+                "[cadence] no work_score recorded across recent control-returns — the "
+                "taper is waking every window by default; record a work score (how much "
+                "the last control-return did) after each return so the loop can taper.\n"
+            )
         windows_run = 0
         while True:
             last_diag = _one_window(window_index, prior_low_streak)
             windows_run += 1
             prior_low_streak = last_diag.get("low_streak", 0)
             window_index += 1
-            if last_diag.get("budget_hit"):  # HARD railguard, not mutable
+            if last_diag.get("budget_hit"):  # HARD railguard, not mutable; NO window cap
+                last_diag["return_reason"] = "budget_exhausted"
+                break
+            # Budget hard-stop takes PRECEDENCE over the taper at the cluster boundary:
+            # if cumulative spend has reached the cap, stop NOW (return "budget_exhausted",
+            # not "taper") so the run terminates rather than handing back for another cluster.
+            if budget is not None and journal.total_cost(cfg["results_dir"]) >= float(budget):
+                last_diag["budget_hit"] = True
                 last_diag["return_reason"] = "budget_exhausted"
                 break
             decision = cadence_policy_script.main(
                 {
                     "stagnation_flag": last_diag.get("stagnation_flag"),
                     "windows_run": windows_run,
-                    "max_windows_per_call": max_per_call,
+                    "recent_work_score": _recent_work,
+                    "work_low_streak": _low_streak,
+                    "base_low": base_low,
+                    "low_threshold": low_threshold,
+                    "max_windows_per_call": max_per_call,  # None → no ceiling
                     "low_streak": last_diag.get("low_streak"),
-                    "J_score": last_diag.get("J_score"),
                     "evaluation_failure_rate": last_diag.get("evaluation_failure_rate"),
                 }
             )
@@ -947,6 +1206,16 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 break
         last_diag.setdefault("return_reason", "windows_done")
 
+    # P8-T1: finalize the run ledger on the budget-exhausted TERMINAL return (so the
+    # status reflects the stop). User-stop / five-in-a-row terminations are the agent's
+    # judgment and call the journal `finalize_run` CLI view itself; a non-terminal
+    # cadence/taper return does NOT finalize.
+    if last_diag.get("return_reason") == "budget_exhausted":
+        try:
+            journal.finalize_run(cfg["results_dir"], "budget_exhausted")
+        except Exception:
+            pass
+
     last_diag["ok"] = True
     return last_diag
 
@@ -963,8 +1232,8 @@ def _hold_no_idle_sleep():
     even if run_window is SIGKILLed, and there is no orphaned assertion.
 
     Best-effort and self-disabling: no-op off macOS, if `/usr/bin/caffeinate` is
-    absent, or if an outer wrapper already set ``SHINKA_CAFFEINATED`` (e.g.
-    run_detached.py). Lives in the CLI path only, so imported/test calls of
+    absent, or if an outer wrapper already set ``SHINKA_CAFFEINATED`` (e.g. an
+    outer caffeinate wrapper). Lives in the CLI path only, so imported/test calls of
     ``main()`` never spawn caffeinate. NOTE: caffeinate cannot override a
     closed-lid (clamshell) sleep on a laptop — keep the lid open for unattended runs.
     """
@@ -987,6 +1256,18 @@ def _hold_no_idle_sleep():
         return None
 
 
+def cleanup_warmup(results_dir: str) -> bool:
+    """Delete the throwaway <results_dir>/warmup workspace so warmup artifacts never
+    pollute the real run. Idempotent: True if it removed a dir, False if none existed."""
+    import shutil
+
+    warm = os.path.join(results_dir, "warmup")
+    if os.path.isdir(warm):
+        shutil.rmtree(warm, ignore_errors=True)
+        return True
+    return False
+
+
 def _cli() -> None:
     # Self-protect against host idle-sleep reaping a long run (see docstring).
     _caffeinate_proc = _hold_no_idle_sleep()  # noqa: F841 (kept alive for the run)
@@ -1005,9 +1286,50 @@ def _cli() -> None:
              "journal's last window instead of the hand-maintained config (F15) — "
              "removes the cross-invocation bookkeeping footgun",
     )
+    ap.add_argument(
+        "--warmup", action="store_true",
+        help="WARMUP: run ONE window in a THROWAWAY workspace (<results_dir>/warmup — its "
+             "own db + journal) with per-step tracing ON, so you can oversee one window "
+             "step by step (read its journal/steps.jsonl), stop-correct-restart until it is "
+             "meaningful, then clean up — WITHOUT polluting the real run. Validates the "
+             "mechanism on a fresh archive. Clean up with --cleanup-warmup.",
+    )
+    ap.add_argument(
+        "--trace-steps", action="store_true",
+        help="turn per-step tracing ON for this invocation WITHOUT the warmup redirect — "
+             "for the framework-audit measuring window (run with --windows 1) so its "
+             "journal/steps.jsonl exists for you to read.",
+    )
+    ap.add_argument(
+        "--cleanup-warmup", action="store_true",
+        help="delete the <results_dir>/warmup throwaway workspace and exit.",
+    )
     args = ap.parse_args()
     with open(args.config) as f:
         cfg = json.load(f)
+    if args.cleanup_warmup:
+        removed = cleanup_warmup(cfg["results_dir"])
+        sys.stdout.write(_common.dumps({"ok": True, "cleaned_warmup": removed}))
+        sys.stdout.flush()
+        return
+    _warmup_dir = None
+    if args.warmup:
+        # Run in a THROWAWAY workspace so the real archive/journal stay pristine; the
+        # agent oversees this fresh-archive window, then cleans it up. Trace ON; the
+        # boot sentinel guard is relaxed for THIS invocation only (warmup runs BEFORE the
+        # agent has authored task_sys_msg) — the real run keeps require_sys_msg=True.
+        _warmup_dir = os.path.join(cfg["results_dir"], "warmup")
+        cfg["results_dir"] = _warmup_dir
+        cfg["db_path"] = os.path.join(_warmup_dir, "programs.sqlite")
+        cfg["trace_steps"] = True
+        cfg.setdefault("task", {})["require_sys_msg"] = False
+        cfg.setdefault("cadence", {})["mode"] = "bounded"
+        if args.windows is None:
+            cfg["windows"] = 1
+        if args.iters is None:
+            cfg["iters"] = 1
+    elif args.trace_steps:
+        cfg["trace_steps"] = True
     if args.windows is not None:
         cfg["windows"] = args.windows
         # F5: an explicit --windows means "run exactly N bounded windows". Force
@@ -1035,6 +1357,13 @@ def _cli() -> None:
                 f"prior_low_streak→{ws['prior_low_streak']}\n"
             )
     result = main(cfg)
+    if _warmup_dir:
+        result["warmup_workspace"] = _warmup_dir
+        sys.stderr.write(
+            f"[warmup] ran in throwaway workspace {_warmup_dir}\n"
+            f"[warmup] read the per-step trace at {_warmup_dir}/journal/steps.jsonl; when "
+            f"satisfied, clean up with --cleanup-warmup (or rm -rf {_warmup_dir})\n"
+        )
     sys.stdout.write(_common.dumps(result))
     sys.stdout.flush()
 

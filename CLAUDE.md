@@ -47,8 +47,11 @@ operating playbook — before acting. In short:
   (sqlite schema, the JSON contract, the evaluator, the user's `evaluate.py`/`initial.*`).
   Defer foundation ideas to the end-of-run **ending document**.
 - **Do not stop until a termination criterion is met:** budget exhausted; user says stop;
-  OR five consecutive control-returns each with an intervention (a DR round or a framework
-  change), at least one being a DR. Keep launching the next cluster.
+  OR five consecutive control-returns that were each STAGNANT and each had an intervention
+  (a framework rewrite OR a DR) that still could not break the stagnation. This is now
+  harness-computed + auto-finalized (`return_reason="stagnation_intervention_exhausted"`,
+  via `journal.termination_streak` over your canonical `control_return` rows); there is no
+  "≥1 DR" requirement — a DR just counts as an intervention. Keep launching the next cluster.
 - **The budget is hard-capped in code and the ledger is crash-durable.** Set `budget_usd`;
   the harness sums every LLM cost (mutation/meta/DR/embeddings) + your logged interventions
   and hard-stops at the cap (`budget_exhausted`); a per-call ~$10 max-output-token cap

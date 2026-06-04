@@ -1932,6 +1932,278 @@ def test_dr_refusal_folds_cost_to_ledger():
     return None
 
 
+def test_restore_state_rewinds_code():
+    """C1: a documented revert (restore_state) must rewind the strategy .py too — not just
+    archive+bandit+ledger. deploy() records the pre-deploy code hash into the state snapshot;
+    restore_state(snap_id) copies it back over scripts/<target>."""
+    import json as _json
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import strategy_store as ss
+
+    with tempfile.TemporaryDirectory() as td:
+        scripts = os.path.join(td, "scripts")
+        os.makedirs(scripts)
+        target = "sample_parent.py"  # a MUTABLE_TARGETS member
+        open(os.path.join(scripts, target), "w").write("# V1 ORIGINAL\n")
+        cand = os.path.join(td, "candidate.py")
+        open(cand, "w").write("# V2 REGRESSION\n")
+        rd = os.path.join(td, "run")
+        os.makedirs(os.path.join(rd, "journal"))
+        with open(os.path.join(rd, "journal", "run.json"), "w") as f:
+            _json.dump({"run_id": "r", "total_cost": 2.0}, f)
+        os.environ["SHINKA_ORCH_SCRIPTS_DIR"] = scripts
+        os.environ["SHINKA_ORCH_HISTORY_DIR"] = os.path.join(td, "hist")
+        try:
+            dep = ss.deploy(cand, target, reason="t", results_dir=rd)
+            assert open(os.path.join(scripts, target)).read() == "# V2 REGRESSION\n"  # deployed
+            out = ss.restore_state(rd, dep["state_snap_id"])
+            assert open(os.path.join(scripts, target)).read() == "# V1 ORIGINAL\n"  # CODE rewound (C1)
+            assert target in out["code_restored"], out
+        finally:
+            os.environ.pop("SHINKA_ORCH_SCRIPTS_DIR", None)
+            os.environ.pop("SHINKA_ORCH_HISTORY_DIR", None)
+    return None
+
+
+def test_restore_state_ledger_recompute_on_corrupt():
+    """H10: if the live run.json is CORRUPT at revert time, restore_state recomputes the
+    ledger from the durable streams (never restores the snapshot's lower value)."""
+    import json as _json
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import strategy_store as ss
+
+    with tempfile.TemporaryDirectory() as td:
+        scripts = os.path.join(td, "scripts")
+        os.makedirs(scripts)
+        target = "sample_parent.py"
+        open(os.path.join(scripts, target), "w").write("# V1\n")
+        cand = os.path.join(td, "c.py")
+        open(cand, "w").write("# V2\n")
+        rd = os.path.join(td, "run")
+        jd = os.path.join(rd, "journal")
+        os.makedirs(jd)
+        with open(os.path.join(jd, "calls.jsonl"), "w") as f:  # TRUE durable spend = 4.0
+            f.write(_json.dumps({"cost": 2.0}) + "\n")
+            f.write(_json.dumps({"cost": 2.0}) + "\n")
+        with open(os.path.join(jd, "run.json"), "w") as f:
+            _json.dump({"run_id": "r", "total_cost": 1.0}, f)  # stale/low at snapshot time
+        os.environ["SHINKA_ORCH_SCRIPTS_DIR"] = scripts
+        os.environ["SHINKA_ORCH_HISTORY_DIR"] = os.path.join(td, "hist")
+        try:
+            dep = ss.deploy(cand, target, reason="t", results_dir=rd)
+            open(os.path.join(jd, "run.json"), "w").write("{ this is not json")  # corrupt live
+            out = ss.restore_state(rd, dep["state_snap_id"])
+            run = _json.load(open(os.path.join(jd, "run.json")))
+            assert run["total_cost"] == 4.0, run  # recomputed from streams, NOT the snapshot's 1.0
+            assert out["total_cost_preserved"] == 4.0, out
+        finally:
+            os.environ.pop("SHINKA_ORCH_SCRIPTS_DIR", None)
+            os.environ.pop("SHINKA_ORCH_HISTORY_DIR", None)
+    return None
+
+
+def test_no_spoil_blanks_ancestor_inspiration():
+    """H9: use_text_feedback=False must strip an ANCESTOR inspiration's evaluator
+    text_feedback from the fix prompt (the leak the audit found)."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import construct_mutation_prompt as cmp
+
+    def _fix(utf):
+        parent = {"id": "p", "code": "x=1\n", "combined_score": 0.0,
+                  "metadata": {"stdout_log": "", "stderr_log": ""}}
+        anc = {"id": "a", "code": "y=2\n", "combined_score": 0.9,
+               "text_feedback": "HELDOUT=0.99", "correct": True}
+        out = cmp.main({"parent": parent, "needs_fix": True, "ancestor_inspirations": [anc],
+                        "language": "python", "patch_types": ["diff"], "patch_type_probs": [1.0],
+                        "task_sys_msg": "t", "seed": 0, "use_text_feedback": utf})
+        return (out.get("patch_sys", "") or "") + "\n" + (out.get("patch_msg", "") or "")
+
+    assert "HELDOUT=0.99" in _fix(True)        # feedback ON → ancestor text present
+    assert "HELDOUT=0.99" not in _fix(False)   # feedback OFF → stripped (H9)
+    return None
+
+
+def test_no_spoil_meta_blanks_error_text():
+    """M6: use_text_feedback=False keeps the evaluator's error_traceback OUT of the meta
+    round's prompt (it otherwise rides into per-island directions)."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import meta_summarize as ms
+
+    recents = [{"generation": 1, "correct": False, "combined_score": 0.0,
+                "error_traceback": "boom HELDOUT=0.77", "metadata": {}}]
+    on = ms._build_user_msg({"goal": "g", "use_text_feedback": True}, recents)
+    off = ms._build_user_msg({"goal": "g", "use_text_feedback": False}, recents)
+    assert "HELDOUT=0.77" in on
+    assert "HELDOUT=0.77" not in off
+    return None
+
+
+def test_meta_islands_rich_schema():
+    """G3d/M13: meta parses the rich `islands` output (per-island directions with an
+    assigned_program_id) and DERIVES back-compat island_directions (highest-weight per
+    island). A null assigned_program_id → empty assigned list."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import meta_summarize
+
+    txt = ('{"directions": [{"text": "global", "weight": 0.5}], "failure_note": "",'
+           ' "islands": [{"island_idx": 0, "directions": ['
+           '{"text": "use CX ladder", "weight": 0.9, "assigned_program_id": "p7"},'
+           '{"text": "try panels", "weight": 0.3, "assigned_program_id": null}]},'
+           '{"island_idx": 1, "directions": [{"text": "greedy", "weight": 1.0}]}]}')
+    out = meta_summarize.main({"mock": True, "mock_text": txt, "goal": "g"})
+    isl = {i["island_idx"]: i for i in out["islands"]}
+    assert set(isl) == {0, 1}, out
+    assert isl[0]["directions"][0]["assigned_program_ids"] == ["p7"], out
+    assert isl[0]["directions"][1]["assigned_program_ids"] == [], out  # null → none
+    d0 = {d["island_idx"]: d["text"] for d in out["island_directions"]}
+    assert d0[0] == "use CX ladder" and d0[1] == "greedy", out  # derived headline
+    return None
+
+
+def test_sample_parent_direction_oriented():
+    """G6a/H1: with a STRUCTURED island brief, sample_parent draws ONE direction and uses
+    the programs ASSIGNED to it as inspirations (direction-driven), NOT the score-ranked
+    top — and returns the direction text for the prompt."""
+    import dataclasses as _dc
+    import json as _json
+    import tempfile
+
+    from shinka.database import DatabaseConfig, Program, ProgramDatabase
+
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import sample_parent
+
+    def _mk(pid, score):
+        kw = {}
+        for f in _dc.fields(Program):
+            if f.default is not _dc.MISSING or f.default_factory is not _dc.MISSING:
+                continue
+            tn = getattr(f.type, "__name__", str(f.type))
+            kw[f.name] = {"str": "", "int": 0, "float": 0.0, "bool": False}.get(tn, None)
+        kw.update(id=pid, code=f"# {pid}\nx = 1\n", combined_score=score, correct=True)
+        if "generation" in {f.name for f in _dc.fields(Program)}:
+            kw.setdefault("generation", 0)
+        if "language" in {f.name for f in _dc.fields(Program)}:
+            kw["language"] = "python"
+        p = Program(**kw)
+        p.metadata = {}
+        return p
+
+    with tempfile.TemporaryDirectory() as td:
+        dbp = os.path.join(td, "p.sqlite")
+        cfg = DatabaseConfig(db_path=dbp, num_islands=1, archive_size=20)
+        db = ProgramDatabase(cfg, embedding_model="", read_only=False)
+        try:
+            for pid, s in (("hi", 0.9), ("mid", 0.5), ("assigned", 0.1)):
+                db.add(_mk(pid, s))
+            db.record_meta_brief(
+                island_idx=0, generation=1, content="ladder", stage="auto_meta",
+                structured_json=_json.dumps({"directions": [
+                    {"text": "use a CX ladder", "weight": 1.0,
+                     "assigned_program_ids": ["assigned"]}]}),
+            )
+        finally:
+            db.close()
+        out = sample_parent.main({"db_path": dbp, "db_config": {"num_islands": 1},
+                                  "island_idx": 0, "seed": 0})
+        assert out["sampled_direction"] == "use a CX ladder", out
+        insp = set(out["archive_inspiration_ids"]) | set(out["top_k_inspiration_ids"])
+        # direction-oriented: ONLY the assigned program is shown (never the score-ranked
+        # hi/mid) — proving selection is direction-driven, not top-score.
+        assert insp <= {"assigned"}, out
+        if out["parent_id"] != "assigned":
+            assert "assigned" in insp, out
+    return None
+
+
+def test_novelty_keep_better_contract():
+    """H5: novelty_check returns the incumbent's SCORE (so the caller can KEEP THE BETTER of
+    a near-dup pair) and SKIPS tombstoned programs (an evicted dup can't keep blocking)."""
+    import dataclasses as _dc
+    import tempfile
+
+    from shinka.database import DatabaseConfig, Program, ProgramDatabase
+
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import novelty_check
+
+    def _mk(pid, score, emb):
+        kw = {}
+        for f in _dc.fields(Program):
+            if f.default is not _dc.MISSING or f.default_factory is not _dc.MISSING:
+                continue
+            tn = getattr(f.type, "__name__", str(f.type))
+            kw[f.name] = {"str": "", "int": 0, "float": 0.0, "bool": False}.get(tn, None)
+        kw.update(id=pid, code=f"# {pid}\nx = 1\n", combined_score=score, correct=True,
+                  embedding=emb)
+        if "generation" in {f.name for f in _dc.fields(Program)}:
+            kw.setdefault("generation", 0)
+        if "language" in {f.name for f in _dc.fields(Program)}:
+            kw["language"] = "python"
+        p = Program(**kw)
+        p.metadata = {}
+        return p
+
+    with tempfile.TemporaryDirectory() as td:
+        dbp = os.path.join(td, "p.sqlite")
+        cfg = {"num_islands": 1, "archive_size": 20}
+        db = ProgramDatabase(DatabaseConfig(db_path=dbp, **cfg), embedding_model="", read_only=False)
+        try:
+            db.add(_mk("incumbent", 0.5, [1.0, 0.0, 0.0]))
+        finally:
+            db.close()
+        q = {"db_path": dbp, "db_config": cfg, "candidate_embedding": [1.0, 0.0, 0.0],
+             "code_embed_sim_threshold": 0.99, "island_idx": 0}
+        out = novelty_check.main(q)
+        assert out["accept"] is False, out                  # identical embedding → near-dup
+        assert out["most_similar_id"] == "incumbent", out
+        assert out["most_similar_score"] == 0.5, out        # incumbent score (keep-better data)
+        # tombstone the incumbent → it must no longer block a new candidate (H5).
+        db = ProgramDatabase(DatabaseConfig(db_path=dbp, **cfg), embedding_model="", read_only=False)
+        try:
+            db.tombstone_program("incumbent")
+        finally:
+            db.close()
+        assert novelty_check.main(q)["accept"] is True       # tombstoned dup skipped → novel
+    return None
+
+
+def test_termination_streak():
+    """G4/H6-H8: termination_streak counts trailing consecutive control_return rows that are
+    BOTH stagnant AND intervened; a stagnation-break or a no-intervention return resets it.
+    This is the deterministic replacement for the old uncomputable '5 incl >=1 DR' rule."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import journal
+
+    def _row(stag, interv):
+        return {"type": "control_return", "stagnation_flag": stag, "intervened": interv,
+                "work_score": (1 if interv else 0)}
+
+    with tempfile.TemporaryDirectory() as td:
+        for _ in range(3):  # 3 stagnant + intervened in a row
+            journal.append_intervention(td, _row(True, True))
+        assert journal.termination_streak(td) == 3
+        journal.append_intervention(td, _row(True, False))  # no-intervention return → reset
+        assert journal.termination_streak(td) == 0
+        journal.append_intervention(td, _row(True, True))
+        journal.append_intervention(td, _row(True, True))
+        assert journal.termination_streak(td) == 2
+        journal.append_intervention(td, _row(False, True))  # stagnation broke → reset
+        assert journal.termination_streak(td) == 0
+        # fallback: a row WITHOUT an explicit `intervened` derives it from work_audit/work_dr
+        journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
+                                         "work_dr": 2})
+        assert journal.termination_streak(td) == 1
+        # a DR alone counts as an intervention (no ">=1 DR of 5" special rule anymore)
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
@@ -1989,6 +2261,14 @@ if __name__ == "__main__":
         ("validate_select_llm_negative", test_validate_select_llm_negative),
         ("dr_client_cost_on_failure", test_dr_client_cost_on_failure),
         ("dr_refusal_folds_cost_to_ledger", test_dr_refusal_folds_cost_to_ledger),
+        ("restore_state_rewinds_code", test_restore_state_rewinds_code),
+        ("restore_state_ledger_recompute_on_corrupt", test_restore_state_ledger_recompute_on_corrupt),
+        ("no_spoil_blanks_ancestor_inspiration", test_no_spoil_blanks_ancestor_inspiration),
+        ("no_spoil_meta_blanks_error_text", test_no_spoil_meta_blanks_error_text),
+        ("meta_islands_rich_schema", test_meta_islands_rich_schema),
+        ("sample_parent_direction_oriented", test_sample_parent_direction_oriented),
+        ("novelty_keep_better_contract", test_novelty_keep_better_contract),
+        ("termination_streak", test_termination_streak),
     ]
     ok = True
     for name, fn in tests:

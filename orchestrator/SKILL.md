@@ -110,18 +110,22 @@ This is the single source of truth; the rest of this doc expands each step.
 
 ## The work score (record it after every control-return)
 
-After you act on a control-return, append an intervention entry to `interventions.jsonl`
-with the magnitude of what you did, so the taper can pace the next cluster:
+After you act on a control-return, append ONE canonical row to `interventions.jsonl` — it
+drives BOTH the taper AND termination, so there is exactly one row per control-return:
+`{type:"control_return", window_index, stagnation_flag, best_score, work_audit, work_dr,
+work_score, intervened}`:
 - `work_audit` — framework-audit magnitude: a full core-strategy rewrite ≈ 3, a tiny
   param change ≈ 1, no change 0.
 - `work_dr` — DR magnitude: not run 0, run-but-nothing-new 1, new directions worth
   combining into an existing program 2, new directions worth grounding as a NEW island 3.
-- `work_score` — their sum (the scalar the default taper reads via
-  `journal.recent_work_score`). `journal.work_low_streak` counts the recent low-work
-  returns the escalation uses.
+- `work_score` — their sum (the scalar the taper reads via `journal.recent_work_score`;
+  `journal.work_low_streak` counts the recent low-work returns the escalation uses).
+- `stagnation_flag` — copy this return's window-diagnostics value (the stall state NOW).
+- `intervened` — `work_audit>0 or work_dr>0` (did you actually act this return?).
 
-Record it AFTER acting, never before — the score must describe what happened, not steer
-what you do.
+Record it AFTER acting, never before — the row must describe what happened, not steer what
+you do. The harness reads `stagnation_flag`+`intervened` across the last rows for the
+termination check (below); a forgotten row simply can't advance termination (fail-safe).
 
 ## How you launch the inner loop
 
@@ -155,7 +159,7 @@ Diagnostics shape (printed to stdout + appended to `journal/windows.jsonl`):
   fix_rate, fix_success_rate, needs_fix_rate,
   llm_bandit_weights, llm_bandit_counts,
   island_health:[{id,best,diversity,stagnation_count,count}],
-  stagnation_flag, low_streak, exhausted_retry_slots, exhausted_retry_count,
+  stagnation_flag, low_streak, termination_streak, exhausted_retry_slots, exhausted_retry_count,
   trigger_metric, total_programs, correct_programs,
   window_cost, total_cost, budget_remaining, budget_hit, windows_run, return_reason }
 ```
@@ -281,14 +285,20 @@ stay compatible.
 
 ## The automatic meta round (not yours to trigger)
 
-Every window, the harness calls `meta_summarize.py` once → global `directions` + a
-`failure_note` + one differentiated direction per live island, auto-recorded as per-island
-briefs so islands diverge by default. You don't hand-author briefs anymore. Your only meta
-levers: `evo.meta_model` / `evo.meta_reasoning_effort` (default `azure-gpt-5.5` medium;
-raise to `pro@high` when the directions are worth the high cost — pro rejects `low`), or
-`evo.auto_meta:false` (which suppresses the WHOLE round — global directions AND per-island
-briefs; islands keep their last brief / the global direction). Its cost folds
-automatically; it's budget-gated and wrapped so a meta failure never aborts a window.
+Every window, the harness calls `meta_summarize.py` once. It now sees the archive grouped
+PER ISLAND with a CODE preview of each island's top + failed programs (not just score
+trends — H11), and returns global `directions` + a `failure_note` + a RICH per-island
+`islands` block: 1–3 directions per live island, each optionally tagged with an
+`assigned_program_id` — the existing program that already realizes it. Those per-island
+directions + their program assignments are auto-recorded as each island's brief
+(`structured_json`), and the SAMPLER reads them (see the islands note below) so islands
+diverge in BOTH their prompt direction AND the exemplar code shown — not text alone. You
+don't hand-author briefs. Your meta levers: `evo.meta_model` / `evo.meta_reasoning_effort`
+(default `azure-gpt-5.5` medium; raise to `pro@high` when worth it — pro rejects `low`);
+`evo.meta_code_preview_chars` (default 1200 — shrink if meta cost climbs); or
+`evo.auto_meta:false` (suppresses the WHOLE round — global + per-island; islands keep their
+last brief). Its cost folds automatically; budget-gated and wrapped so a meta failure never
+aborts a window.
 
 ## Is a model never being picked? (the framework-audit check)
 
@@ -438,12 +448,19 @@ recommendation, forget the detail. For periodic structural reads, spawn
 
 ## Termination + end of run
 
-**Stop when:** the budget is exhausted; the user says stop; OR there have been **five
-consecutive control-returns each of which involved an intervention** (a DR round or a
-framework change), with **at least one of the five being a DR** → stop before the sixth
-return. This is your judgment, read from `interventions.jsonl` (the harness keeps returning
-control; there is no counter in it). The automatic per-window meta round does NOT count as
-an intervention. A pre-assumed/reference score in the docs does NOT end the run early.
+**Stop when:** the budget is exhausted; the user says stop; OR **five consecutive
+control-returns were each STAGNANT and each had an intervention** (a framework rewrite OR a
+DR) that still could not break the stagnation → the search is stuck despite intervening, so
+stop. This is now **harness-computed and auto-finalized** (parity with budget): the harness
+reads your canonical `control_return` rows (`stagnation_flag`+`intervened`) via
+`journal.termination_streak`, and when the streak reaches `cadence.termination_streak`
+(default 5) the next `--until-decision` call returns
+`return_reason="stagnation_intervention_exhausted"` and finalizes — so two agents can't
+disagree on the count. Stagnation ALONE never terminates (only stagnation your interventions
+couldn't break); a stagnation-break OR a no-intervention return resets the streak. There is
+no longer a "≥1 DR of 5" requirement — a DR simply counts as an intervention. The automatic
+per-window meta round does NOT count as an intervention. A pre-assumed/reference score in
+the docs does NOT end the run early.
 
 **End of run:** review the whole history and write an **ending document** — the run's
 outcome + a "Future fixes for the user before the next run" section (foundation/outer-loop
@@ -488,7 +505,7 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
 | `diagnostics.py` | assemble window diagnostics (your sensor) | No (foundation) | No |
 | `_common.py` | JSON contract | No (foundation) | No |
 | `sample_parent.py` | parent + inspirations + `needs_fix` (+ `select:"errored"` repair mode) | **Yes** | No |
-| `novelty_check.py` | reject near-duplicates | **Yes** | No |
+| `novelty_check.py` | near-duplicate decision + incumbent score (caller keeps the better) | **Yes** | No |
 | `select_llm.py` | pick model; learn (bandit) | **Yes** | No |
 | `compute_reward.py` | reward signal for selection | **Yes** | No |
 | `record_policy.py` | derived signals → metadata | **Yes** | No |
@@ -551,25 +568,33 @@ Many decisions that *look* like a code rewrite are already `evo.*` knobs. Prefer
 | `mutation_web_search` / `fix_web_search` | false | web search on the mutation / fix calls | ONLY on a grounding run nailing a DR reference |
 | `cost_aware_coef` | 0.25 shipped (engine default 0.0 when `llm_dynamic_selection_kwargs` is unset) | bandit reward-vs-cheapness blend | raise→0.7 if cheapness should dominate; lower→0 if a pricier arm is the only one improving and is being starved |
 | `epsilon` | 0.2 | bandit exploration floor | an arm's share decaying toward 0 while it still occasionally improves → raise to 0.4–0.6 |
-| `code_embed_sim_threshold` | 0.99 | novelty cosine gate | false-rejects (large programs cluster 0.96–0.98) → raise; watch `novelty_rejected_cost` |
+| `code_embed_sim_threshold` | 0.99 | near-duplicate cosine gate; a near-dup is now EVALUATED then the BETTER of the pair is kept (the worse is dropped / tombstoned) — H5 | false-rejects (large programs cluster 0.96–0.98) → raise; note a near-dup now costs an eval; watch `novelty_rejected_cost` |
 | `stagnation_abs_floor`/`rel_frac` | 0.001 / 0.05 | the "low window" bar | recalibrate to the task's natural per-window climb |
 | `validity_floor` | none (inert) | floors VALID parents' selection score (`sample_parent`) | many correct programs pinned at 0 and selection can't separate them |
 | `reward_validity_floor` | 0.001 | floors a correct candidate's bandit reward so correct-but-worse beats *failed* | an arm with high eval-success is starved because its children rarely beat the parent |
 | `reward_on_reject` | cost_only | a novelty-rejected slot bills the arm's COST only (neutral) vs `penalize` | a duplicate-prone arm should be penalized for waste |
 | `force_explore` / `llm_subset` | false / null | ignore the collapsed bandit (uniform) / restrict to a subset | re-open a starved/locked-out arm (the framework-audit check) |
-| `use_text_feedback` | true | feed the evaluator's failure reason into the fix prompt | false on a spoil-risk task (a complete suppression) |
+| `use_text_feedback` | true | feed the evaluator's failure reason into the fix/repair/meta prompts | false on a spoil-risk task — a COMPLETE suppression (gates the fix, sampled-ancestor, AND meta error-text channels — H9) |
 | `island_policy_driven` | false | drive spawn/migrate/retire via mutable `island_policy.py` at window boundaries | repairing population structure |
 | `brief_compose_mode` | replace | a per-island brief replaces vs augments the global direction | a strong per-island direction is being diluted by a stale global one |
-| `island_selection_strategy` / `enforce_island_separation` | uniform / true | island selection pressure / same-island vs cross-island inspirations | one island dominates → `weighted`; want cross-pollination → separation `false` |
+| `island_selection_strategy` / `enforce_island_separation` | uniform / true | island selection pressure (`uniform`=`equal` are aliases; `proportional`=by population; `weighted`=by island best-fitness) / same-island vs cross-island inspirations | spread sampling toward smaller islands → `proportional` (⚠️ `weighted` REINFORCES the leading island — use it to exploit, NOT to rescue a starved one); cross-pollination → separation `false` |
+| `archive_floor_per_island` | 3 (db_config) | per-island archive floor — a dominant island can't evict another island below this many members (H2) | islands collapsing to one lineage → raise; a single-family task → 0 (pure global fitness) |
+| `migration_rate` / `migration_interval` | 0 / 10 (db_config) | island elite migration; **0 = OFF by default**. Execution IS wired (every archive add runs deferred migration), so flipping it on is a live config change — NOT a code rewrite | turn it on at BOOT (run.json `db_config`) OR mid-run (edit `db_config` at a control-return; the next relaunched cluster reads it — schema-safe) → `migration_rate` ≈ 0.05 |
+| `termination_streak` | 5 (cadence) | consecutive stagnant+intervened control-returns that auto-terminate the run | raise to give a stuck search more intervention attempts before stopping |
 | `meta_failures_first_frac` | 0.5 | how much of the meta context is recent failures vs top performers | failure-dominated window where the failure_note comes back vague → 0.75 |
 | `extra_guidance` | none | free text appended to the next window's mutation system prompt | nudge the search without a code rewrite |
 
-**Islands differentiate BY DEFAULT** — the automatic per-window meta round writes a
-distinct per-island brief for every live island, and `brief_compose_mode` (replace) makes
-a brief replace the global direction for that island. Hand-authoring a brief via
-`island_brief.py` is now the override, not the default path. (A cap-hit incomplete model
-response always returns its billed partial text, and an unpriced billed response logs a
-warning and is billed $0 — neither is a tunable knob.)
+**Islands differentiate BY DEFAULT — in direction AND code (H1/H2).** The automatic
+per-window meta round writes each live island a STRUCTURED brief (1–3 directions, each
+optionally tagged with the program that realizes it). `sample_parent` then samples ONE of
+that island's directions per generation and pulls the programs ASSIGNED to it as the
+inspirations (else just the direction text) — so the brief changes WHICH code the island
+sees, not only the prompt text; `brief_compose_mode` (replace) makes that direction stand
+in for the global one. Genetic separation is protected by `archive_floor_per_island`
+(default 3 — a dominant island can't evict a young one below its floor) and, if enabled,
+`migration_rate`. Hand-authoring a brief via `island_brief.py` is the override, not the
+default path. (A cap-hit incomplete model response always returns its billed partial text,
+and an unpriced billed response logs a warning and is billed $0 — neither is a tunable knob.)
 
 The rollback basket has tuning knobs passed to `rollback_decision.decide()` (NOT `evo.*`):
 `abs_eval_floor` (0.05), `bandit_collapse_count_frac` (0.85) / `bandit_collapse_min_pulls`

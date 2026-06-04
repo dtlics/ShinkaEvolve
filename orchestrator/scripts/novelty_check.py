@@ -6,12 +6,15 @@ plateau knob. It embeds NO LLM call in this default port (shinka's optional
 LLM-as-judge is gated and rare; if a rewrite enables it, do not change response
 parsing — see taxonomy.md).
 
-This is a port of shinka's default novelty path: compare the candidate's code
-embedding against the (optionally island-filtered) correct archive by cosine
-similarity, and REJECT when the max similarity ≥ ``code_embed_sim_threshold``
-(default 0.99 — i.e. a near-duplicate). Accept otherwise, or when there is
-nothing to compare against. test_parity.py checks the cosine + threshold
-decision matches a direct computation.
+This computes the near-duplicate decision: compare the candidate's code embedding
+against the (optionally island-filtered, non-tombstoned) correct archive by cosine
+similarity; ``accept=False`` when the max similarity ≥ ``code_embed_sim_threshold``
+(default 0.99 — a near-duplicate), and it also returns the most-similar program's id
+AND score so the CALLER can KEEP THE BETTER of the pair (H5): run_window evaluates a
+near-duplicate, compares scores, and either drops the worse newcomer or archives it
+and tombstones the worse incumbent. (This file only DECIDES near-duplication + surfaces
+the comparison data; the keep-better eviction is wired in run_window.) test_parity.py
+checks the cosine + threshold decision matches a direct computation.
 
 INPUT (stdin JSON):
   {
@@ -23,7 +26,8 @@ INPUT (stdin JSON):
 
 OUTPUT (stdout JSON):
   { "ok": true, "accept": bool, "max_similarity": float,
-    "most_similar_id": str | null, "n_compared": int }
+    "most_similar_id": str | null, "most_similar_score": float | null,  # H5: keep-the-better
+    "n_compared": int }
 """
 
 from __future__ import annotations
@@ -64,14 +68,21 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "embedding_model": payload.get("embedding_model", "text-embedding-3-small"),
             "query_type": "all",
             "include_embedding": True,
+            "include_metadata": True,
         }
     )["result"]
 
     max_sim = 0.0
     most_similar_id: Optional[str] = None
+    most_similar_score: Optional[float] = None
     n = 0
     for p in programs:
         if not p.get("correct"):
+            continue
+        # H5: a tombstoned program (de-archived — e.g. EVICTED as the worse of a
+        # near-duplicate pair by keep-the-better, or repair-removed) must NOT keep
+        # blocking new candidates.
+        if (p.get("metadata") or {}).get("repair_tombstoned") is True:
             continue
         if island_idx is not None and p.get("island_idx") != island_idx:
             continue
@@ -83,12 +94,15 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         if sim > max_sim:
             max_sim = sim
             most_similar_id = p.get("id")
+            most_similar_score = p.get("combined_score")
 
     accept = max_sim < threshold
     return {
         "accept": bool(accept),
         "max_similarity": max_sim,
         "most_similar_id": most_similar_id,
+        # H5: the incumbent's score so the caller can KEEP THE BETTER of a near-dup pair.
+        "most_similar_score": most_similar_score,
         "n_compared": n,
     }
 

@@ -39,6 +39,8 @@ OUTPUT (stdout JSON):
     "archive_inspiration_ids": [str],
     "top_k_inspiration_ids": [str],
     "needs_fix": bool,            # true if the chosen parent is incorrect (fix mode)
+    "sampled_direction": str | null,  # H1: per-gen direction drawn from the island's
+                                      #     structured brief (null pre-brief / repair / bootstrap)
     "n_candidates": int,
     "selection_probs": [float]    # parallel to the weighted pool (debug/parity)
   }
@@ -138,6 +140,41 @@ def _select_island(archived_correct, islands, config, rng):
         return rng.choice(islands)
     # "uniform" / "equal" (default) — preserves WeightedSamplingStrategy parity.
     return rng.choice(islands)
+
+
+def _load_island_directions(config, embedding_model, island_idx):
+    """H1: read the island's latest meta brief and return its structured directions
+    [{text, weight, assigned_program_ids}], or [] (pre-brief or parse failure). This is
+    what flips inspiration selection from score-ranked to DIRECTION-ORIENTED."""
+    if island_idx is None:
+        return []
+    try:
+        import json as _json
+        from shinka.database import ProgramDatabase
+
+        _db = ProgramDatabase(config, embedding_model=embedding_model, read_only=True)
+        try:
+            brief = _db.get_latest_meta_brief(int(island_idx))
+        finally:
+            _db.close()
+        if not brief:
+            return []
+        sj = brief.get("structured_json")
+        if not sj:
+            return []
+        data = _json.loads(sj) if isinstance(sj, str) else sj
+        dirs = data.get("directions") if isinstance(data, dict) else None
+        return [d for d in (dirs or []) if isinstance(d, dict) and d.get("text")]
+    except Exception:
+        return []
+
+
+def _sample_direction(dirs, rng):
+    """Weighted pick of ONE direction (by 'weight', default 1.0); seeded for determinism."""
+    weights = [max(float(d.get("weight", 1.0) or 0.0), 0.0) for d in dirs]
+    if sum(weights) <= 0:
+        return rng.choice(dirs)
+    return rng.choices(dirs, weights=weights, k=1)[0]
 
 
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -244,20 +281,41 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Sample a parent by the weighted probabilities.
     parent = rng.choices(pool, weights=probs, k=1)[0]
 
-    # Inspirations: top-k by score (excluding parent) + a couple of elites.
-    ranked = sorted(pool, key=lambda p: getattr(p, "combined_score", 0.0), reverse=True)
-    top_k_n = int(getattr(config, "num_top_k_inspirations", 1))
-    top_k = [p.id for p in ranked if p.id != parent.id][:top_k_n]
-
-    arch_n = int(getattr(config, "num_archive_inspirations", 1))
-    elite_pool = [p for p in ranked if p.id != parent.id and p.id not in top_k]
-    archive_insp = [p.id for p in elite_pool[:arch_n]]
+    # Inspirations (H1): DIRECTION-ORIENTED when this island has a STRUCTURED meta brief —
+    # sample ONE of its directions and use the programs ASSIGNED to it as the exemplars
+    # (else just the direction text). Pre-brief, fall through to the score-ranked default
+    # below (byte-identical to before → WeightedSamplingStrategy parity preserved).
+    sampled_direction = None
+    _dirs = _load_island_directions(config, embedding_model, island_idx)
+    top_k: List[str] = []
+    archive_insp: List[str] = []
+    if _dirs:
+        _dir = _sample_direction(_dirs, rng)
+        sampled_direction = (str(_dir.get("text") or "").strip()) or None
+        _pool_ids = {p.id for p in pool}
+        _assigned = [str(x) for x in (_dir.get("assigned_program_ids") or [])
+                     if str(x) in _pool_ids and str(x) != parent.id]
+        if _assigned:
+            top_k_n = max(1, int(getattr(config, "num_top_k_inspirations", 1)))
+            top_k = _assigned[:top_k_n]
+            arch_n = int(getattr(config, "num_archive_inspirations", 1))
+            archive_insp = [pid for pid in _assigned if pid not in top_k][:arch_n]
+        # else: a direction with no realized programs yet → direction-centered, code optional.
+    else:
+        # Pre-brief default: top-k by score (excluding parent) + a couple of elites.
+        ranked = sorted(pool, key=lambda p: getattr(p, "combined_score", 0.0), reverse=True)
+        top_k_n = int(getattr(config, "num_top_k_inspirations", 1))
+        top_k = [p.id for p in ranked if p.id != parent.id][:top_k_n]
+        arch_n = int(getattr(config, "num_archive_inspirations", 1))
+        elite_pool = [p for p in ranked if p.id != parent.id and p.id not in top_k]
+        archive_insp = [p.id for p in elite_pool[:arch_n]]
 
     return {
         "parent_id": parent.id,
         "island_idx": island_idx,
         "archive_inspiration_ids": archive_insp,
         "top_k_inspiration_ids": top_k,
+        "sampled_direction": sampled_direction,  # H1: per-gen direction text for the prompt
         "needs_fix": False,
         "n_candidates": len(pool),
         "selection_probs": probs,

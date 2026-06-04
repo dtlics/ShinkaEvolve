@@ -165,10 +165,15 @@ def deploy(
                     f"candidate hash {_cand_hash[:8]} for {target} was REJECTED at window "
                     f"{_e.get('window_index')}; pass force=True to re-deploy anyway"
                 )
-    # P7-T1: snapshot the run STATE (archive DB + bandit + ledger) BEFORE deploy so a
-    # regressing/crashing measure window can be fully rewound (cost ledger preserved).
-    state_snap_id = snapshot_state(results_dir, label=reason) if results_dir else None
+    # P7-T1 + C1: snapshot the pre-deploy CODE first, then the run STATE (archive DB +
+    # bandit + ledger), recording the code hash INTO the state snapshot so a regressing/
+    # crashing measure window can be FULLY rewound — code AND state (ledger preserved).
     prior_hash = snapshot(target, reason="pre-deploy snapshot")
+    state_snap_id = (
+        snapshot_state(results_dir, label=reason, prior_code={target: prior_hash})
+        if results_dir
+        else None
+    )
     dst = scripts_dir() / target
     shutil.copy2(candidate_path, dst)
     new_hash = snapshot(target, reason=reason)
@@ -224,10 +229,13 @@ def _prune_state_snapshots(keep: int) -> None:
         shutil.rmtree(old, ignore_errors=True)
 
 
-def snapshot_state(results_dir: str, label: Optional[str] = None, keep: int = 5) -> str:
+def snapshot_state(results_dir: str, label: Optional[str] = None, keep: int = 5,
+                   prior_code: Optional[Dict[str, str]] = None) -> str:
     """Snapshot run STATE (archive DB + bandit + ledger) into strategy_history/state_<id>/
     so a framework rewrite is recoverable. Copies programs.sqlite + bandit_state.pkl +
-    journal/run.json (each only if present). Operates on results_dir state files — NOT
+    journal/run.json (each only if present) AND records ``prior_code`` (the pre-deploy
+    {target: code-hash} map) so restore_state can ALSO rewind the strategy .py — a FULL
+    revert = code + DB + bandit. Operates on results_dir state files — NOT
     MUTABLE_TARGETS — so it does NOT route through _assert_mutable. Retains the last
     ``keep`` snapshots. Returns the snap id.
 
@@ -245,28 +253,43 @@ def snapshot_state(results_dir: str, label: Optional[str] = None, keep: int = 5)
             shutil.copy2(src, dest / Path(rel).name)
     (dest / "state_meta.json").write_text(json.dumps(
         {"snap_id": snap_id, "label": label, "created_at": _now(),
-         "results_dir": str(results_dir)}, indent=2))
+         "results_dir": str(results_dir),
+         # C1: {target: pre-deploy code-hash} so restore_state rewinds code too ({} for a bare snapshot).
+         "prior_code": dict(prior_code or {})}, indent=2))
     _prune_state_snapshots(keep)
     return snap_id
 
 
 def restore_state(results_dir: str, snap_id: str) -> Dict[str, Any]:
-    """FULL rewind of run STATE to a snapshot: restore programs.sqlite (archive) +
-    bandit_state.pkl (selector) byte-for-byte. NEVER rewinds the COST LEDGER — the LIVE
-    total_cost is preserved (the snapshot's run.json is restored, then the current/
-    higher total_cost is re-stamped) so spend stays counted and a revert-and-retry can
-    never be used to exceed the budget. Returns {restored:[...], total_cost_preserved}."""
+    """FULL rewind of a framework rewrite: restore the strategy CODE (scripts/<target>.py
+    for every target captured at deploy via ``prior_code``) PLUS programs.sqlite (archive)
+    + bandit_state.pkl (selector) byte-for-byte. NEVER rewinds the COST LEDGER — the LIVE
+    total_cost is preserved; if the live run.json is unreadable at revert time the ledger is
+    RECOMPUTED from the durable journal streams (which a revert never touches), then we stamp
+    max(live-or-recomputed, snapshot) so spend can only stay flat or rise and a revert-and-
+    retry can never exceed the budget (H10). Returns {restored, code_restored,
+    total_cost_preserved}."""
     dest = history_dir() / f"state_{snap_id}"
     if not dest.exists():
         raise FileNotFoundError(f"state snapshot not found: {dest}")
     rd = Path(results_dir)
     live_run = rd / "journal" / "run.json"
+    # Capture the LIVE spend BEFORE we overwrite run.json with the (older, lower) snapshot.
     live_total: Optional[float] = None
     if live_run.exists():
         try:
             live_total = float(json.loads(live_run.read_text()).get("total_cost", 0.0) or 0.0)
         except Exception:
             live_total = None
+    # The snapshot's recorded total is a hard lower bound on the preserved ledger.
+    snap_total = 0.0
+    _snap_run = dest / "run.json"
+    if _snap_run.exists():
+        try:
+            snap_total = float(json.loads(_snap_run.read_text()).get("total_cost", 0.0) or 0.0)
+        except Exception:
+            snap_total = 0.0
+    # 1) Restore run STATE (archive DB + bandit + the ledger file).
     restored: List[str] = []
     for name, rel in (("programs.sqlite", "programs.sqlite"),
                       ("bandit_state.pkl", "bandit_state.pkl"),
@@ -277,18 +300,54 @@ def restore_state(results_dir: str, snap_id: str) -> Dict[str, Any]:
             tgt.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, tgt)
             restored.append(name)
-    # Re-stamp the preserved (live) total_cost so the ledger is NEVER rewound.
-    if live_total is not None and live_run.exists():
+    # 2) C1: restore the strategy CODE for every target captured at deploy. The pre-deploy
+    #    snapshots already live under strategy_history/<hash>/; copy each back over scripts/.
+    code_restored: List[str] = []
+    prior_code: Dict[str, str] = {}
+    _meta = dest / "state_meta.json"
+    if _meta.exists():
         try:
-            run = json.loads(live_run.read_text())
-            run["total_cost"] = live_total
+            prior_code = dict((json.loads(_meta.read_text()).get("prior_code") or {}))
+        except Exception:
+            prior_code = {}
+    for target, h in prior_code.items():
+        try:
+            _assert_mutable(target)
+        except Exception:
+            continue
+        snap_file = history_dir() / h / target
+        if snap_file.exists():
+            shutil.copy2(snap_file, scripts_dir() / target)
+            code_restored.append(target)
+    # 3) H10: the ledger is NEVER rewound. If the live total was unreadable (missing/corrupt
+    #    run.json), recompute it from the durable streams; then stamp the max of (live-or-
+    #    recomputed, snapshot) so a corrupt run.json at revert can't silently lower the cap.
+    if live_total is None:
+        try:
+            import sys as _sys
+            if str(_HARNESS_DIR) not in _sys.path:
+                _sys.path.insert(0, str(_HARNESS_DIR))
+            import journal as _journal  # harness sibling
+            live_total = float(_journal._recompute_total_cost(results_dir))
+        except Exception:
+            live_total = None
+    _cands = [v for v in (live_total, snap_total) if v is not None]
+    preserved = max(_cands) if _cands else None
+    if preserved is not None:
+        try:
+            run = json.loads(live_run.read_text()) if live_run.exists() else {}
+            if not isinstance(run, dict):
+                run = {}
+            run["total_cost"] = preserved
             run["restored_from_state"] = snap_id
             tmp = str(live_run) + ".tmp"
-            Path(tmp).write_text(json.dumps(run, indent=2))
+            live_run.parent.mkdir(parents=True, exist_ok=True)
+            Path(tmp).write_text(json.dumps(run, indent=2, default=str))
             os.replace(tmp, live_run)
         except Exception:
             pass
-    return {"restored": restored, "total_cost_preserved": live_total}
+    return {"restored": restored, "code_restored": code_restored,
+            "total_cost_preserved": preserved}
 
 
 # Compact set of measure-window signals worth pinning into the index entry so a
@@ -352,6 +411,7 @@ MUTABLE_TARGETS = (
     "construct_mutation_prompt.py",
     "mutate.py",
     "meta_summarize.py",
+    "island_brief.py",  # M3: doc'd Mutable=Yes; must be deployable via the rewrite cycle
 )
 
 
@@ -409,10 +469,16 @@ def deploy_bundle(
                     raise ValueError(
                         f"bundle candidate hash {_ch[:8]} for {ch['target']} was REJECTED "
                         f"at window {_e.get('window_index')}; pass force=True to re-deploy")
-    state_snap_id = snapshot_state(results_dir, label=reason) if results_dir else None
+    # C1: snapshot every target's pre-bundle CODE first, then the run STATE recording the
+    # {target: hash} map, so restore_state(snap_id) rewinds the whole bundle's code too.
     prior_hashes: Dict[str, str] = {}
     for ch in changes:
         prior_hashes[ch["target"]] = snapshot(ch["target"], reason="pre-bundle snapshot")
+    state_snap_id = (
+        snapshot_state(results_dir, label=reason, prior_code=dict(prior_hashes))
+        if results_dir
+        else None
+    )
     new_hashes: Dict[str, str] = {}
     _applied: List[str] = []
     try:

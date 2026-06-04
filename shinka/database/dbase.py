@@ -54,6 +54,11 @@ class DatabaseConfig:
     db_path: Optional[str] = None  # Path to SQLite database file
     num_islands: int = 2
     archive_size: int = 40
+    # H2: per-island floor — guarantee each initialized island keeps at least this many
+    # members in the (global) archive before its members may be evicted to make room for
+    # ANOTHER island, so a dominant island cannot starve young ones. 0 = legacy pure-global
+    # fitness. The incoming program's OWN island is never shielded from its own competition.
+    archive_floor_per_island: int = 3
 
     # Inspiration parameters
     elite_selection_ratio: float = 0.3  # Prop of elites inspirations
@@ -2417,11 +2422,71 @@ class ProgramDatabase:
         else:  # "fitness" - default behavior
             self._update_archive_fitness(program)
 
+    def _pick_archive_victim(
+        self,
+        program: Program,
+        archive_programs: List[Program],
+        prefer: Optional[Program] = None,
+    ) -> Optional[Program]:
+        """Pick which archived program to evict to make room for ``program`` (H2:
+        island-aware, superseding the legacy 'globally worst'). Protections: never the
+        global best, never an island's single best (its elite), and never a member of a
+        DIFFERENT island that is at/below the per-island floor. The incoming program's
+        OWN island is never shielded from its own competition. ``prefer`` (the crowding
+        path's most-similar neighbor) is returned as-is when it is not protected. Falls
+        back to the global non-best worst if everything is shielded. None if empty.
+        """
+        if not archive_programs:
+            return None
+        floor = int(getattr(self.config, "archive_floor_per_island", 0) or 0)
+        pidx = program.island_idx
+        counts = {}
+        for p in archive_programs:
+            counts[p.island_idx] = counts.get(p.island_idx, 0) + 1
+        # Global best — never evict.
+        gb = None
+        for p in archive_programs:
+            if gb is None or self._is_better(p, gb):
+                gb = p
+        gb_id = gb.id if gb is not None else None
+        # Per-island elite — never evict an island's single best.
+        island_best = {}
+        for p in archive_programs:
+            b = island_best.get(p.island_idx)
+            if b is None or self._is_better(p, b):
+                island_best[p.island_idx] = p
+        elite_ids = {p.id for p in island_best.values()}
+
+        def _protected(p: Program) -> bool:
+            if p.id == gb_id or p.id in elite_ids:
+                return True
+            if floor > 0 and p.island_idx != pidx and counts.get(p.island_idx, 0) <= floor:
+                return True
+            return False
+
+        if prefer is not None and not _protected(prefer):
+            return prefer
+        candidates = [p for p in archive_programs if not _protected(p)]
+        if not candidates:
+            candidates = [p for p in archive_programs if p.id != gb_id] or list(archive_programs)
+        criteria = getattr(self.config, "archive_criteria", {"combined_score": 1.0})
+        if len(criteria) > 1:
+            return min(
+                candidates,
+                key=lambda p: self._compute_archive_score_ranked(p, archive_programs),
+            )
+        worst = candidates[0]
+        for p in candidates[1:]:
+            if self._is_better(worst, p):
+                worst = p
+        return worst
+
     def _update_archive_fitness(self, program: Program) -> None:
         """
-        Fitness-based archive update: replace the worst program globally.
+        Fitness-based archive update: evict an island-aware victim (H2).
 
-        Uses rank-based scoring if multiple criteria are configured.
+        Honors the per-island floor + protections via _pick_archive_victim; a below-floor
+        island is guaranteed room. Uses rank-based scoring if multiple criteria configured.
         """
         # Fetch full archive programs for multi-criteria comparison
         archive_programs = self._get_archive_programs()
@@ -2453,39 +2518,36 @@ class ProgramDatabase:
             self.conn.commit()
             return
 
-        # Find the worst program using ranked scoring
-        criteria = getattr(self.config, "archive_criteria", {"combined_score": 1.0})
-
-        if len(criteria) > 1:
-            # Multi-criteria: use ranked scoring to find worst
-            scores = [
-                (p, self._compute_archive_score_ranked(p, archive_programs))
-                for p in archive_programs
-            ]
-            worst_in_archive = min(scores, key=lambda x: x[1])[0]
-        else:
-            # Single criterion: find worst by pairwise comparison
-            worst_in_archive = archive_programs[0]
-            for p_archived in archive_programs[1:]:
-                if self._is_better(worst_in_archive, p_archived):
-                    worst_in_archive = p_archived
-
-        # Check if new program is better than the worst
-        if self._is_better(program, worst_in_archive, archive_programs):
+        # H2: choose an island-aware victim (per-island floor + protections) instead of
+        # the globally worst program.
+        victim = self._pick_archive_victim(program, archive_programs)
+        if victim is None:
             self.cursor.execute(
-                "DELETE FROM archive WHERE program_id = ?",
-                (worst_in_archive.id,),
+                "INSERT OR IGNORE INTO archive (program_id) VALUES (?)", (program.id,)
+            )
+            self.conn.commit()
+            return
+
+        # A below-floor island is GUARANTEED room (anti-starvation): make space even if the
+        # newcomer isn't globally better. Otherwise apply the normal fitness gate.
+        floor = int(getattr(self.config, "archive_floor_per_island", 0) or 0)
+        pcount = sum(1 for p in archive_programs if p.island_idx == program.island_idx)
+        # Anti-starvation forces room ONLY when a below-floor island takes a slot from a
+        # DIFFERENT (over-floor) island; same-island competition uses the normal gate so a
+        # worse member can't displace a better one of its own island.
+        force = floor > 0 and pcount < floor and victim.island_idx != program.island_idx
+        if force or self._is_better(program, victim, archive_programs):
+            self.cursor.execute(
+                "DELETE FROM archive WHERE program_id = ?", (victim.id,)
             )
             self.cursor.execute(
                 "INSERT INTO archive (program_id) VALUES (?)", (program.id,)
             )
-
-            # Log with score information
             p_score = program.combined_score or 0.0
-            w_score = worst_in_archive.combined_score or 0.0
+            w_score = victim.combined_score or 0.0
             logger.info(
-                f"Program {program.id} (score={p_score:.4f}) replaced "
-                f"{worst_in_archive.id} (score={w_score:.4f}) in archive [fitness]."
+                f"Program {program.id} (score={p_score:.4f}) replaced {victim.id} "
+                f"(score={w_score:.4f}) in archive [fitness, island-aware]."
             )
 
         self.conn.commit()
@@ -2534,21 +2596,28 @@ class ProgramDatabase:
             self.conn.commit()
             return
 
-        # Only replace if better than the similar program (niching)
-        if self._is_better(program, most_similar, archive_programs):
+        # Niching: evict the most-similar neighbor if the newcomer is better — but never a
+        # PROTECTED neighbor (global best / island elite / below-floor other island).
+        # _pick_archive_victim returns most_similar when evictable, else the island-aware
+        # worst (H2). A below-floor island is guaranteed room.
+        victim = self._pick_archive_victim(program, archive_programs, prefer=most_similar)
+        floor = int(getattr(self.config, "archive_floor_per_island", 0) or 0)
+        pcount = sum(1 for p in archive_programs if p.island_idx == program.island_idx)
+        if victim is not None and (
+            (floor > 0 and pcount < floor and victim.island_idx != program.island_idx)
+            or self._is_better(program, victim, archive_programs)
+        ):
             self.cursor.execute(
-                "DELETE FROM archive WHERE program_id = ?",
-                (most_similar.id,),
+                "DELETE FROM archive WHERE program_id = ?", (victim.id,)
             )
             self.cursor.execute(
                 "INSERT INTO archive (program_id) VALUES (?)", (program.id,)
             )
-
             p_score = program.combined_score or 0.0
-            s_score = most_similar.combined_score or 0.0
+            s_score = victim.combined_score or 0.0
             logger.info(
-                f"Program {program.id} (score={p_score:.4f}) replaced similar program "
-                f"{most_similar.id} (score={s_score:.4f}) in archive [crowding]."
+                f"Program {program.id} (score={p_score:.4f}) replaced {victim.id} "
+                f"(score={s_score:.4f}) in archive [crowding, island-aware]."
             )
 
         self.conn.commit()

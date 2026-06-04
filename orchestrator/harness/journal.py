@@ -403,6 +403,31 @@ def work_low_streak(results_dir: str, low_threshold: float = 1.0) -> int:
     return streak
 
 
+def termination_streak(results_dir: str) -> int:
+    """Count trailing consecutive 'control_return' rows that are BOTH stagnant AND had an
+    orchestrator intervention (a framework rewrite OR a DR). This is the deterministic
+    termination signal (H6/H7/H8): N-in-a-row means the search cannot escape stagnation
+    DESPITE intervening at every return. A stagnation-break (stagnation_flag False) or a
+    no-intervention return resets the streak. Computed from interventions.jsonl — the agent
+    writes one canonical control_return row per control-return; the harness reads it.
+
+    Each row: {type:"control_return", stagnation_flag: bool, intervened: bool,
+    work_audit, work_dr, work_score, ...}. ``intervened`` is the agent's explicit
+    (work_audit>0 or work_dr>0); rows missing it fall back to that derivation so the
+    signal is robust to either shape."""
+    rows = [r for r in read_interventions(results_dir) if r.get("type") == "control_return"]
+    streak = 0
+    for r in reversed(rows):
+        intervened = r.get("intervened")
+        if intervened is None:  # robust fallback if the agent omitted the explicit flag
+            intervened = float(r.get("work_audit", 0) or 0) > 0 or float(r.get("work_dr", 0) or 0) > 0
+        if bool(r.get("stagnation_flag")) and bool(intervened):
+            streak += 1
+        else:
+            break
+    return streak
+
+
 def read_calls(results_dir: str, kind: Optional[str] = None) -> List[Dict[str, Any]]:
     """WS7: the compact external-call pointer index (no big prompts). Optionally
     filter by kind ('meta' / 'dr'). Open a specific call's full detail with

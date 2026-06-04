@@ -19,6 +19,7 @@
     "reasoning_effort": "medium",
     "max_patch_attempts": 3,
     "reward_mode": "absolute",
+    "use_text_feedback": true,
     "auto_meta": true,
     "meta_model": "azure-gpt-5.5",
     "meta_reasoning_effort": "medium",

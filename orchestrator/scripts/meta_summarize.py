@@ -69,7 +69,9 @@ OUTPUT (stdout JSON):
   {
     "directions": [ {"text": str, "weight": float} ],
     "failure_note": str,
-    "island_directions": [ {"island_idx": int, "text": str} ],  # one distinct dir per live island
+    "island_directions": [ {"island_idx": int, "text": str} ],  # headline dir per island (derived; back-compat)
+    "islands": [ {"island_idx": int, "directions": [ {"text": str, "weight": float,
+                  "assigned_program_ids": [str]} ]} ],  # rich per-island output (H1/M13 mapping)
     "recommendations": str,   # legacy joined string (logging / back-compat)
     "cost": float, "model": str
   }
@@ -99,26 +101,29 @@ _ERR_CHARS = 160
 
 
 _SYS = (
-    "You are a research strategist for an LLM-driven evolutionary code search. "
-    "Given the optimization goal, the current best program, recent attempts "
-    "(including FAILURES with their error), and the live islands, produce STRICT JSON "
-    "and nothing else:\n"
+    "You are a research strategist for an LLM-driven evolutionary code search with multiple "
+    "parallel ISLANDS (sub-populations) that should explore DIFFERENT solution families. You "
+    "are given the goal, the current best program, and — grouped PER ISLAND — that island's "
+    "recent programs (id, score, ok/FAIL, a CODE preview, and the error of any failures). "
+    "Produce STRICT JSON and nothing else:\n"
     '{{\n'
-    '  "directions": [ {{"text": "<one concrete, actionable direction — name the '
-    'technique/structure/parameters; do NOT write code>", "weight": <number 0..1, '
-    'relative promise>}}, ... up to {n} items ],\n'
-    '  "failure_note": "<2-4 sentences of PROSE: what tended to cause the recent '
-    'failures (e.g. runtime/timeout vs broken correctness) and what future attempts '
-    'should be careful about. Empty string if there were no failures.>",\n'
-    '  "island_directions": [ {{"island_idx": <int — one of the live island ids listed '
-    'below>, "text": "<a DISTINCT direction for THIS island so the islands explore '
-    'genuinely DIFFERENT families/approaches in parallel; name the technique, do NOT '
-    'write code>"}}, ... EXACTLY ONE entry per live island id ]\n'
+    '  "directions": [ {{"text": "<one concrete, actionable GLOBAL direction — name the '
+    'technique/structure/parameters; do NOT write code>", "weight": <number 0..1, relative '
+    'promise>}}, ... up to {n} items ],\n'
+    '  "failure_note": "<2-4 sentences of PROSE: what tended to cause the recent failures '
+    '(e.g. runtime/timeout vs broken correctness) and what future attempts should be careful '
+    'about. Empty string if there were no failures.>",\n'
+    '  "islands": [ {{"island_idx": <int — one of the live island ids listed below>, '
+    '"directions": [ {{"text": "<a direction for THIS island; name the technique, no code>", '
+    '"weight": <0..1>, "assigned_program_id": "<the id of an EXISTING program shown for THIS '
+    'island that ALREADY realizes this direction, or null if it is a NEW/untried idea>"}}, '
+    '... 1 to 3 per island ]}}, ... EXACTLY ONE entry per live island id ]\n'
     '}}\n'
-    "Rules: prioritize directions NOT already tried (see prior recommendations). "
-    "Weight = your confidence it pays off ('best shots' get higher weight); weights "
-    "need not sum to 1. For island_directions, give EXACTLY ONE entry per live island id "
-    "and make them genuinely distinct from one another. Output ONLY the JSON object."
+    "Rules: make the islands explore genuinely DIFFERENT families/approaches from each other "
+    "and from prior recommendations. Within an island, LABEL a direction that is already "
+    "working by setting assigned_program_id to that island's existing program id; use null "
+    "for fresh ideas. Weight = your confidence it pays off; weights need not sum to 1. "
+    "Output ONLY the JSON object."
 )
 
 
@@ -142,7 +147,11 @@ def _gather_recent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     n_fail = max(1, int(round(n_recent * frac)))
     n_top = max(1, n_recent - n_fail)
     base = {"db_path": db_path, "db_config": db_config, "embedding_model": embedding_model,
-            "include_metadata": True}
+            "include_metadata": True,
+            # H11: give meta the actual CODE (capped) so directions are code-grounded and
+            # it can ASSIGN a direction to the program that realizes it. code_preview_chars
+            # (mutable knob) bounds the token cost; 0 disables the code preview.
+            "code_preview_chars": int(payload.get("meta_code_preview_chars", 1200) or 0)}
     out: List[Dict[str, Any]] = []
     seen = set()
     try:  # recent FAILURES first — the signal WS3 must not miss.
@@ -165,48 +174,63 @@ def _gather_recent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 def _build_user_msg(payload: Dict[str, Any], recents: List[Dict[str, Any]]) -> str:
     best = payload.get("best_program") or {}
     prior = payload.get("prior_recommendations")
+    # H9/M6: when the run disables text feedback (spoil-risk task), the meta round must NOT
+    # bake the evaluator's error text into directions either. Keep gen/score/patch — those
+    # are not evaluator *text*. Default True (feedback on).
+    _utf = bool(payload.get("use_text_feedback", True))
     parts = [f"# Goal\n{payload.get('goal', '(none)')}"]
     if best:
         parts.append(
             f"\n# Current best (score {best.get('combined_score')})\n"
             f"```\n{(best.get('code') or '')[:4000]}\n```"
         )
-    if recents:
-        lines = []
-        for p in recents[:20]:
-            tag = "ok" if p.get("correct") else "FAIL"
-            err = (p.get("error_traceback") or "")
-            # M7: a format_exc() traceback's FIRST line is the generic banner
-            # "Traceback (most recent call last):"; the real exception type+message is
-            # the LAST line. Synthesized reasons (timeouts, domain failures) put the
-            # reason on the first line, so only swap to the last when it's the banner.
-            if err:
-                _lines = [ln for ln in err.strip().splitlines() if ln.strip()]
-                if _lines:
-                    _pick = (
-                        _lines[-1]
-                        if _lines[0].startswith("Traceback (most recent call last)")
-                        else _lines[0]
-                    )
-                    err = f" err={_pick[:_ERR_CHARS]}"
-                else:
-                    err = ""
-            patch = ((p.get("metadata") or {}).get("patch_name")) or p.get("patch_name") or ""
-            lines.append(
-                f"- gen {p.get('generation')} [{tag}] score={p.get('combined_score')} "
-                f"{patch}{err}"
-            )
-        parts.append("\n# Recent attempts (failures + top performers)\n" + "\n".join(lines))
+    def _err_reason(p):
+        # M7: a format_exc() traceback's FIRST line is the generic banner; the real
+        # exception is the LAST line. Synthesized reasons (timeouts, domain failures) put
+        # the reason on the first line, so only swap to the last when it's the banner.
+        e = (p.get("error_traceback") or "") if _utf else ""
+        if not e:
+            return ""
+        ls = [ln for ln in e.strip().splitlines() if ln.strip()]
+        if not ls:
+            return ""
+        pick = ls[-1] if ls[0].startswith("Traceback (most recent call last)") else ls[0]
+        return f" err={pick[:_ERR_CHARS]}"
+
+    def _prog_block(p):
+        tag = "ok" if p.get("correct") else "FAIL"
+        patch = ((p.get("metadata") or {}).get("patch_name")) or p.get("patch_name") or ""
+        head = (f"  - [id={p.get('id')}] gen {p.get('generation')} [{tag}] "
+                f"score={p.get('combined_score')} {patch}{_err_reason(p)}")
+        code = (p.get("code") or p.get("code_preview") or "")
+        if code:
+            head += f"\n    ```\n{code}\n    ```"
+        return head
+
+    # H11/M13: render recent attempts GROUPED PER ISLAND (id + score + CODE preview), so meta
+    # sees what each island actually did and can give it a DISTINCT direction AND assign a
+    # direction to an existing program id it already realizes.
     islands = payload.get("islands") or []
+    by_island = {}
+    for p in recents[:24]:
+        by_island.setdefault(p.get("island_idx"), []).append(p)
     if islands:
-        ilines = [
-            f"- island {it.get('id')}: best={it.get('best')} members={it.get('count')}"
-            for it in islands
-        ]
+        for it in islands:
+            iid = it.get("id")
+            progs = by_island.get(iid, [])
+            body = ("\n".join(_prog_block(p) for p in progs[:4]) if progs
+                    else "  (no recent attempts)")
+            parts.append(
+                f"\n# ISLAND {iid} (best={it.get('best')} members={it.get('count')})\n{body}"
+            )
         parts.append(
-            "\n# Live islands (give EXACTLY ONE distinct direction per island id, in "
-            "island_directions — make them genuinely different)\n" + "\n".join(ilines)
+            "\n# Live island ids: " + ", ".join(str(it.get("id")) for it in islands)
+            + "\nGive EXACTLY ONE entry per island id in `islands`, with 1-3 distinct "
+            "directions each (genuinely different across islands)."
         )
+    elif recents:
+        # No island list (single-island / degraded) → one flat block.
+        parts.append("\n# Recent attempts\n" + "\n".join(_prog_block(p) for p in recents[:12]))
     if prior:
         parts.append(f"\n# Prior recommendations (avoid repeating)\n{prior}")
     return "\n".join(parts)
@@ -218,6 +242,7 @@ def _parse_meta(text: str, max_n: int) -> Dict[str, Any]:
     never crashes the meta cycle (it just yields a single unweighted direction)."""
     directions: List[Dict[str, Any]] = []
     island_directions: List[Dict[str, Any]] = []
+    islands_rich: List[Dict[str, Any]] = []
     failure_note = ""
     blob = text or ""
     fenced = re.search(r"```(?:json)?\s*(.*?)```", blob, re.DOTALL)
@@ -252,6 +277,41 @@ def _parse_meta(text: str, max_n: int) -> Dict[str, Any]:
                 txt = str(d.get("text") or "").strip()
                 if txt:
                     island_directions.append({"island_idx": idx, "text": txt})
+        # M13/H11: the richer per-island output — each island gets 1-3 directions, each
+        # optionally ASSIGNED to an existing program id it realizes (the mapping the sampler
+        # consumes). assigned_program_id (singular) is normalized to a list; a hallucinated
+        # id is harmless (the sampler intersects it with the live pool).
+        for isl in (data.get("islands") or []):
+            if not isinstance(isl, dict):
+                continue
+            try:
+                iidx = int(isl.get("island_idx"))
+            except (TypeError, ValueError):
+                continue
+            idirs: List[Dict[str, Any]] = []
+            for d in (isl.get("directions") or []):
+                if isinstance(d, dict) and d.get("text"):
+                    try:
+                        w = float(d.get("weight", 1.0))
+                    except (TypeError, ValueError):
+                        w = 1.0
+                    _apid = d.get("assigned_program_id")
+                    _apid = str(_apid) if _apid not in (None, "", "null") else None
+                    idirs.append({"text": str(d["text"]).strip(), "weight": max(0.0, w),
+                                  "assigned_program_ids": ([_apid] if _apid else [])})
+                elif isinstance(d, str) and d.strip():
+                    idirs.append({"text": d.strip(), "weight": 1.0, "assigned_program_ids": []})
+            if idirs:
+                islands_rich.append({"island_idx": iidx, "directions": idirs})
+        # Back-compat: if the model used the richer `islands` schema, DERIVE the flat
+        # island_directions (one headline per island) so existing consumers still work.
+        if islands_rich and not island_directions:
+            for isl in islands_rich:
+                ds = sorted(isl["directions"], key=lambda x: x.get("weight", 0.0), reverse=True)
+                if ds:
+                    island_directions.append(
+                        {"island_idx": isl["island_idx"], "text": ds[0]["text"]}
+                    )
     if not directions:
         # Fallback: no parseable JSON — keep the raw text as a single direction so
         # the orchestrator still gets *something* usable, and log nothing lost.
@@ -259,7 +319,7 @@ def _parse_meta(text: str, max_n: int) -> Dict[str, Any]:
         if txt:
             directions = [{"text": txt[:2000], "weight": 1.0}]
     return {"directions": directions, "failure_note": failure_note,
-            "island_directions": island_directions}
+            "island_directions": island_directions, "islands": islands_rich}
 
 
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -274,6 +334,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "directions": parsed["directions"],
             "failure_note": parsed["failure_note"],
             "island_directions": parsed["island_directions"],
+            "islands": parsed["islands"],
             "recommendations": text,
             "cost": 0.0,
             "model": model,
@@ -288,8 +349,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         _est = float(payload.get("meta_estimated_cost_usd", payload.get("estimated_cost_usd", 1.0)))
         if _rem is not None and _rem < _est:
             return {"directions": [], "failure_note": None, "island_directions": [],
-                    "recommendations": "", "cost": 0.0, "model": model, "skipped": "budget",
-                    "budget_remaining": _rem, "estimated_cost": _est}
+                    "islands": [], "recommendations": "", "cost": 0.0, "model": model,
+                    "skipped": "budget", "budget_remaining": _rem, "estimated_cost": _est}
     # F3: auto-populate prior_recommendations from recent meta calls so meta doesn't
     # re-propose directions it already gave (an explicit caller value always wins).
     if not payload.get("prior_recommendations") and _rd:
@@ -323,7 +384,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             {"error": str(exc)}, cost=_cost, summary="meta transport FAILED",
         )
         return {
-            "directions": [], "failure_note": None, "island_directions": [],
+            "directions": [], "failure_note": None, "island_directions": [], "islands": [],
             "recommendations": "", "cost": _cost, "model": model,
             "degraded": True, "error": str(exc),
         }
@@ -348,6 +409,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "directions": parsed["directions"],
         "failure_note": parsed["failure_note"],
         "island_directions": parsed["island_directions"],
+        "islands": parsed["islands"],
         "recommendations": joined,
         "cost": float(cost),
         "model": model,

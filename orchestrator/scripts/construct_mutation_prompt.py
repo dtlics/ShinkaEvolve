@@ -66,6 +66,24 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     if seed is not None:
         np.random.seed(int(seed))
 
+    # No-spoil (H9): when use_text_feedback is False, STRIP every evaluator-derived text
+    # channel from the parent + ALL inspiration/ancestor programs BEFORE building Program
+    # objects — so this prompt builder is a hard gate even if a caller forgets to thread
+    # the flag (the exact omission that caused H9). The PromptSampler flag below is then
+    # belt-and-suspenders, and meta is gated separately at its own assembly site.
+    if not bool(payload.get("use_text_feedback", True)):
+        _EVAL_TEXT_KEYS = ("text_feedback", "error", "error_traceback", "stdout_log", "stderr_log")
+
+        def _strip_eval_text(d: Any) -> None:
+            if isinstance(d, dict):
+                for _k in _EVAL_TEXT_KEYS:
+                    d.pop(_k, None)
+
+        _strip_eval_text(payload.get("parent"))
+        for _lst in ("archive_inspirations", "top_k_inspirations", "ancestor_inspirations"):
+            for _d in (payload.get(_lst) or []):
+                _strip_eval_text(_d)
+
     parent = _to_program(payload["parent"])
     archive_insp = [_to_program(d) for d in payload.get("archive_inspirations", [])]
     top_k_insp = [_to_program(d) for d in payload.get("top_k_inspirations", [])]

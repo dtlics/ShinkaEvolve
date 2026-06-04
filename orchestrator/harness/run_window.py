@@ -387,6 +387,10 @@ def _attempt_immediate_fixes(
                 "ancestor_inspirations": [learn_from] if learn_from else [],
                 "task_sys_msg": task.get("task_sys_msg"),
                 "language": language,
+                # H9: thread the no-spoil flag so the fix prompt also suppresses the
+                # ANCESTOR's evaluator text (not just the just-failed candidate's
+                # stdout/stderr) — this construct call previously omitted it (the leak).
+                "use_text_feedback": _utf,
                 # M4: the persistent failure caution rides into fix-mode too.
                 "failure_note": evo.get("meta_failure_note"),
                 # C3 (H6): offset by generation so fix prompts don't pin one patch type.
@@ -545,7 +549,13 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     # island falls back to the global meta direction (byte-identical no-brief default).
     brief_text = None
     _isl = sp.get("island_idx")
-    if _isl is not None:
+    # H1: prefer the per-gen direction the SAMPLER drew from this island's STRUCTURED brief
+    # (direction-oriented; its assigned programs are already the inspirations above). Fall
+    # back to the island's headline brief content when the sampler didn't draw one.
+    _sampled_dir = sp.get("sampled_direction")
+    if _sampled_dir:
+        brief_text = _sampled_dir
+    elif _isl is not None:
         try:
             _brief = archive_query.main({
                 "db_path": db_path, "db_config": db_config,
@@ -686,8 +696,10 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                 "cost": _slot_mut_cost, "attempts": mut.get("attempts")})
         return  # no novelty, no eval, no reward, no record, no archive
 
-    # 3b. novelty check (MUTABLE policy) — gated; live runs enable it. On reject,
-    # the slot is dropped before evaluation (matches shinka's rejection sampling).
+    # 3b. NOVELTY (MUTABLE policy) — gated; live runs enable it. Compute the candidate's
+    # code embedding HERE, but DEFER the accept/reject to AFTER eval: keep-the-better (H5)
+    # must compare BOTH programs' scores to keep the better of a near-duplicate pair, so a
+    # near-dup is now EVALUATED (not dropped pre-eval) and resolved at step 4a''.
     code_embedding: Optional[List[float]] = None
     nov: Dict[str, Any] = {}
     _slot_embed_cost = 0.0
@@ -695,37 +707,6 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         code_embedding, _embed_cost = _embed(cfg, mut["candidate_code"])
         _slot_embed_cost = float(_embed_cost or 0.0)
         counters["cost"] = counters.get("cost", 0.0) + _slot_embed_cost
-        nov = novelty_check_script.main(
-            {
-                "db_path": db_path, "db_config": db_config,
-                "embedding_model": embedding_model,
-                "candidate_embedding": code_embedding or [],
-                "code_embed_sim_threshold": evo.get("code_embed_sim_threshold", 0.99),
-                "island_idx": sp.get("island_idx"),
-            }
-        )
-        if not nov.get("accept"):
-            counters["novelty_rejects"] += 1
-            # F13: this slot's spend produced nothing to evaluate — record it as
-            # waste so diagnostics can surface it and the orchestrator can react
-            # (e.g. rewrite the prompt or the novelty threshold).
-            _rej_cost = _mut_cost + _slot_embed_cost
-            counters["rejected_cost"] = counters.get("rejected_cost", 0.0) + _rej_cost
-            # C0 (H3): feed the rejected slot's REAL spend to the bandit so the arm's
-            # cost isn't undercounted (the cheap-arm-entrenchment driver). Default is
-            # cost-only (neutral — a reject is not a quality failure);
-            # evo.reward_on_reject="penalize" imputes a worst reward instead.
-            if llm_models and arm_id:
-                _penalize = str(evo.get("reward_on_reject", "cost_only")) == "penalize"
-                select_llm_script.main({
-                    "mode": "update", "models": llm_models, "state_path": state_path,
-                    "bandit_kwargs": evo.get("llm_dynamic_selection_kwargs", {}),
-                    "arm": arm_id, "cost": _rej_cost,
-                    "cost_only": (not _penalize), "reward": None, "baseline": None,
-                })
-            _trace({"step": "framework_decision", "action": "dropped_novelty",
-                    "max_similarity": nov.get("max_similarity"), "rejected_cost": _rej_cost})
-            return  # drop this slot; no eval, no record (cost fed to the bandit)
 
     # 4. evaluate (IMMUTABLE plumbing)
     ev = _evaluate_candidate(
@@ -774,7 +755,9 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         # from real data instead of the hardcoded []. Resolves via archive_query by_generation.
         counters.setdefault("exhausted_retry_slots", []).append(f"gen{generation}")
         counters["exhausted_retry_count"] = counters.get("exhausted_retry_count", 0) + 1
-    counters["novelty_accepts"] += 1
+    # NOTE: novelty_accepts/rejects are counted at the keep-the-better resolve below
+    # (only when novelty is ENABLED and the candidate is correct), so the acceptance rate
+    # reflects real novelty events — null when novelty is off (M11/M12), not a phantom 1.0.
     _trace({"step": "eval", "correct": ev.get("correct"),
             "combined_score": ev.get("combined_score"), "timed_out": ev.get("timed_out"),
             "failure_kind": (None if ev.get("correct")
@@ -808,6 +791,59 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         _trace({"step": "framework_decision", "action": "repair_failed_no_archive",
                 "program_id": sp.get("parent_id")})
         return  # NO new child archived — the failure rode onto the errored parent's record
+
+    # 4a''. KEEP-THE-BETTER novelty resolve (H5). A CORRECT near-duplicate competes with its
+    # nearest archived neighbor BY SCORE (novelty deferred to here): keep the better, evict
+    # (tombstone) the worse. novelty_acceptance_rate is counted HERE so it reflects real
+    # novelty events among correct candidates (null when novelty is off — M11/M12).
+    if evo.get("enable_novelty") and ev.get("correct") and code_embedding:
+        nov = novelty_check_script.main({
+            "db_path": db_path, "db_config": db_config,
+            "embedding_model": embedding_model,
+            "candidate_embedding": code_embedding or [],
+            "code_embed_sim_threshold": evo.get("code_embed_sim_threshold", 0.99),
+            "island_idx": sp.get("island_idx"),
+        })
+        if nov.get("accept"):
+            counters["novelty_accepts"] += 1  # genuinely novel — archive normally below
+        else:
+            _inc_id = nov.get("most_similar_id")
+            _inc_score = nov.get("most_similar_score")
+            _cand_score = float(ev.get("combined_score", 0.0) or 0.0)
+            _keep_new = (_inc_id is None or _inc_score is None
+                         or _cand_score > float(_inc_score))
+            if not _keep_new:
+                # newcomer is NOT better than its near-duplicate → DROP it (keep the
+                # incumbent); feed the arm its real spend (cost-only / penalize per lever).
+                counters["novelty_rejects"] += 1
+                _rej_cost = _slot_mut_cost + _slot_embed_cost
+                counters["rejected_cost"] = counters.get("rejected_cost", 0.0) + _rej_cost
+                if llm_models and arm_id:
+                    _penalize = str(evo.get("reward_on_reject", "cost_only")) == "penalize"
+                    select_llm_script.main({
+                        "mode": "update", "models": llm_models, "state_path": state_path,
+                        "bandit_kwargs": evo.get("llm_dynamic_selection_kwargs", {}),
+                        "arm": arm_id, "cost": _rej_cost,
+                        "cost_only": (not _penalize), "reward": None, "baseline": None,
+                    })
+                _trace({"step": "framework_decision", "action": "dropped_novelty_worse",
+                        "max_similarity": nov.get("max_similarity"),
+                        "incumbent": _inc_id, "rejected_cost": _rej_cost})
+                return  # keep the BETTER (incumbent); the worse newcomer is not archived
+            # newcomer is strictly BETTER → keep it AND evict (tombstone) the worse
+            # near-duplicate so the population doesn't carry both (the incumbent's row +
+            # lineage are preserved; it just leaves the archive + sampling pool).
+            counters["novelty_accepts"] += 1
+            counters["novelty_kept_better"] = counters.get("novelty_kept_better", 0) + 1
+            if _inc_id is not None:
+                try:
+                    repair_record_script.main({
+                        "db_path": db_path, "db_config": db_config,
+                        "embedding_model": embedding_model,
+                        "program_id": _inc_id, "action": "tombstone",
+                    })
+                except Exception:
+                    pass
 
     # 4b. compute reward (MUTABLE — scoring concern, generation half)
     reward = compute_reward_script.main(
@@ -1089,6 +1125,16 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
             try:
                 _mock = cfg.get("mock", {}) or {}
                 _meta_gen = (next_gen + iters_run - 1) if iters_run else next_gen
+                # H11: give meta the current best program WITH code (capped) so its
+                # directions are grounded in what actually works (not score trends alone).
+                try:
+                    _meta_best = archive_query.main({
+                        "db_path": db_path, "db_config": db_config,
+                        "embedding_model": embedding_model, "query_type": "best",
+                        "include_code": True,
+                    })["result"]
+                except Exception:
+                    _meta_best = None
                 _meta_payload = {
                     "model_name": evo.get("meta_model", "azure-gpt-5.5"),
                     "reasoning_effort": evo.get("meta_reasoning_effort", "medium"),
@@ -1099,9 +1145,13 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     "budget_usd": budget,                # meta self-skips near the cap
                     "run_id": cfg.get("run_id"),
                     "meta_failures_first_frac": evo.get("meta_failures_first_frac", 0.5),
+                    # H9/M6: gate the evaluator error text out of meta on a spoil-risk task.
+                    "use_text_feedback": bool(evo.get("use_text_feedback", True)),
                     "islands": [{"id": h.get("id"), "best": h.get("best"), "count": h.get("count")}
                                 for h in diag.get("island_health", []) or []],
                     "num_islands": len(diag.get("island_health", []) or []),
+                    "best_program": _meta_best,
+                    "meta_code_preview_chars": evo.get("meta_code_preview_chars", 1200),
                 }
                 if _mock.get("enabled"):  # offline runs/tests: no Azure call
                     _meta_payload["mock"] = True
@@ -1115,19 +1165,42 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                         evo["meta_directions"] = _meta["directions"]
                     if _meta.get("failure_note"):
                         evo["meta_failure_note"] = _meta["failure_note"]
-                    # Auto-record ONE distinct brief per live island so islands diverge.
-                    for _isl in _meta.get("island_directions", []) or []:
-                        try:
-                            island_brief_script.main({
-                                "db_path": db_path, "db_config": db_config,
-                                "embedding_model": embedding_model,
-                                "island_idx": int(_isl["island_idx"]),
-                                "generation": _meta_gen,
-                                "content": _isl.get("text", ""),
-                                "stage": "auto_meta", "cost": 0.0,
-                            })
-                        except Exception:
-                            pass  # one bad island entry must not abort the rest
+                    # Auto-record ONE brief per live island so islands diverge. Prefer the
+                    # RICH per-island output (H1/M13): persist each island's directions +
+                    # assigned program ids into structured_json so the SAMPLER can be
+                    # direction-oriented. Fall back to the flat island_directions (content
+                    # only) when only the legacy schema is present.
+                    import json as _json
+                    _rich = _meta.get("islands") or []
+                    if _rich:
+                        for _isl in _rich:
+                            try:
+                                _dirs = _isl.get("directions") or []
+                                _headline = _dirs[0]["text"] if _dirs else ""
+                                island_brief_script.main({
+                                    "db_path": db_path, "db_config": db_config,
+                                    "embedding_model": embedding_model,
+                                    "island_idx": int(_isl["island_idx"]),
+                                    "generation": _meta_gen,
+                                    "content": _headline,
+                                    "structured_json": _json.dumps({"directions": _dirs}),
+                                    "stage": "auto_meta", "cost": 0.0,
+                                })
+                            except Exception:
+                                pass  # one bad island entry must not abort the rest
+                    else:
+                        for _isl in _meta.get("island_directions", []) or []:
+                            try:
+                                island_brief_script.main({
+                                    "db_path": db_path, "db_config": db_config,
+                                    "embedding_model": embedding_model,
+                                    "island_idx": int(_isl["island_idx"]),
+                                    "generation": _meta_gen,
+                                    "content": _isl.get("text", ""),
+                                    "stage": "auto_meta", "cost": 0.0,
+                                })
+                            except Exception:
+                                pass  # one bad island entry must not abort the rest
             except Exception:
                 pass  # a meta/parse/brief failure must NEVER crash a window
 
@@ -1151,6 +1224,25 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     last_diag: Dict[str, Any] = {}
     if until_decision:
+        # TERMINATION (H6/H7/H8): before launching another cluster, check the deterministic
+        # stop signal — N consecutive control-returns that were each STAGNANT and had an
+        # orchestrator INTERVENTION (a rewrite OR a DR) yet still couldn't escape stagnation.
+        # Computed from the agent's canonical control_return rows; harness-decided + auto-
+        # finalized (parity with budget_exhausted) so two agents can't disagree. Stagnation
+        # alone never terminates — only stagnation the interventions could not break. (The
+        # simplified rule: NO ">=1 DR" requirement — a DR counts simply as an intervention.)
+        _term_n = int(cadence.get("termination_streak", 5) or 5)
+        _term_streak = journal.termination_streak(cfg["results_dir"])
+        if _term_n > 0 and _term_streak >= _term_n:
+            _last = dict((journal.read_windows(cfg["results_dir"]) or [{}])[-1])
+            _last["return_reason"] = "stagnation_intervention_exhausted"
+            _last["termination_streak"] = _term_streak
+            _last["ok"] = True
+            try:
+                journal.finalize_run(cfg["results_dir"], "stagnation_intervention_exhausted")
+            except Exception:
+                pass
+            return _last
         # The next cluster's size is driven by the LAST control-return's work score
         # (recorded by the agent before this call) + how long work has stayed low.
         _recent_work = journal.recent_work_score(cfg["results_dir"])
@@ -1216,6 +1308,12 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             pass
 
+    # Surface the termination streak on every return so the agent sees how close the run is
+    # to the deterministic stop (N consecutive stagnant + intervened control-returns).
+    try:
+        last_diag["termination_streak"] = journal.termination_streak(cfg["results_dir"])
+    except Exception:
+        pass
     last_diag["ok"] = True
     return last_diag
 

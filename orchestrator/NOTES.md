@@ -5,13 +5,25 @@
 > (uncapped; bounded by budget / termination / stagnation) → an **automatic per-window
 > meta round** that writes **per-island briefs** (islands differentiate by default) →
 > **framework-audit + DR checks** on one shared control-return rhythm → **termination**
-> (5 consecutive intervention-cycles incl. ≥1 DR) → **end-of-run ending document +
+> (5 consecutive STAGNANT + intervened control-returns, harness-computed) → **end-of-run ending document +
 > structured archive**. Two named roles: ORCHESTRATOR (operational/critical-path) and
 > OUTER-LOOP/FRAMEWORK-AUDIT (improvement/tapering). The older "round" notes below predate
 > this and describe the prior windows-only loop — they are kept as history; `SKILL.md` /
 > `CLAUDE.md` are the live teaching. (De-jargoned: the EvoX/WS-n/J-score-formula framing in
 > the old notes is superseded — the progress signal is the best-score gain vs the
 > low-window bar; rollback uses the multi-signal `rollback_decision.py`.)
+
+> **Post-audit fixes (2026-06-03; see `AUDIT_LOGIC_WORKFLOW_20260603.md` + `FIX_PLAN_20260603.md`).**
+> Foundation + strategy fixes landed: **C1** a framework revert now rewinds the strategy
+> `.py` too (was DB+bandit only); **H10** the ledger is recomputed from streams (never
+> lowered) if `run.json` is corrupt at revert; **H5** novelty now EVALUATES a near-duplicate
+> and KEEPS THE BETTER of the pair (evicts the worse; tombstoned rows no longer block);
+> **H1/H11/M13** the meta round is per-island + code-grounded and emits direction→program
+> assignments that make the inspiration SAMPLER direction-oriented; **H2** archive eviction
+> is island-aware with a per-island floor (default 3), migration is a per-run knob; **H9**
+> `use_text_feedback:false` is a COMPLETE spoil suppression (fix + sampled-ancestor + meta);
+> **termination** is harness-computed (`stagnation_intervention_exhausted` over canonical
+> `control_return` rows; the "≥1 DR" requirement is dropped). `orchestrator/tests` green.
 
 ## Code ↔ doc consistency contract (P9-T0)
 
@@ -28,13 +40,15 @@ updates both views.
 | Truthful recording (apply-exhausted) | `run_window._run_one_candidate` (`mut.get("applied") is False` branch); `mutate.py` return | SKILL "Failure handling" |
 | Per-step trace + warmup | `journal.log_step`; `run_window` `--warmup`/`--trace-steps` + `_trace` sinks + `cleanup_warmup` | SKILL "Warmup" |
 | Sensor fields (errored_fraction, model_collapse, failure types) | `diagnostics.py:main` + `_model_collapse` | SKILL "Diagnostics" |
-| Automatic per-window meta + per-island briefs | `meta_summarize.py` (`island_directions`); `run_window._one_window` meta block → `island_brief.py` | SKILL "The automatic meta round" |
+| Per-window meta: per-island CODE-grounded blocks → rich `islands` directions + program assignments → direction-oriented sampler (H1/H11/M13) | `meta_summarize.py` (`islands`/`_build_user_msg`); `run_window._one_window` meta block → `island_brief.py` `structured_json`; `sample_parent` reads it | SKILL "The automatic meta round" + islands note |
 | Uncapped work-score taper | `journal.recent_work_score`/`work_low_streak`; `cadence_policy.main`; `run_window` cluster loop | SKILL "The run loop" / "The taper" |
 | Repair mode (trigger / append / two-strike tombstone / release) | `sample_parent` `select:"errored"`; `dbase.append_program_error`/`tombstone_program`; `repair_record.py`; `run_window` gate | SKILL "Failure handling" |
-| Boot guard + spoil mitigation | `run_window.main` sentinel guard; `run_window`/`construct_mutation_prompt` `use_text_feedback` gating | SKILL "Boot" |
-| Snapshot/measure/revert (cost preserved) + fail-closed + counts-collapse | `strategy_store.snapshot_state`/`restore_state`; `rollback_decision.decide` | SKILL "The framework-audit rewrite cycle" |
+| Boot guard + COMPLETE spoil mitigation (fix + sampled-ancestor + meta channels — H9) | `run_window.main` sentinel guard; `construct_mutation_prompt` central sanitizer + meta `use_text_feedback` gate | SKILL "Boot" + `use_text_feedback` lever |
+| Snapshot/measure/revert: FULL rewind of CODE + DB + bandit (C1), ledger preserved/recomputed-on-corrupt (H10), fail-closed + counts-collapse | `strategy_store.snapshot_state`(`prior_code`)/`restore_state`; `rollback_decision.decide` | SKILL "The framework-audit rewrite cycle" |
+| Novelty KEEP-THE-BETTER (eval near-dup → keep better, evict worse; tombstoned skipped) — H5 | `novelty_check.py` (`most_similar_score` + tombstone-skip); `run_window` post-eval resolve → `repair_record` tombstone | SKILL novelty rows / `code_embed_sim_threshold` |
+| Island-aware archive eviction (per-island floor) + migration knob — H2 | `dbase._pick_archive_victim`/`_update_archive_*`; `DatabaseConfig.archive_floor_per_island`/`migration_rate` | SKILL islands note / levers |
 | DR refusal (no crash) | `dr_client.run_dr_call` (`.cost` on raise); `deep_research.main` try/except | SKILL "Deep research" |
-| Termination + end-of-run archive | OC judgment from `interventions.jsonl`; `journal.build_run_summary`/`finalize_run`/`archive_run` | SKILL "Termination + end of run" |
+| Termination (harness-computed, auto-finalized) + end-of-run archive | `journal.termination_streak` over canonical `control_return` rows; `run_window` → `stagnation_intervention_exhausted`; `journal.build_run_summary`/`finalize_run`/`archive_run` | SKILL "Termination + end of run" |
 
 
 The system works end-to-end offline (see `orchestrator/tests/`: parity, smoke,

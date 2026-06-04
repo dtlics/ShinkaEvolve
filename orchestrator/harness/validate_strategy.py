@@ -286,6 +286,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "sample_parent.py", "novelty_check.py", "select_llm.py", "compute_reward.py",
                 "record_policy.py", "stagnation_detector.py", "island_policy.py",
                 "cadence_policy.py", "construct_mutation_prompt.py", "mutate.py", "meta_summarize.py",
+                "island_brief.py",  # M3: keep in sync with strategy_store.MUTABLE_TARGETS
             )
         if target not in _MUT:
             return {

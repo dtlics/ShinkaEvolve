@@ -6,7 +6,7 @@ Read first. This file is loaded into every Claude Code session at this repo root
 
 Personal working repo for evolutionary code optimization with [ShinkaEvolve](https://github.com/SakanaAI/ShinkaEvolve), running on Azure OpenAI. Started as a fork to fix Azure compat, then a sequence of branches added agentic features and research grounding (see [CHANGELOG.md](CHANGELOG.md) for the fork lineage), which were later **replaced** by the Claude-as-orchestrator rewrite + Azure-only prune. Everything lives here now — framework, tasks, configs, credentials, skills.
 
-The outer `Shinka` repo at `/Users/dantongli/GIthub/Shinka/` is a thin shim that initializes this submodule. **Daily work happens here, in `shinkaevolve/`.**
+The outer `Shinka` repo (a sibling checkout one level up, e.g. `../Shinka/` on this machine) is a thin shim that initializes this submodule. **Daily work happens here, in this `ShinkaEvolve` tree.**
 
 ## Your standing role: the evolutionary orchestrator
 
@@ -70,7 +70,7 @@ The Azure/deployment/env details below are your toolbox for live runs.
 
 - **Conda env**: `shinka` (Python 3.11). Never let pip install into `base` or any other env on this machine — others must stay clean (`coc`, `couple_therapy`, `efficient_cs`, `pl_ht`, `supercollider`).
   - Activate: `conda activate shinka`
-  - Direct binaries when activation isn't available: `/opt/anaconda3/envs/shinka/bin/{python, pip}` (the `shinka_run`/`shinka_launch`/`shinka_models`/`shinka_visualize` console scripts were removed in the Azure-only prune).
+  - Direct invocation when `conda activate` isn't available (e.g. a detached/background run_window — see memory): `conda run -n shinka python ...` / `conda run -n shinka pip ...` (macOS + Windows). For a true no-conda fallback (a bg shell without conda init), point at the env interpreter directly — on this macOS host `/opt/anaconda3/envs/shinka/bin/python`; derive it on any OS with `conda run -n shinka which python` (Windows: `...\anaconda3\envs\shinka\Scripts\python.exe`) rather than assuming `/opt/anaconda3/...`. (the `shinka_run`/`shinka_launch`/`shinka_models`/`shinka_visualize` console scripts were removed in the Azure-only prune).
 - **Install**: not required. The orchestrator forces this repo root onto `sys.path` and the eval subprocess inherits a repo-root `PYTHONPATH`, so `import shinka` always resolves to *this* tree (`run_window` asserts it at startup). `pip install -e .` is optional — only needed for `import shinka` from a cwd outside the repo. Edits to `shinka/...` take effect immediately.
 - **Pytest**: `testpaths = ["orchestrator/tests"]` in pyproject — the offline parity/smoke/improvement suite; keeps `tasks/*/evaluate.py` out of test discovery.
 
@@ -116,7 +116,7 @@ Setting `reasoning_effort: low` errors out for `azure-gpt-5.4-pro` (it rejects `
 
 ```bash
 conda activate shinka
-cd /Users/dantongli/GIthub/ShinkaEvolve
+cd "$(git rev-parse --show-toplevel)"
 python scripts/test_azure.py     # hits each main-resource deployment
 ```
 

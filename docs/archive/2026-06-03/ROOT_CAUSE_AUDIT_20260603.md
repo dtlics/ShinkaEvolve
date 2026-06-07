@@ -1,3 +1,9 @@
+> **CORRECTED / SUPERSEDED (archived 2026-06-08).** The "subagent vehicle" root cause asserted below was
+> determined INACCURATE and the user corrected it. The real cause of the 2026-06-03 run death was the background
+> `run_window` job being KILLED (reaped) or ERRORING OUT — not a subagent-vs-main-loop distinction. The mitigation
+> that holds: launch the job so its completion/kill re-invokes you, keep clusters short, and recover losslessly
+> with `run_window.py --resume`. This file is retained for history only.
+
 ## Problem A — root cause & fix
 
 **Root cause: the subagent VEHICLE, not an "ephemeral sandbox reclaiming detached jobs on idle."** The 2026-06-03 run died because the orchestrator was deployed as a *spawned subagent*. Two subagent-specific facts — both proven by a same-day **$0 / no-Azure controlled experiment** (`/Users/dantongli/.claude/projects/-Users-dantongli-GIthub-ShinkaEvolve/memory/orchestrator-runs-need-main-loop.md:15-31`) — are the mechanism:

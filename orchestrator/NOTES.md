@@ -13,7 +13,7 @@
 > the old notes is superseded — the progress signal is the best-score gain vs the
 > low-window bar; rollback uses the multi-signal `rollback_decision.py`.)
 
-> **Post-audit fixes (2026-06-03; see `AUDIT_LOGIC_WORKFLOW_20260603.md` + `FIX_PLAN_20260603.md`).**
+> **Post-audit fixes (2026-06-03; see `docs/archive/2026-06-03/AUDIT_LOGIC_WORKFLOW_20260603.md` + `…/FIX_PLAN_20260603.md`).**
 > Foundation + strategy fixes landed: **C1** a framework revert now rewinds the strategy
 > `.py` too (was DB+bandit only); **H10** the ledger is recomputed from streams (never
 > lowered) if `run.json` is corrupt at revert; **H5** novelty now EVALUATES a near-duplicate
@@ -143,6 +143,14 @@ supersedes it — see the banner at the top of this file and `SKILL.md` for the 
 - **`island_policy` retire execution.** It recommends `{spawn, migrate, retire}`;
   shinka executes spawn/migrate, but has no native "retire island" path — wiring
   retire is future work.
+- **Non-atomic bandit `save_state` (known bug — fix between runs).** `BanditBase.save_state`
+  (`shinka/llm/prioritization.py:194-200`) does `open(path, "wb")` + `pickle.dump`; the open
+  truncates first, so a process kill mid-write leaves a corrupt pickle. On the next run
+  `select_llm._make_bandit` (`orchestrator/scripts/select_llm.py:57-60`) swallows the load
+  failure (`except Exception: pass`) and silently restarts from a uniform posterior — losing
+  every learned (model, effort) preference — and the "logged by caller" the comment promises
+  is never wired. Fix: atomic write (tmp + fsync + `os.replace`) in `save_state`, and actually
+  log the discard. (Surfaced by the 2026-06-03 reports, now in `docs/archive/2026-06-03/`.)
 
 ## Accepted limitations — deliberate no-ops (post-2026-05-29 design audit)
 The design audit folded into commit `f719bdb` intentionally left these UNFIXED — each

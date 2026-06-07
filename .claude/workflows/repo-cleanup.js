@@ -313,8 +313,9 @@ decouple step spelled out so the verifier can falsify it.`,
     spec: `GOAL: the docs should describe the repo as it IS and read on any machine. Remember PRIOR #4 (docs are
 targets, not authority — verify every claim against code) and PRIOR #3 (the dated reports encode un-propagated
 corrections — reconcile-then-archive, never free-delete).
-SEED EVIDENCE: the four dated root reports AUDIT_LOGIC_WORKFLOW_20260603.md / FIX_PLAN_20260603.md /
-ROOT_CAUSE_AUDIT_20260603.md / SURVIVAL_TEST_20260603.md and taxonomy.md (marked HISTORICAL; references deleted files
+SEED EVIDENCE: the four dated 2026-06-03 reports (ALREADY ARCHIVED 2026-06-08 to docs/archive/2026-06-03/:
+AUDIT_LOGIC_WORKFLOW / FIX_PLAN / ROOT_CAUSE_AUDIT / SURVIVAL_TEST — re-check they are under docs/archive, not root) and
+taxonomy.md (marked HISTORICAL; references deleted files
 like shinka/core/novelty_judge.py, summarizer.py, prompt_evolver.py); CLAUDE.md / orchestrator/SKILL.md /
 orchestrator/NOTES.md (the user's stated rewrite targets — stale file/lever refs, removed-CLI mentions e.g.
 shinka_run/shinka_launch/shinka_visualize, mac-only assumptions, hardcoded paths); README.md / configs/README.md /

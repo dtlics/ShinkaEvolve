@@ -290,8 +290,7 @@ Flag, but mark touches_foundation appropriately and keep the diff minimal.`,
 the active tasks) reaches — but ONLY with proof and the decouple-first step. Cruft survives green because nothing
 imports it; that is exactly why it must be import-graph-proven, not assumed.
 SEED CANDIDATES (verify each — some are LIVE): shinka/launch/{local,scheduler,slurm}.py (no orchestrator script imports
-shinka.launch — confirm; scheduler imports slurm); shinka/favicon.png (web-viz asset; shinka_visualize CLI was removed);
-examples/shinka_tutorial.ipynb (calls removed CLIs shinka_launch/shinka_visualize + an old utils_hydra API);
+shinka.launch — confirm; scheduler imports slurm);
 .github/workflows/{pypi-release,docs-release,integration}.yml (upstream Sakana release/docs CI — this private fork does
 not publish to PyPI or Sakana docs); shinka/configs task/variant yamls for circle_packing / novelty_generator (hydra
 configs — is the hydra path used by the orchestrator at all, or only run.json?); any shinka/prompts/* or shinka/llm/* or

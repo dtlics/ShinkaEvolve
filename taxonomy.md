@@ -4,6 +4,8 @@
 > references below reflect the pre-prune codebase; the *implemented* result is the
 > mutable `orchestrator/scripts/*` set documented in
 > [orchestrator/SKILL.md](orchestrator/SKILL.md). Kept for design rationale.
+>
+> Removed in the Azure-only prune (do not look for these): shinka/core/novelty_judge.py, shinka/core/summarizer.py, shinka/core/prompt_evolver.py, shinka/database/prompt_dbase.py, shinka/llm/agent/tools/query_db.py, and the agentic _run_agent_proposal. The live meta is the single-call orchestrator/scripts/meta_summarize.py (not a 3-step/optional file). Note: eval_stop.py and complexity.py still exist, now at shinka/utils/eval_stop.py and shinka/database/complexity.py.
 
 > Step 2 of the rewrite. Every decision point is placed into one
 > of four cells along two axes: **does it embed an LLM call?** × **may the

@@ -32,9 +32,9 @@ shinka/ (framework the scripts lean on): core/{config,sampler,wrap_eval}.py
   llm/{client,llm,query,kwargs,constants,prioritization}.py llm/agent/{dr_client,background_model}.py
   llm/providers/{model_resolver,openai,pricing,result}.py embed/{client,embedding} embed/providers/pricing.py
   prompts/{prompts_base,prompts_diff,prompts_full,prompts_cross,prompts_fix,prompts_meta,prompts_novelty,prompts_deep_research,prompts_init}.py
-  edit/{apply_diff,apply_full,async_apply,summary}.py utils/{eval_stop,load_df,languages,general}.py
+  edit/{apply_diff,apply_full,summary}.py utils/{eval_stop,load_df,languages,general}.py
 repo docs: CLAUDE.md taxonomy.md (HISTORICAL) CHANGELOG.md README.md configs/README.md
-  skills/{shinka-setup,shinka-convert,shinka-inspect}/SKILL.md
+  .claude/skills/{shinka-setup,shinka-convert,shinka-inspect}/SKILL.md
   tasks/cnot_grid_synth/{README.md,evaluate.py,initial.py} examples/circle_packing/{evaluate.py,initial.py}
 `.trim()
 
@@ -164,7 +164,7 @@ const DIMENSIONS = [
   {
     key: 'boot-nospoil-setup',
     title: 'Boot, no-spoil system message, and task setup',
-    files: 'orchestrator/scripts/construct_mutation_prompt.py, orchestrator/scripts/mutate.py, orchestrator/harness/run_window.py (main: sentinel guard + use_text_feedback backfill), skills/shinka-setup/SKILL.md, skills/shinka-convert/SKILL.md',
+    files: 'orchestrator/scripts/construct_mutation_prompt.py, orchestrator/scripts/mutate.py, orchestrator/harness/run_window.py (main: sentinel guard + use_text_feedback backfill), .claude/skills/shinka-setup/SKILL.md, .claude/skills/shinka-convert/SKILL.md',
     docs: 'orchestrator/SKILL.md "Boot" section, CLAUDE.md boot guidance',
     spec: `INTENDED: At boot the orchestrator authors task_sys_msg = goal + hard constraints + the SHAPE of the score + an abstract runtime caution — and must NOT spoil the held-out metric (no hidden seeds, private numbers, exact thresholds, or eval loopholes a mutation could game). The harness REFUSES to start if task_sys_msg is missing/empty or still equals the sentinel __UNSET_AUTHOR_AT_BOOT__ (unless task.require_sys_msg:false, or --warmup which flips it off for the throwaway run). The system message must actually be injected into EVERY mutation prompt. The spoiling self-check: the evaluator's error text rides back into the fix/repair prompt via the harness backfilling stdout_log/stderr_log, gated by use_text_feedback (default true); use_text_feedback:false must COMPLETELY blank BOTH channels.
 KEY CHECKS: (a) Is the sentinel guard real, correctly placed (before any LLM spend), and does the sentinel string match exactly? (b) Does require_sys_msg default true, and does --warmup actually flip it off? (c) Trace the sys-msg from run.json → construct_mutation_prompt → mutate: is it truly threaded into every mutation prompt (and the fix prompt)? (d) Does use_text_feedback:false blank BOTH stdout and stderr backfill, with no other leak path for eval text into the prompt? (e) The user's 2D-nearest-neighbor example: do the docs teach that an eval CONSTRAINT (e.g. a compilation pass) should be SURFACED in the sys msg while held-out numbers must not — i.e. is "spoil vs fair-game" teachable and unambiguous? (f) Do the setup skills emit the sentinel + teach the author-at-boot step + the evaluator contract (return a single combined NUMBER; surface errors as a rejection signal)?`,

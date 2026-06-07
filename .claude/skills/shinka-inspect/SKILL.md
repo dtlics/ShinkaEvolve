@@ -34,14 +34,14 @@ ls -la <results_dir>
 
 2. Generate context bundle
 ```bash
-python skills/shinka-inspect/scripts/inspect_best_programs.py \
+python .claude/skills/shinka-inspect/scripts/inspect_best_programs.py \
   --results-dir <results_dir> \
   --k 5
 ```
 
 3. Optional tuning knobs
 ```bash
-python skills/shinka-inspect/scripts/inspect_best_programs.py \
+python .claude/skills/shinka-inspect/scripts/inspect_best_programs.py \
   --results-dir <results_dir> \
   --k 8 \
   --max-code-chars 5000 \

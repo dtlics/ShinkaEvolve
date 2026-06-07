@@ -81,8 +81,8 @@ Total cost per evaluation: ~270 syntheses (~25 s for the seed).
 ### Smoke test
 
 ```bash
-conda activate shinka      # or use /opt/anaconda3/envs/shinka/bin/python directly
-cd /Users/dantongli/GIthub/ShinkaEvolve
+conda activate shinka      # or prefix the python calls below with: conda run -n shinka
+cd "$(git rev-parse --show-toplevel)"
 python tasks/cnot_grid_synth/evaluate.py \
     --program_path tasks/cnot_grid_synth/initial.py \
     --results_dir /tmp/cnot_smoke
@@ -101,7 +101,7 @@ point `task.eval_program_path` / `task.init_program_path` at this task's
 then drive windows — see [../../orchestrator/SKILL.md](../../orchestrator/SKILL.md):
 
 ```bash
-cd /Users/dantongli/GIthub/ShinkaEvolve
+cd "$(git rev-parse --show-toplevel)"
 python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
 ```
 

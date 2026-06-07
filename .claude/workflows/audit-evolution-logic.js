@@ -13,7 +13,7 @@ export const meta = {
 // ---------------------------------------------------------------------------
 // Run parameters (args is optional so the workflow is also runnable by name).
 // ---------------------------------------------------------------------------
-const ROOT = '/Users/dantongli/GIthub/ShinkaEvolve/.claude/worktrees/goofy-tharp-229342'
+const ROOT_OVERRIDE = (args && args.root) || null
 const TODAY = (args && args.today) || 'unknown-date'
 
 // Full file inventory, baked in so the consistency + completeness agents have a
@@ -41,9 +41,7 @@ repo docs: CLAUDE.md taxonomy.md (HISTORICAL) CHANGELOG.md README.md configs/REA
 // ---------------------------------------------------------------------------
 // Shared instructions every auditor gets.
 // ---------------------------------------------------------------------------
-const PREAMBLE = `You are a senior auditor of an LLM-driven evolutionary code-optimization framework (ShinkaEvolve, Azure-only, "Claude-as-orchestrator" rewrite). The repo root is:
-  ${ROOT}
-All paths below are relative to that root. ALWAYS read the actual code before trusting any doc — docs can be aspirational or stale. Use Read/Grep/Glob/Bash freely. This is a READ-ONLY audit: do NOT edit, write, or run anything that mutates the repo (no fixes — fixes are discussed later by a human).
+const PREAMBLE = `You are a senior auditor of an LLM-driven evolutionary code-optimization framework (ShinkaEvolve, Azure-only, "Claude-as-orchestrator" rewrite). FIRST resolve the repo root PORTABLY: run \`git rev-parse --show-toplevel\` (works on macOS, Linux, and Windows Git-Bash). ${ROOT_OVERRIDE ? `An explicit root was provided: ${ROOT_OVERRIDE} — use it.` : 'Use that as REPO_ROOT.'} All paths below are relative to REPO_ROOT. ALWAYS read the actual code before trusting any doc — docs can be aspirational or stale. Use Read/Grep/Glob/Bash freely. This is a READ-ONLY audit: do NOT edit, write, or run anything that mutates the repo (no fixes — fixes are discussed later by a human).
 
 THE SYSTEM AT A GLANCE (the design you are checking the repo against). A human "orchestrator" agent wears two hats: (1) ORCHESTRATOR — boot the task (author a no-spoil system message from the user's initial code + evaluator), and decide/run deep-research rounds; (2) OUTER-LOOP / FRAMEWORK-AUDIT — read run logs and rewrite the *mutable strategy code* when the deterministic framework itself is flawed. The inner loop runs WITHOUT the agent: sample a parent + inspirations from a per-island archive DB → call an external Azure LLM to mutate the code → retry/fix on failure → novelty-check → record code+score+metadata into the right island. A fixed number of generations = one window. After every window an automatic "meta" round asks a strong LLM for per-island future directions (recorded as per-island "briefs" so islands differentiate). A window-cluster returns control to the agent on stagnation or at a tapering boundary; the agent then does a framework-audit check and a deep-research check, records a "work score", and relaunches — until a termination criterion. A budget is hard-capped in code with a crash-durable cost ledger. Some files are FOUNDATION (schema, JSON contract, evaluator, diagnostics, journal, harness, the user's evaluate.py/initial.*) and must never change mid-run.
 

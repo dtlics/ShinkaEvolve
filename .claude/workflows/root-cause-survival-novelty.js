@@ -9,7 +9,7 @@ export const meta = {
   ],
 }
 
-const ROOT = '/Users/dantongli/GIthub/ShinkaEvolve/.claude/worktrees/goofy-tharp-229342'
+const ROOT_OVERRIDE = (args && args.root) || null
 const TODAY = (args && args.today) || 'unknown-date'
 
 // ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ landed AFTER this live run. So judge (a) what caused the live stall on the OLD c
 resolve it, or whether a mutation-prompt / representation fix is still needed.`.trim()
 
 const PREAMBLE = `You are a root-cause investigator for an LLM-driven evolutionary code-search framework
-(ShinkaEvolve, Azure-only, "Claude-as-orchestrator"). Repo root: ${ROOT} (all paths relative to it).
+(ShinkaEvolve, Azure-only, "Claude-as-orchestrator"). FIRST resolve the repo root PORTABLY: run \`git rev-parse --show-toplevel\`. ${ROOT_OVERRIDE ? `An explicit root was provided: ${ROOT_OVERRIDE} — use it.` : 'Use that as REPO_ROOT.'} All paths are relative to REPO_ROOT.
 READ-ONLY: do NOT edit/run anything that mutates the repo or hits the network. Read the ACTUAL code
 (Read/Grep/Bash/git) before concluding — and prefer code evidence over docs.
 

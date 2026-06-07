@@ -19,7 +19,7 @@ export const meta = {
 //   args.python  : interpreter for the apply test-gate (else conda run -n shinka python, fallback python)
 //   args.skip_foundation : if true, apply mode skips any change-set that touches a FOUNDATION file
 // ---------------------------------------------------------------------------
-const MODE = (args && args.mode) || 'apply' // TEMP: forced apply for one run; restore to 'plan' after
+const MODE = (args && args.mode) || 'plan'
 const ROOT_OVERRIDE = (args && args.root) || null
 const TODAY = (args && args.today) || 'undated'
 const FOCUS = (args && Array.isArray(args.focus)) ? args.focus : null

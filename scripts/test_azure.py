@@ -1,7 +1,7 @@
 """Smoke test: hits each Azure deployment with a tiny prompt, prints latency + cost.
 
 Run from repo root:
-    /opt/anaconda3/envs/shinka/bin/python scripts/test_azure.py
+    conda run -n shinka python scripts/test_azure.py
 """
 
 import time

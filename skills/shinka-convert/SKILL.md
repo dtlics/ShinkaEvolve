@@ -16,7 +16,7 @@ This is the alternative starting point to `shinka-setup`:
 > `shinka.yaml` or use `shinka_run` — that launch path was removed. To RUN, the
 > **shinka-orchestrator** outer loop (`orchestrator/SKILL.md`) points a run
 > config at `evaluate.py` + `initial.<ext>` and drives
-> `orchestrator/harness/run_window.py`. Use `scripts/orchestrator_run.json` as
+> `orchestrator/harness/run_window.py`. Use `configs/orchestrator_run.default.json` as
 > the run-config starter.
 
 After conversion, run evolution via the **shinka-orchestrator** outer loop (`orchestrator/SKILL.md`), not a per-task runner.
@@ -74,7 +74,7 @@ Do not edit the original source tree unless the user explicitly requests in-plac
    - Python: prefer exposing `run_experiment(...)` and use `run_shinka_eval`.
    - Non-Python: use `subprocess` and write `metrics.json` plus `correct.json`.
 7. Write the run config (`orchestrator_run.json`).
-   - Copy `scripts/orchestrator_run.json`; set `task.eval_program_path` /
+   - Copy `configs/orchestrator_run.default.json`; set `task.eval_program_path` /
      `task.init_program_path` / `task.language` to match the candidate file.
    - Set `budget_usd`, the Azure `evo.llm_models`, and a precise `task_sys_msg`. The
      starter ships `task_sys_msg` as the sentinel `__UNSET_AUTHOR_AT_BOOT__` — the harness
@@ -171,7 +171,7 @@ def main(program_path: str, results_dir: str):
 ```
 
 ## Bundled Assets
-- Use `scripts/orchestrator_run.json` as the run-config starter
+- Use `configs/orchestrator_run.default.json` as the run-config starter
 
 ## Notes
 - Keep evolve regions tight; do not make the whole project mutable by default

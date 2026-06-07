@@ -12,7 +12,7 @@ Create a setup scaffold consisting of an evaluation script and initial solution 
 > `shinka_run` — that launch path was removed. To RUN evolution, the
 > **shinka-orchestrator** outer loop (`orchestrator/SKILL.md`) points a run
 > config at this task's `evaluate.py` + `initial.<ext>` and drives
-> `orchestrator/harness/run_window.py`. Use `scripts/orchestrator_run.json` as
+> `orchestrator/harness/run_window.py`. Use `configs/orchestrator_run.default.json` as
 > the run-config starter.
 
 # When to Use
@@ -49,7 +49,7 @@ Invoke this skill when the user:
      - `text_feedback` (string, can be empty).
    - Confirm `correct.json` exists with `correct` (bool) and `error` (string) fields.
 7. Hand off to the **shinka-orchestrator** outer loop to run evolution: copy
-   `scripts/orchestrator_run.json`, set `task.eval_program_path` /
+   `configs/orchestrator_run.default.json`, set `task.eval_program_path` /
    `task.init_program_path` to this task's `evaluate.py` / `initial.<ext>`, a
    `task.language`, a `budget_usd`, and a precise `task_sys_msg`, then drive
    `python orchestrator/harness/run_window.py --config <run>/run.json --until-decision`.
@@ -225,7 +225,7 @@ if __name__ == "__main__":
 
 ## Run config: `orchestrator_run.json`
 
-See `skills/shinka-setup/scripts/orchestrator_run.json` for the run-config
+See `configs/orchestrator_run.default.json` for the run-config
 starter. Copy it next to your run, point `task.*` at this task's `evaluate.py` +
 `initial.<ext>`, set `budget_usd` + the Azure `evo.llm_models`, and drive it with
 the **shinka-orchestrator** outer loop (`orchestrator/SKILL.md`).

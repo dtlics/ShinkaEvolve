@@ -123,9 +123,8 @@ python scripts/test_azure.py     # hits each main-resource deployment
 ## Running a task (you are the orchestrator)
 
 Read [`orchestrator/SKILL.md`](orchestrator/SKILL.md) — the full playbook. In
-short: author a run config (`orchestrator/SKILL.md` documents the schema; the
-`shinka-setup`/`shinka-convert` skills emit a `scripts/orchestrator_run.json`
-starter) pointing at the task's `evaluate.py` + `initial.<ext>`, then drive
+short: author a run config (`orchestrator/SKILL.md` documents the schema; copy the
+`configs/orchestrator_run.default.json` starter) pointing at the task's `evaluate.py` + `initial.<ext>`, then drive
 windows:
 
 ```bash

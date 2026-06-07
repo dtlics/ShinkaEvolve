@@ -33,5 +33,5 @@ python orchestrator/harness/run_window.py --config <run>/run.json --until-decisi
 ```
 
 where the config's `task.eval_program_path` / `task.init_program_path` point at
-this directory's `evaluate.py` / `initial.py`. The `shinka-setup` skill emits a
-`scripts/orchestrator_run.json` starter you can copy and edit.
+this directory's `evaluate.py` / `initial.py`. Copy the
+`configs/orchestrator_run.default.json` starter and edit it.

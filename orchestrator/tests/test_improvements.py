@@ -595,10 +595,9 @@ def test_boot_guard():
     # a real authored message is unaffected
     with tempfile.TemporaryDirectory() as td:
         assert run_window.main(_cfg(os.path.join(td, "r"), "solve the real task")).get("ok") is True
-    # both starters carry the sentinel
-    for skill in ("shinka-setup", "shinka-convert"):
-        p = _REPO_ROOT / "skills" / skill / "scripts" / "orchestrator_run.json"
-        assert "__UNSET_AUTHOR_AT_BOOT__" in open(p).read()
+    # the canonical run-config starter carries the sentinel
+    p = _REPO_ROOT / "configs" / "orchestrator_run.default.json"
+    assert "__UNSET_AUTHOR_AT_BOOT__" in open(p).read()
     return None
 
 

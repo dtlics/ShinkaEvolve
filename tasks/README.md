@@ -14,7 +14,7 @@ tasks/<task_name>/
 
 Only `initial.<ext>` + `evaluate.py` are the task contract. There is no per-task
 `run_evo.py` / `shinka.yaml` anymore — the run is configured by an
-`orchestrator_run.json` (the `shinka-setup`/`shinka-convert` skills emit a starter).
+`orchestrator_run.json` (copy the `configs/orchestrator_run.default.json` starter).
 
 ## Running a task (you are the orchestrator)
 

@@ -7,7 +7,8 @@ name = "shinka-evolve"
 dynamic = ["version"]
 description = "Automated Scientific Evolution"
 authors = [
-    {name = "Sakana AI", email = "robert@sakana.ai"}
+    {name = "Sakana AI (upstream)", email = "robert@sakana.ai"},
+    {name = "dtlics"}
 ]
 readme = "README.md"
 license = "Apache-2.0"
@@ -20,7 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
-urls = {Homepage = "https://sakana.ai/shinka-evolve/", Documentation = "https://sakanaai.github.io/ShinkaEvolve/", Repository = "https://github.com/SakanaAI/ShinkaEvolve", Issues = "https://github.com/SakanaAI/ShinkaEvolve/issues"}
+urls = {Homepage = "https://github.com/dtlics/ShinkaEvolve", Repository = "https://github.com/dtlics/ShinkaEvolve", Issues = "https://github.com/dtlics/ShinkaEvolve/issues", Upstream = "https://github.com/SakanaAI/ShinkaEvolve"}
 # Azure-only fork: non-Azure provider SDKs (anthropic, boto3/bedrock,
 # google-genai) and the plotting/viz stack (seaborn, moviepy, adjustText) were
 # dropped with the Azure-only prune. The orchestrator's outer loop is driven by

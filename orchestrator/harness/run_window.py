@@ -1329,29 +1329,49 @@ def _hold_no_idle_sleep():
     THIS process exits and then auto-exits (it watches our PID) — so it self-cleans
     even if run_window is SIGKILLed, and there is no orphaned assertion.
 
-    Best-effort and self-disabling: no-op off macOS, if `/usr/bin/caffeinate` is
-    absent, or if an outer wrapper already set ``SHINKA_CAFFEINATED`` (e.g. an
-    outer caffeinate wrapper). Lives in the CLI path only, so imported/test calls of
-    ``main()`` never spawn caffeinate. NOTE: caffeinate cannot override a
-    closed-lid (clamshell) sleep on a laptop — keep the lid open for unattended runs.
+    Best-effort and self-disabling per platform: on macOS it spawns
+    `caffeinate` (a no-op if `/usr/bin/caffeinate` is absent); on Windows it
+    asserts ES_SYSTEM_REQUIRED via SetThreadExecutionState (released when the
+    returned guard object is GC'd / the process exits); other platforms (Linux)
+    remain a no-op and never raise. Also a no-op if an outer wrapper already set
+    ``SHINKA_CAFFEINATED`` (e.g. an outer caffeinate wrapper). Lives in the CLI
+    path only, so imported/test calls of ``main()`` never spawn caffeinate.
+    NOTE: caffeinate cannot override a closed-lid (clamshell) sleep on a laptop —
+    keep the lid open for unattended runs.
     """
-    if sys.platform != "darwin" or os.environ.get("SHINKA_CAFFEINATED") == "1":
+    # Idempotent: an outer wrapper already holds the no-idle-sleep assertion.
+    if os.environ.get("SHINKA_CAFFEINATED") == "1":
         return None
-    if not os.path.exists("/usr/bin/caffeinate"):
-        return None
-    try:
-        import subprocess
-
-        proc = subprocess.Popen(
-            ["/usr/bin/caffeinate", "-i", "-m", "-w", str(os.getpid())],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        os.environ["SHINKA_CAFFEINATED"] = "1"
-        return proc
-    except Exception:
-        return None
+    if sys.platform == "darwin":
+        if not os.path.exists("/usr/bin/caffeinate"):
+            return None
+        try:
+            import subprocess
+            proc = subprocess.Popen(
+                ["/usr/bin/caffeinate", "-i", "-m", "-w", str(os.getpid())],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            os.environ["SHINKA_CAFFEINATED"] = "1"
+            return proc
+        except Exception:
+            return None
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ES_CONTINUOUS = 0x80000000
+            ES_SYSTEM_REQUIRED = 0x00000001
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+            os.environ["SHINKA_CAFFEINATED"] = "1"
+            class _WinKeepAwake:
+                def __del__(self):
+                    try:
+                        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+                    except Exception:
+                        pass
+            return _WinKeepAwake()
+        except Exception:
+            return None
+    return None  # Linux / other: no-op, no raise
 
 
 def cleanup_warmup(results_dir: str) -> bool:

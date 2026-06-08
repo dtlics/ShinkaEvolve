@@ -32,6 +32,8 @@ import importlib.metadata
 import json
 import os
 import signal
+import sys
+import threading
 import time
 from typing import Any, Optional
 
@@ -149,10 +151,16 @@ def _cx_depth(qc: QuantumCircuit) -> int:
     return qc_basis.depth(filter_function=lambda instr: instr.operation.num_qubits == 2)
 
 
-# --- Per-trial timeout via SIGALRM (Unix; macOS works) ----------------------
+# --- Per-trial timeout (POSIX: SIGALRM unchanged; Windows: threading) --------
 
 class _TrialTimeout(Exception):
     pass
+
+
+# SIGALRM/setitimer are POSIX-only (absent on Windows). When present (macOS/Linux)
+# keep the ORIGINAL signal-based timer verbatim, so non-Windows behavior is
+# byte-for-byte unchanged; only Windows takes the threading fallback below.
+_HAVE_SIGALRM = hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer")
 
 
 def _alarm_handler(signum, frame):  # pragma: no cover (signal callback)
@@ -160,16 +168,42 @@ def _alarm_handler(signum, frame):  # pragma: no cover (signal callback)
 
 
 def _call_synth_with_timeout(synth_fn, M, L, timeout_s):
-    """SIGALRM wraps ONLY the synthesis call. Verification and depth
-    measurement run outside the timer — keeping the timer responsibility
-    narrow and decoupled from the rest of the eval flow."""
-    old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
-    signal.setitimer(signal.ITIMER_REAL, float(timeout_s))
-    try:
-        return synth_fn(M, L)
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0.0)
-        signal.signal(signal.SIGALRM, old_handler)
+    """Run ``synth_fn(M, L)`` under a wall-clock timeout, wrapping ONLY the
+    synthesis call (verification + depth measurement run outside the timer).
+
+    POSIX (macOS/Linux): SIGALRM + setitimer — the original implementation,
+    unchanged, so it still interrupts a runaway synthesis mid-run.
+    Windows (no SIGALRM): a daemon worker thread + ``join(timeout)``. For the
+    common case (synth finishes under the limit) both paths behave identically;
+    on a Windows timeout the worker thread is abandoned (daemon -> dies with the
+    process) rather than interrupted — the eval's consecutive-timeout + wallclock
+    guards and the harness hard-kill bound any wasted CPU.
+    """
+    if _HAVE_SIGALRM:
+        old_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.setitimer(signal.ITIMER_REAL, float(timeout_s))
+        try:
+            return synth_fn(M, L)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0.0)
+            signal.signal(signal.SIGALRM, old_handler)
+
+    box: dict = {}
+
+    def _worker() -> None:
+        try:
+            box["value"] = synth_fn(M, L)
+        except BaseException as exc:  # propagate into the caller's thread
+            box["error"] = exc
+
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
+    t.join(float(timeout_s))
+    if t.is_alive():
+        raise _TrialTimeout(f"trial timed out > {timeout_s}s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
 
 
 # --- Per-trial flow shared by baseline calibration and candidate eval -------
@@ -201,7 +235,7 @@ def _run_trial(synth_fn, L: int, k: int, adj: set[tuple[int, int]], timeout_s: f
 
 def _load_or_compute_baseline() -> dict:
     if os.path.exists(BASELINE_CACHE_PATH):
-        with open(BASELINE_CACHE_PATH) as f:
+        with open(BASELINE_CACHE_PATH, encoding="utf-8") as f:
             return json.load(f)
 
     print(f"[evaluate] Computing snake-KMS baseline (one-time, ~270 syntheses)…")
@@ -242,7 +276,7 @@ def _load_or_compute_baseline() -> dict:
         "per_L_std": {str(L): per_L_stds[L] for L in L_RANGE},
         "depths_by_L": {str(L): depths_by_L[L] for L in L_RANGE},
     }
-    with open(BASELINE_CACHE_PATH, "w") as f:
+    with open(BASELINE_CACHE_PATH, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2)
     elapsed = time.perf_counter() - t0
     print(f"[evaluate] Baseline cached → {BASELINE_CACHE_PATH} "
@@ -387,7 +421,19 @@ def aggregate_fn(results: list) -> dict[str, Any]:
 
 # --- Main entry -------------------------------------------------------------
 
+def _force_utf8_stdio() -> None:
+    """Make stdout/stderr UTF-8 so non-ASCII log lines (e.g. arrows/Greek) don't
+    crash on Windows, where a console/pipe defaults to cp1252. No-op where the
+    stream can't be reconfigured (already UTF-8 on macOS/Linux, or redirected)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+        except Exception:
+            pass
+
+
 def main(program_path: str, results_dir: str) -> None:
+    _force_utf8_stdio()
     print(f"Evaluating program: {program_path}")
     print(f"Saving results to: {results_dir}")
     os.makedirs(results_dir, exist_ok=True)

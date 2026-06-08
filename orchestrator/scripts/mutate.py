@@ -90,7 +90,9 @@ def _apply(patch_type, patch_str, original, patch_dir, language, verbose) -> Tup
 def _write_candidate(patch_dir: str, language: str, code: str) -> str:
     os.makedirs(patch_dir, exist_ok=True)
     path = os.path.join(patch_dir, f"main.{_ext(language)}")
-    with open(path, "w") as f:
+    # encoding pinned to UTF-8: LLM-generated code often has non-ASCII; Windows
+    # would otherwise default to cp1252 and raise UnicodeEncodeError here.
+    with open(path, "w", encoding="utf-8") as f:
         f.write(code)
     return path
 

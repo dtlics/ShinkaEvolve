@@ -101,20 +101,26 @@ def submit(
     if env_overrides:
         env.update(env_overrides)
 
-    # Use PIPE to capture output and redirect to files in real-time
+    # Use PIPE to capture output and redirect to files in real-time.
+    # encoding/errors pinned to UTF-8 so the parent decodes the child's forced
+    # UTF-8 output (PYTHONIOENCODING above) rather than the locale codec (cp1252
+    # on Windows); errors="replace" keeps a stray byte from killing a reader thread.
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1,  # Line buffered
         universal_newlines=True,
         env=env,
     )
 
-    # Open log files for writing with line buffering
-    stdout_file = open(stdout_path, "w", buffering=1)
-    stderr_file = open(stderr_path, "w", buffering=1)
+    # Open log files for writing with line buffering (UTF-8 so non-ASCII evaluator
+    # output is written faithfully on Windows too, never raising on the write).
+    stdout_file = open(stdout_path, "w", buffering=1, encoding="utf-8", errors="replace")
+    stderr_file = open(stderr_path, "w", buffering=1, encoding="utf-8", errors="replace")
 
     # Start threads to stream output to files in real-time
     stdout_thread = threading.Thread(

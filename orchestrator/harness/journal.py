@@ -64,7 +64,7 @@ def _run_path(results_dir: str) -> str:
 
 def _append_jsonl(path: str, obj: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "a") as f:
+    with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(obj) + "\n")
         f.flush()
         os.fsync(f.fileno())
@@ -74,7 +74,7 @@ def _read_jsonl(path: str) -> List[Dict[str, Any]]:
     if not os.path.exists(path):
         return []
     out = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -91,7 +91,7 @@ def _write_json_atomic(path: str, obj: Dict[str, Any]) -> None:
     intact — never a truncated run.json that would zero the cost ledger."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, default=str)
         f.flush()
         os.fsync(f.fileno())
@@ -323,7 +323,7 @@ def read_run(results_dir: str) -> Dict[str, Any]:
             return {}
         return _reconstruct_run(results_dir, None)
     try:
-        data = json.loads(open(p).read())
+        data = json.loads(open(p, encoding="utf-8").read())
     except (json.JSONDecodeError, ValueError):
         data = None
     if not isinstance(data, dict) or "total_cost" not in data:
@@ -443,7 +443,7 @@ def read_call(results_dir: str, file: str) -> Dict[str, Any]:
     if not os.path.exists(p):
         return {}
     try:
-        return json.loads(open(p).read())
+        return json.loads(open(p, encoding="utf-8").read())
     except json.JSONDecodeError:
         return {}
 

@@ -248,6 +248,7 @@ def _run_candidate(candidate_path: str, payload: Dict[str, Any]):
         input=_common.dumps(payload),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         env=env,
         timeout=_SUBPROC_TIMEOUT,
     )
@@ -261,7 +262,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # 1. PARSE
     try:
-        src = Path(candidate_path).read_text()
+        src = Path(candidate_path).read_text(encoding="utf-8")
         ast.parse(src)
     except SyntaxError as exc:
         return {"valid": False, "stage": "parse", "errors": [f"SyntaxError: {exc}"]}

@@ -76,7 +76,9 @@ STARTER_SYS_MSG_SENTINEL = "__UNSET_AUTHOR_AT_BOOT__"
 
 
 def _read_code(path: str) -> str:
-    with open(path, "r") as f:
+    # encoding pinned to UTF-8: program source (seed/candidate) routinely carries
+    # non-ASCII; Windows would otherwise default to cp1252 and raise UnicodeDecodeError.
+    with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
 
@@ -1423,7 +1425,7 @@ def _cli() -> None:
         help="delete the <results_dir>/warmup throwaway workspace and exit.",
     )
     args = ap.parse_args()
-    with open(args.config) as f:
+    with open(args.config, encoding="utf-8") as f:
         cfg = json.load(f)
     if args.cleanup_warmup:
         removed = cleanup_warmup(cfg["results_dir"])

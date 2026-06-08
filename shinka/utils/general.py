@@ -38,7 +38,7 @@ def load_configs_from_yaml(config_path: str):
     from shinka.core import EvolutionConfig
     from shinka.database import DatabaseConfig
 
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
         configs = yaml.safe_load(f)
 
     assert "db_config" in configs, "db_config not found in config file"
@@ -64,14 +64,14 @@ def load_results(results_dir: str):
 
     stdout_log_path = results_dir_path / "job_log.out"
     if stdout_log_path.exists():
-        with open(stdout_log_path, "r") as f:
+        with open(stdout_log_path, "r", encoding="utf-8", errors="replace") as f:
             loaded_results["stdout_log"] = f.read()
     else:
         loaded_results["stdout_log"] = ""
 
     stderr_log_path = results_dir_path / "job_log.err"
     if stderr_log_path.exists():
-        with open(stderr_log_path, "r") as f:
+        with open(stderr_log_path, "r", encoding="utf-8", errors="replace") as f:
             raw_stderr = f.read()
         # Cap at _STDERR_LOG_MAX_BYTES with head+tail preservation so
         # chatty evaluators don't flood the agent's tape (Fix 4).
@@ -81,7 +81,7 @@ def load_results(results_dir: str):
 
     metrics_file_path = results_dir_path / "metrics.json"
     if metrics_file_path.exists():
-        with open(metrics_file_path, "r") as f:
+        with open(metrics_file_path, "r", encoding="utf-8") as f:
             try:
                 loaded_results["metrics"] = json.load(f)
             except json.JSONDecodeError:
@@ -97,7 +97,7 @@ def load_results(results_dir: str):
 
     correct_file_path = results_dir_path / "correct.json"
     if correct_file_path.exists():
-        with open(correct_file_path, "r") as f:
+        with open(correct_file_path, "r", encoding="utf-8") as f:
             loaded_results["correct"] = json.load(f)
     else:
         loaded_results["correct"] = {"correct": False}

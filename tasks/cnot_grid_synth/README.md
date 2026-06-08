@@ -122,4 +122,4 @@ in code at `budget_usd`; the inner loop stops at the cap
 ## Project context
 
 See the project [CLAUDE.md](../../CLAUDE.md) for environment setup, Azure
-credentials, and the rationale behind the forked ShinkaEvolve submodule.
+credentials, and the rationale behind this Azure-only ShinkaEvolve fork.

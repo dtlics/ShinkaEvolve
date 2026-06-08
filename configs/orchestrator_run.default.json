@@ -11,7 +11,7 @@
   },
   "db_config": {"num_islands": 4, "archive_size": 40, "parent_selection_lambda": 10.0},
   "evo": {
-    "window_size": 15,
+    "window_size": 10,
     "patch_types": ["diff", "full", "cross"],
     "patch_type_probs": [0.6, 0.3, 0.1],
     "llm_models": ["azure-gpt-5.4-mini", "azure-gpt-5.5"],

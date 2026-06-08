@@ -951,7 +951,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     db_config = cfg["db_config"]
     evo = cfg["evo"]
     embedding_model = evo.get("embedding_model", "text-embedding-3-small")
-    window_size = int(cfg.get("iters") or evo.get("window_size", 15))
+    window_size = int(cfg.get("iters") or evo.get("window_size", 10))
     num_windows = max(1, int(cfg.get("windows", 1) or 1))  # G4: --windows 0 coerces to 1 (full-keyed diag, not a near-empty dict)
 
     os.makedirs(cfg["results_dir"], exist_ok=True)

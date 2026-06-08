@@ -139,7 +139,12 @@ run is event-driven on the taper). Recover any kill with `run_window.py --resume
 `--warmup` (throwaway db, per-step trace) for the boot oversight and `--windows 1
 --trace-steps` for a framework-audit measure window. Caveat caffeinate can't beat: a
 **closed laptop lid** (clamshell, no external display) forces hardware sleep — keep the
-lid open (or on AC).
+lid open (or on AC). A second thing caffeinate can't beat: **sandbox idle-reclaim** of the
+backgrounded launcher→`run_window`→eval group when the *agent's* session goes idle (the window
+dies mid-run with no exit and no wake — a missed wake). Mitigate with a short self-wake
+**heartbeat**: a backgrounded few-minute timer that re-invokes you and re-checks
+`journal/windows.jsonl` / `run.json` liveness each wake, re-armed until run_window's clean-exit
+fires (`--resume` only recovers after the fact). See SKILL.md "How you launch the inner loop".
 
 The cluster returns control on stagnation or at the work-score taper boundary; you read
 the diagnostics, optionally rewrite a mutable strategy file via the snapshot → reason →

@@ -87,8 +87,10 @@ This is the single source of truth; the rest of this doc expands each step.
    control returns after every window; as your recent work tapers it returns less often.
    There is **no max-window cap** — a cluster is bounded only by the budget hard-stop, a
    termination criterion, and stagnation (which always returns control immediately).
-   Recover from any kill with `--resume` (keep the lid open / stay on AC; a clamshelled
-   laptop hardware-sleeps regardless).
+   Recover from any kill with `--resume`, and while the cluster is backgrounded hold a short
+   self-wake **heartbeat** (see "How you launch the inner loop") so the sandbox does not
+   idle-reclaim the run (keep the lid open / stay on AC; a clamshelled laptop hardware-sleeps
+   regardless).
 3. **EACH WINDOW ENDS WITH AN AUTOMATIC META ROUND — run by the harness, not by you.**
    Deterministic code composes the meta prompt from the current archive + the live island
    list and calls the external LLM (default `azure-gpt-5.5` at medium effort). In one shot
@@ -145,6 +147,22 @@ lifetime, auto-released on exit) so a long cluster is not reaped by host idle-sl
 is no separate detached launcher — the background-launched `--until-decision` IS the wake
 primitive; it returns by exiting and re-invokes you. Keep the lid open / on AC for
 unattended runs.
+
+**Heartbeat — the survival leg self-caffeinate can't cover.** Self-caffeinate beats *host*
+idle-sleep, but NOT the *sandbox* idle-reclaim of the backgrounded launcher→`run_window`→eval
+process group: the agent's OWN long idle is what arms it (tens of minutes of session dormancy
+→ the cluster is reaped mid-window with no exit and no wake — the "missed wake", where you
+wait forever for a cluster that is already dead). With the default `window_size` a single
+window can outlast that threshold, so a deploy-and-yield is exactly what dies. While a cluster
+is backgrounded, therefore, do NOT yield into a long idle: arm a short self-wake **heartbeat**
+— a backgrounded timer of a few minutes that exits and re-invokes you — and on each wake
+confirm `run_window` is still alive and progressing (the process exists; `journal/run.json`
+`updated_at` and `windows.jsonl` advancing), then re-arm; keep the interval well under the
+reclaim threshold (~4 min is safe). Stop re-arming only when `run_window`'s own clean-exit
+notification arrives. The heartbeat does NOT detach `run_window` (it stays a harness-tracked
+job, so its exit still wakes you) — it keeps the *session* active so the tracked job is not
+reclaimed (the same effect a user's periodic ping has). `--resume` only RECOVERS a kill after
+the fact; the heartbeat PREVENTS the missed-wake.
 
 Diagnostics shape (printed to stdout + appended to `journal/windows.jsonl`):
 
@@ -536,7 +554,7 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
   "db_config": {"num_islands": 4, "archive_size": 40, "parent_selection_lambda": 10.0,
                 "migration_interval": 10, "enable_dynamic_islands": false,
                 "max_islands": 0, "island_evict_strategy": "worst_best_fitness"},
-  "evo": {"window_size": 15, "patch_types": ["diff","full","cross"], "patch_type_probs": [0.6,0.3,0.1],
+  "evo": {"window_size": 10, "patch_types": ["diff","full","cross"], "patch_type_probs": [0.6,0.3,0.1],
           "llm_models": ["azure-gpt-5.4-mini","azure-gpt-5.5"], "llm_dynamic_selection_kwargs": {"cost_aware_coef": 0.25, "epsilon": 0.2},
           "reasoning_effort": "medium", "max_patch_attempts": 3, "fix_retry_budget": 1, "reward_mode": "absolute",
           "auto_meta": true, "meta_model": "azure-gpt-5.5", "meta_reasoning_effort": "medium",

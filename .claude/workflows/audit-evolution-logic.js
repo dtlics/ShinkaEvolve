@@ -33,7 +33,7 @@ shinka/ (framework the scripts lean on): core/{config,sampler,wrap_eval}.py
   llm/providers/{model_resolver,openai,pricing,result}.py embed/{client,embedding} embed/providers/pricing.py
   prompts/{prompts_base,prompts_diff,prompts_full,prompts_cross,prompts_fix,prompts_meta,prompts_novelty,prompts_deep_research,prompts_init}.py
   edit/{apply_diff,apply_full,summary}.py utils/{eval_stop,load_df,languages,general}.py
-repo docs: CLAUDE.md taxonomy.md (HISTORICAL) CHANGELOG.md README.md configs/README.md
+repo docs: CLAUDE.md taxonomy.md (HISTORICAL) README.md configs/README.md
   .claude/skills/{shinka-setup,shinka-convert,shinka-inspect}/SKILL.md
   tasks/cnot_grid_synth/{README.md,evaluate.py,initial.py} examples/circle_packing/{evaluate.py,initial.py}
 `.trim()
@@ -295,7 +295,7 @@ const CROSSCUTS = [
  1) PHANTOM-LEVER HUNT — for EVERY knob in orchestrator/SKILL.md's run-config block AND its two lever tables ("Config levers" and the rollback_decision tuning knobs) and the db_config/evo/cadence blocks: grep the code to confirm the knob is actually READ and has the documented effect. Flag any knob that is documented but unread, read but ignored, or whose default in the doc differs from the default in shinka/core/config.py (or wherever defaults live).
  2) SUBROUTINE TABLE — for every row of SKILL.md "The subroutines" table: confirm the file exists, its Mutable/LLM flags match reality, and its stdin→stdout contract / main(payload) entry point matches the doc's one-line purpose.
  3) P9-T0 CONTRACT TABLE (orchestrator/NOTES.md "Code ↔ doc consistency contract") — for each row, open the cited file:function and confirm the code REALLY does what the row claims and the cited doc section REALLY teaches it. Flag any row whose code reference is wrong/missing or whose claim overstates the code.
- 4) STALE DOCS — taxonomy.md is marked HISTORICAL but check its file references (e.g. shinka/core/novelty_judge.py, summarizer.py, prompt_evolver.py, dbase.py line numbers): list which referenced files/paths no longer exist. Do the same spot-check across CLAUDE.md, README.md, CHANGELOG.md, configs/README.md.
+ 4) STALE DOCS — taxonomy.md is marked HISTORICAL but check its file references (e.g. shinka/core/novelty_judge.py, summarizer.py, prompt_evolver.py, dbase.py line numbers): list which referenced files/paths no longer exist. Do the same spot-check across CLAUDE.md, README.md, configs/README.md.
  5) MUTUAL DOC CONSISTENCY — CLAUDE.md vs orchestrator/SKILL.md vs orchestrator/NOTES.md vs the cnot task README: do defaults, model names/prices, file lists, and behavioral claims agree with each other and with code? (e.g. code_embed_sim_threshold default, repair defaults, num_islands default, the Azure deployment/price table.)
 Inventory for reference:\n${INVENTORY}`,
   },

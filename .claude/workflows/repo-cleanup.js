@@ -318,8 +318,8 @@ AUDIT_LOGIC_WORKFLOW / FIX_PLAN / ROOT_CAUSE_AUDIT / SURVIVAL_TEST — re-check 
 taxonomy.md (marked HISTORICAL; references deleted files
 like shinka/core/novelty_judge.py, summarizer.py, prompt_evolver.py); CLAUDE.md / orchestrator/SKILL.md /
 orchestrator/NOTES.md (the user's stated rewrite targets — stale file/lever refs, removed-CLI mentions e.g.
-shinka_run/shinka_launch/shinka_visualize, mac-only assumptions, hardcoded paths); README.md / configs/README.md /
-CHANGELOG.md; pyproject.toml (Sakana homepage/repo/author + 'requires-python >=3.10' vs CLAUDE.md's "Python 3.11").
+shinka_run/shinka_launch/shinka_visualize, mac-only assumptions, hardcoded paths); README.md / configs/README.md;
+pyproject.toml (Sakana homepage/repo/author + 'requires-python >=3.10' vs CLAUDE.md's "Python 3.11").
 KEY CHECKS: (a) For each dated report: which of its corrections are STILL un-propagated into live code/docs/memory? List
 the durable facts to extract, THEN the archive/delete action (e.g. move to a docs/archive/ dir, or delete after
 extraction). (b) For taxonomy.md and the orchestrator docs: list every file/function/lever reference that no longer

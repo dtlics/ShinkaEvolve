@@ -4,7 +4,7 @@ Read first. This file is loaded into every Claude Code session at this repo root
 
 ## What this repo is
 
-Personal working repo for evolutionary code optimization with [ShinkaEvolve](https://github.com/SakanaAI/ShinkaEvolve), running on Azure OpenAI. Started as a fork to fix Azure compat, then a sequence of branches added agentic features and research grounding (see [CHANGELOG.md](CHANGELOG.md) for the fork lineage), which were later **replaced** by the Claude-as-orchestrator rewrite + Azure-only prune. Everything lives here now — framework, tasks, configs, credentials, skills.
+Personal working repo for evolutionary code optimization with [ShinkaEvolve](https://github.com/SakanaAI/ShinkaEvolve), running on Azure OpenAI. Started as a fork to fix Azure compat, then a sequence of branches added agentic features and research grounding (the fork lineage is in the git history), which were later **replaced** by the Claude-as-orchestrator rewrite + Azure-only prune. Everything lives here now — framework, tasks, configs, credentials, skills.
 
 The outer `Shinka` repo (a sibling checkout one level up, e.g. `../Shinka/` on this machine) is a thin shim that initializes this submodule. **Daily work happens here, in this `ShinkaEvolve` tree.**
 

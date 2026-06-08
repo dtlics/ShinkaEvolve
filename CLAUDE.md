@@ -16,7 +16,7 @@ hats** for the evolutionary system in [`orchestrator/`](orchestrator/): the **OR
 DR queries, triage briefs, spawn/ground islands) and the **OUTER-LOOP / FRAMEWORK-AUDIT**
 role (judge whether the deterministic framework code itself is flawed and rewrite the
 mutable strategy code; this runs on a tapering cadence — frequent early, sparse once the
-framework proves robust). Read [`orchestrator/SKILL.md`](orchestrator/SKILL.md) — your
+framework proves robust). Read [`.claude/skills/shinka-orchestrator/SKILL.md`](.claude/skills/shinka-orchestrator/SKILL.md) — your
 operating playbook — before acting. In short:
 
 - **The run loop:** warmup → background-launched window-cluster → automatic per-window
@@ -122,8 +122,8 @@ python scripts/test_azure.py     # hits each main-resource deployment
 
 ## Running a task (you are the orchestrator)
 
-Read [`orchestrator/SKILL.md`](orchestrator/SKILL.md) — the full playbook. In
-short: author a run config (`orchestrator/SKILL.md` documents the schema; copy the
+Read [`.claude/skills/shinka-orchestrator/SKILL.md`](.claude/skills/shinka-orchestrator/SKILL.md) — the full playbook. In
+short: author a run config (`.claude/skills/shinka-orchestrator/SKILL.md` documents the schema; copy the
 `configs/orchestrator_run.default.json` starter) pointing at the task's `evaluate.py` + `initial.<ext>`, then drive
 windows:
 
@@ -165,7 +165,7 @@ The old `shinka_run` CLI was removed in the Azure-only prune.
 > `orchestrator/scripts/mutate.py`; the automatic per-window **meta** round is
 > `meta_summarize.py`; **deep research** (`deep_research.py`) is an AGENT DECISION made at
 > a control-return (you read the logs and decide), never a config-driven cadence.
-> Truncation still applies: `error_traceback` ~8KB (head+tail). See `orchestrator/SKILL.md`.
+> Truncation still applies: `error_traceback` ~8KB (head+tail). See `.claude/skills/shinka-orchestrator/SKILL.md`.
 
 ## Working in this repo
 

@@ -14,12 +14,12 @@ This is the alternative starting point to `shinka-setup`:
 > snapshotted code with `EVOLVE-BLOCK`s, `initial.<ext>`, and `evaluate.py`
 > (calling `shinka.core.run_shinka_eval`). Do **not** generate `run_evo.py` /
 > `shinka.yaml` or use `shinka_run` — that launch path was removed. To RUN, the
-> **shinka-orchestrator** outer loop (`orchestrator/SKILL.md`) points a run
+> **shinka-orchestrator** outer loop (`.claude/skills/shinka-orchestrator/SKILL.md`) points a run
 > config at `evaluate.py` + `initial.<ext>` and drives
 > `orchestrator/harness/run_window.py`. Use `configs/orchestrator_run.default.json` as
 > the run-config starter.
 
-After conversion, run evolution via the **shinka-orchestrator** outer loop (`orchestrator/SKILL.md`), not a per-task runner.
+After conversion, run evolution via the **shinka-orchestrator** outer loop (`.claude/skills/shinka-orchestrator/SKILL.md`), not a per-task runner.
 
 ## When to Use
 Invoke this skill when the user:

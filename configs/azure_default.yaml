@@ -1,7 +1,7 @@
 # Default Azure-backed Shinka portfolio (model-list reference).
 # NOTE: the `shinka_run`/`shinka_launch` CLIs were removed in the Azure-only prune.
 # The orchestrator drives runs via `orchestrator/harness/run_window.py` (see
-# orchestrator/SKILL.md); copy the model list below into your run.json `evo.llm_models`.
+# .claude/skills/shinka-orchestrator/SKILL.md); copy the model list below into your run.json `evo.llm_models`.
 #
 # Models below correspond to deployments in the "Shinka" Foundry project (East US 2 Global Standard).
 # Pricing, reasoning behavior, and temperature constraints are read from

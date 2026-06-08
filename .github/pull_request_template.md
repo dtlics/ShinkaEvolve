@@ -32,4 +32,4 @@ If this PR changes the core program evolution pipeline, provide:
 
 ## Docs
 
-- Docs updated if needed (CLAUDE.md / orchestrator/SKILL.md / README)
+- Docs updated if needed (CLAUDE.md / .claude/skills/shinka-orchestrator/SKILL.md / README)

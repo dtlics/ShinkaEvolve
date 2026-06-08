@@ -3,7 +3,7 @@
 > This directory holds the **canonical run-config starter** the orchestrator copies
 > to launch a job — `orchestrator_run.default.json` — plus a reference model
 > portfolio. A run is configured by an `orchestrator_run.json` (see
-> [orchestrator/SKILL.md](../orchestrator/SKILL.md)). `azure_default.yaml` is a handy
+> [.claude/skills/shinka-orchestrator/SKILL.md](../.claude/skills/shinka-orchestrator/SKILL.md)). `azure_default.yaml` is a handy
 > Azure model-list reference you'd copy into a run config's `evo.*` block — a leftover
 > Hydra fragment the orchestrator does **not** read directly.
 

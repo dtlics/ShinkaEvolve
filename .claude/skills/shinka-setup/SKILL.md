@@ -10,7 +10,7 @@ Create a setup scaffold consisting of an evaluation script and initial solution 
 > `evaluate.py` (calling `shinka.core.run_shinka_eval`) and `initial.<ext>` (with
 > an `EVOLVE-BLOCK`). Do **not** generate `run_evo.py` / `shinka.yaml` or use
 > `shinka_run` — that launch path was removed. To RUN evolution, the
-> **shinka-orchestrator** outer loop (`orchestrator/SKILL.md`) points a run
+> **shinka-orchestrator** outer loop (`.claude/skills/shinka-orchestrator/SKILL.md`) points a run
 > config at this task's `evaluate.py` + `initial.<ext>` and drives
 > `orchestrator/harness/run_window.py`. Use `configs/orchestrator_run.default.json` as
 > the run-config starter.
@@ -228,7 +228,7 @@ if __name__ == "__main__":
 See `configs/orchestrator_run.default.json` for the run-config
 starter. Copy it next to your run, point `task.*` at this task's `evaluate.py` +
 `initial.<ext>`, set `budget_usd` + the Azure `evo.llm_models`, and drive it with
-the **shinka-orchestrator** outer loop (`orchestrator/SKILL.md`).
+the **shinka-orchestrator** outer loop (`.claude/skills/shinka-orchestrator/SKILL.md`).
 
 ## Notes
 - Keep evolve markers tight; only code inside the region should evolve.

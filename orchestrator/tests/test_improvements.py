@@ -1425,7 +1425,7 @@ def test_skill_doc_teaches_run_loop_and_roles():
     dropped from both SKILL.md and this asserted set in one change.)"""
     import re as _re
 
-    skill = (_ORCH / "SKILL.md").read_text()
+    skill = (_REPO_ROOT / ".claude" / "skills" / "shinka-orchestrator" / "SKILL.md").read_text()
     claude = (_REPO_ROOT / "CLAUDE.md").read_text()
     # Strip fenced code blocks so the bare `J_score` JSON field (allowed) doesn't trip the
     # absent-jargon check — only PROSE is checked for killed tokens. Flatten whitespace so

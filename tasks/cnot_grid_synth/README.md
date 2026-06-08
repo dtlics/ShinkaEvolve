@@ -98,7 +98,7 @@ output: `correct=true`, `combined_score=0.0`, `slope ≈ 4.85`,
 Author a run config (copy `configs/orchestrator_run.default.json`),
 point `task.eval_program_path` / `task.init_program_path` at this task's
 `evaluate.py` / `initial.py`, set the Azure `evo.llm_models` + a `budget_usd`,
-then drive windows — see [../../orchestrator/SKILL.md](../../orchestrator/SKILL.md):
+then drive windows — see [../../.claude/skills/shinka-orchestrator/SKILL.md](../../.claude/skills/shinka-orchestrator/SKILL.md):
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"

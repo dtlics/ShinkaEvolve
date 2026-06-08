@@ -26,7 +26,7 @@ python examples/circle_packing/evaluate.py \
 ## Run evolution (as the orchestrator)
 
 Point a run config at this task and drive windows — see
-[orchestrator/SKILL.md](../../orchestrator/SKILL.md):
+[.claude/skills/shinka-orchestrator/SKILL.md](../../.claude/skills/shinka-orchestrator/SKILL.md):
 
 ```bash
 python orchestrator/harness/run_window.py --config <run>/run.json --until-decision

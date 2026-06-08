@@ -20,7 +20,7 @@ Only `initial.<ext>` + `evaluate.py` are the task contract. There is no per-task
 
 From this repo root, with the `shinka` conda env activated, point a run config at
 the task's `evaluate.py` + `initial.<ext>` and drive windows — see
-[../orchestrator/SKILL.md](../orchestrator/SKILL.md):
+[../.claude/skills/shinka-orchestrator/SKILL.md](../.claude/skills/shinka-orchestrator/SKILL.md):
 
 ```bash
 conda activate shinka

@@ -462,6 +462,12 @@ no longer a "≥1 DR of 5" requirement — a DR simply counts as an intervention
 per-window meta round does NOT count as an intervention. A pre-assumed/reference score in
 the docs does NOT end the run early.
 
+**Per-run NOTES.md.** `orchestrator/NOTES.md` is a transient SINGLE-RUN scratchpad, not a
+persistent ledger. CLEAR it at the START of a run (the previous run's note is assumed already
+read and handled by the user); during and at the end of the run, write THIS run's handoff there
+(what happened + anything the user must fix before the next run). Persistent teaching lives in
+this SKILL.md + CLAUDE.md; past runs' notes live in git history.
+
 **End of run:** review the whole history and write an **ending document** — the run's
 outcome + a "Future fixes for the user before the next run" section (foundation/outer-loop
 changes you could not make mid-run). Seed it from `journal.build_run_summary(results_dir)`,

@@ -32,14 +32,15 @@ const SKIP_FOUNDATION = !!(args && args.skip_foundation)
 // ---------------------------------------------------------------------------
 const PRIORS = `VERIFIED CLEANUP PRIORS (confirmed against this repo — re-check in code, do NOT act blind):
 
-1. SKILLS LIVE UNDER .claude/skills/ — three are real files, one is a symlink. Do NOT re-add a top-level skills/ tree.
-   • .claude/skills/shinka-{setup,convert,inspect}/ are REAL files (SKILL.md + any scripts) — edit them in place.
-   • .claude/skills/shinka-orchestrator is a symlink -> ../../orchestrator (the orchestrator/ dir doubles as the skill;
-     it cannot be a plain copy). So .claude/skills/shinka-orchestrator/SKILL.md resolves to orchestrator/SKILL.md (the
-     SAME inode) — edit orchestrator/SKILL.md to change the orchestrator skill doc.
-   • That is the ONLY git symlink left (mode 120000); like any symlink it needs core.symlinks=true on a Windows clone.
-     Verify with: git ls-files -s | awk '$1==120000'   (should list only .claude/skills/shinka-orchestrator)
-   • The old top-level skills/ tree was consolidated INTO .claude/skills/ on 2026-06-08 — do not recreate it.
+1. SKILLS LIVE UNDER .claude/skills/ AS REAL FILES — no symlinks. Do NOT re-add a top-level skills/ tree or a symlink.
+   • .claude/skills/shinka-{setup,convert,inspect}/ — real SKILL.md (+ any scripts); edit in place.
+   • .claude/skills/shinka-orchestrator/ — real SKILL.md + subagents/ (the orchestrator playbook + its subagent defs).
+     The orchestrator FRAMEWORK CODE stays separately in orchestrator/ (harness/, scripts/, strategy_history/, tests/,
+     NOTES.md); SKILL.md refers to it by repo-root-relative paths. Edit the playbook at
+     .claude/skills/shinka-orchestrator/SKILL.md.
+   • There are NO git symlinks left (git ls-files -s | awk '$1==120000' is empty). The old double symlink tree + the
+     orchestrator symlink were consolidated into real files on 2026-06-08 — do not recreate them (this removes the
+     Windows core.symlinks hazard entirely).
 
 2. configs/hydra/slurm ARE ON THE LIVE EVAL PATH — decouple-first, never bare-rm.
    • shinka/utils/__init__.py eagerly imports utils_hydra + load_df, so ANY 'import shinka.utils' pulls in hydra.
@@ -56,7 +57,7 @@ const PRIORS = `VERIFIED CLEANUP PRIORS (confirmed against this repo — re-chec
      encode at least one un-propagated correction (a survival-model fix) and a latent BanditBase.save_state bug.
      Extract any still-true durable fact into the live docs/memory BEFORE archiving/deleting the report.
 
-4. THE DOCS ARE TARGETS, NOT AUTHORITY. CLAUDE.md, orchestrator/SKILL.md, orchestrator/NOTES.md, taxonomy.md,
+4. THE DOCS ARE TARGETS, NOT AUTHORITY. CLAUDE.md, .claude/skills/shinka-orchestrator/SKILL.md, orchestrator/NOTES.md, taxonomy.md,
    README.md, configs/README.md describe an intended system and may be stale or aspirational. A doc claim counts as
    "stale" ONLY when the current code disagrees — verify against code (Read/Grep/git), never trust a doc to justify a
    change to another doc.
@@ -316,7 +317,7 @@ corrections — reconcile-then-archive, never free-delete).
 SEED EVIDENCE: the four dated 2026-06-03 reports (ALREADY ARCHIVED 2026-06-08 to docs/archive/2026-06-03/:
 AUDIT_LOGIC_WORKFLOW / FIX_PLAN / ROOT_CAUSE_AUDIT / SURVIVAL_TEST — re-check they are under docs/archive, not root) and
 taxonomy.md (marked HISTORICAL; references deleted files
-like shinka/core/novelty_judge.py, summarizer.py, prompt_evolver.py); CLAUDE.md / orchestrator/SKILL.md /
+like shinka/core/novelty_judge.py, summarizer.py, prompt_evolver.py); CLAUDE.md / .claude/skills/shinka-orchestrator/SKILL.md /
 orchestrator/NOTES.md (the user's stated rewrite targets — stale file/lever refs, removed-CLI mentions e.g.
 shinka_run/shinka_launch/shinka_visualize, mac-only assumptions, hardcoded paths); README.md / configs/README.md;
 pyproject.toml (Sakana homepage/repo/author + 'requires-python >=3.10' vs CLAUDE.md's "Python 3.11").
@@ -333,23 +334,20 @@ hasn't been extracted yet — that step is the prerequisite.`,
     key: 'structure-skills',
     title: 'Nested / convoluted layout + skills-doc duplication (skills consolidated under .claude/skills/)',
     spec: `GOAL: reduce real structural convolution and doc duplication WITHOUT breaking the skill registry. As of
-2026-06-08 the skills are CONSOLIDATED under .claude/skills/ (see PRIOR #1): shinka-{setup,convert,inspect} are real
-files there; shinka-orchestrator is the lone symlink -> ../../orchestrator. There is no top-level skills/ tree anymore,
-and the two duplicate orchestrator_run.json starters were already extracted to configs/orchestrator_run.default.json.
-Target what REMAINS.
-SEED EVIDENCE: doc CONTENT overlap across CLAUDE.md / orchestrator/SKILL.md / orchestrator/NOTES.md (the same Azure
-deployment table, the same run-loop description, the same lever lists repeated → drift risk); the one shinka-orchestrator
-symlink (a Windows core.symlinks=false hazard — flag it, but it cannot be a plain copy since orchestrator/ is framework);
-naming collisions (scripts/ vs orchestrator/scripts/ — two different 'scripts' dirs; configs/ vs shinka/configs/ — two
+2026-06-08 the skills are CONSOLIDATED under .claude/skills/ as REAL files (see PRIOR #1): shinka-{setup,convert,inspect}
+and shinka-orchestrator (SKILL.md + subagents/) — NO symlinks, no top-level skills/ tree — and the duplicate
+orchestrator_run.json starters were already extracted to configs/orchestrator_run.default.json. Target what REMAINS.
+SEED EVIDENCE: doc CONTENT overlap across CLAUDE.md / .claude/skills/shinka-orchestrator/SKILL.md / orchestrator/NOTES.md
+(the same Azure deployment table, the same run-loop description, the same lever lists repeated → drift risk); naming
+collisions (scripts/ vs orchestrator/scripts/ — two different 'scripts' dirs; configs/ vs shinka/configs/ — two
 different 'configs').
-KEY CHECKS: (a) Confirm the current layout first (git ls-files -s | awk '$1==120000' should show ONLY
-.claude/skills/shinka-orchestrator) — do NOT propose re-adding a top-level skills/ tree or turning the orchestrator
-symlink into a duplicated copy (that reintroduces drift). (b) For doc-content overlap, propose single-sourcing the
-CONTENT (a fact lives in one doc, the others link to it), never editing N copies. (c) Naming collisions: is the
-top-level one still needed (scripts/test_azure.py; configs/azure_default.yaml + README + orchestrator_run.default.json)
-or foldable? Only propose a move if you can prove nothing references the old path. (d) Keep proposals conservative: a
-move that breaks an import or a skill path is worse than the nesting. Mark anything that needs human judgment
-safe_to_apply=false.`,
+KEY CHECKS: (a) Confirm the current layout first (git ls-files -s | awk '$1==120000' is EMPTY — all skills are real
+files) — do NOT propose re-adding a top-level skills/ tree or any skill symlink. (b) For doc-content overlap, propose
+single-sourcing the CONTENT (a fact lives in one doc, the others link to it), never editing N copies. (c) Naming
+collisions: is the top-level one still needed (scripts/test_azure.py; configs/azure_default.yaml + README +
+orchestrator_run.default.json) or foldable? Only propose a move if you can prove nothing references the old path.
+(d) Keep proposals conservative: a move that breaks an import or a skill path is worse than the nesting. Mark anything
+that needs human judgment safe_to_apply=false.`,
   },
 ]
 

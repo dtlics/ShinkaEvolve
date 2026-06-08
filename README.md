@@ -7,9 +7,12 @@ is the only LLM backend.
 
 The inner loop (parent sampling → mutation → evaluation → archive update) runs at
 API-call speed against Azure. The orchestrator (you, via Claude Code) drives it
-one *window* at a time, reads diagnostics, and — when the search stagnates —
-rewrites the underlying **strategy code** via a validate → deploy → measure →
-rollback protocol. See [`.claude/skills/shinka-orchestrator/SKILL.md`](.claude/skills/shinka-orchestrator/SKILL.md).
+one *window* at a time, reads diagnostics, and — when there is a need for
+intervention, such as the logs/history demonstrating evidence of evolution flaws
+or the search stagnating — you can decide whether to initiate a Deep Research run
+to gain external knowledge about the SOTA of the task or a subtask; you can also
+rewrite the underlying **strategy code** via a design → change → validate →
+deploy → measure → rollback protocol. See [`.claude/skills/shinka-orchestrator/SKILL.md`](.claude/skills/shinka-orchestrator/SKILL.md).
 
 ## What's here
 

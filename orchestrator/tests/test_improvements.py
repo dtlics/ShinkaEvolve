@@ -1230,6 +1230,9 @@ def test_cnot_evaluator_emits_correct_flag():
     """Phase 1 (1A.3): the cnot aggregate_fn emits correct=False on its fast
     (no-baseline) failure return sites. Imported by path to avoid the
     evaluate.py name clash with orchestrator/scripts/evaluate.py."""
+    import pytest
+
+    pytest.importorskip("qiskit")  # task-level dep of the cnot evaluator, not a framework dep
     import importlib.util
 
     ev_path = str(_REPO_ROOT / "tasks" / "cnot_grid_synth" / "evaluate.py")
@@ -1600,6 +1603,9 @@ def test_cnot_eval_budget_invariant():
     PER_TRIAL_TIMEOUT_S < EVAL_WALLCLOCK_BUDGET_S so the graceful early-abort can fire
     before a per-trial kill; a future edit that inverts them is caught here. (The
     eval_time > wallclock relation is task-config, documented in the evaluator.)"""
+    import pytest
+
+    pytest.importorskip("qiskit")  # task-level dep of the cnot evaluator, not a framework dep
     import importlib.util
 
     ev_path = str(_REPO_ROOT / "tasks" / "cnot_grid_synth" / "evaluate.py")

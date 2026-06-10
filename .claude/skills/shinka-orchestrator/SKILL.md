@@ -398,15 +398,19 @@ a reproduce-paper framing, so RESHAPE the query; never re-fire the same shape.
 
 **A server-side terminal `failed` is NOT a content_filter** — it means the `o3-deep-research`
 job itself failed, and the journal call's `reason`/`error_code` now carry the real cause (Azure
-`error.code`/`message` + `incomplete_details.reason`, surfaced by `run_dr_call`). If EVERY DR call
-fails terminally, the cause is almost always an Azure-side **deployment precondition**, not the
-query: `o3-deep-research` REQUIRES a tool (`web_search_preview`) that may not be provisioned/enabled
-on the DR resource, OR a quota/rate cap, OR a wrong deployment name / model-version (`2025-06-26`).
-Run `scripts/test_dr.py` to print the full error in isolation and FIX IT ON THE AZURE SIDE —
-re-firing won't help. **Cost-on-failure reality:** a submitted-then-failed DR call DID run web
-searches + compute server-side, so Azure BILLS it even though `usage` comes back empty; the
-framework now floors such a call's logged cost at `search_surcharge_usd` (≥$0.30) and folds it into
-the ledger/budget. Treat a failed DR as real spend, NOT free — do not loop-retry it.
+`error.code`/`message` + `incomplete_details.reason`, surfaced by `run_dr_call`). **The CONFIRMED
+failure mode on this setup is `error.code='too_many_requests'`** (exact-payload replay,
+2026-06-10): the DR deployment's TPM/RPM quota cannot sustain a full deep-research job — a single
+job internally fires many large reasoning+search calls for 30–60 min, so a LIGHT probe
+(`scripts/test_dr.py`) succeeds while a REAL job dies mid-research (observed at 8–50 min). The
+remedy is Azure-side: RAISE the deployment quota; from your side, scope the query tighter and/or
+lower `max_tool_calls`. Other terminal causes to read off `error_code`: a missing/blocked
+`web_search_preview` tool on the resource, or a wrong deployment name / model-version. FIX IT ON
+THE AZURE SIDE — re-firing the same heavy job won't help. **Cost-on-failure reality:** a
+submitted-then-failed DR call DID run web searches + compute server-side, so Azure BILLS it even
+though `usage` comes back empty; the framework now floors such a call's logged cost at
+`search_surcharge_usd` (≥$0.30) and folds it into the ledger/budget. Treat a failed DR as real
+spend, NOT free — do not loop-retry it.
 
 **Triage the returned brief — per technique, deliberately:**
 - **Novel** (no archived program or prior direction resembles it) → GROUND it (the

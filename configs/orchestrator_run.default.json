@@ -33,6 +33,6 @@
     "stagnation_rel_frac": 0.05,
     "consecutive_required": 2
   },
-  "cadence": {"mode": "until_decision", "base_low": 5, "low_threshold": 1},
+  "cadence": {"mode": "until_decision", "base_low": 5, "low_threshold": 1, "early_phase_windows": 5},
   "window_state": {"window_index": 0, "prior_low_streak": 0}
 }

@@ -28,6 +28,10 @@ INPUT (stdin JSON):
     "use_text_feedback": true,   # default true (repair feedback ON); false on a spoil-risk task
     "inspiration_sort_order": "ascending",
     "extra_guidance": str | null,   # appended to the system prompt (rewrite lever)
+    "eval_budget_sec": float | null,    # C2: per-eval time budget (task.eval_time secs) for the runtime caution
+    "slow_caution_frac": 0.8,           # C2: runtime >= this*budget counts as "slow" (default 0.8)
+    "parent_runtime_sec": float | null, # C2 (immediate-fix only): the just-failed candidate's runtime
+    "parent_timed_out": bool | null,    # C2 (immediate-fix only): did the just-failed candidate time out
     "seed": int | null
   }
 
@@ -135,6 +139,51 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     extra = payload.get("extra_guidance")
     if extra:
         patch_sys = f"{patch_sys}\n\n# Additional guidance\n{extra}"
+
+    # C2 runtime-budget caution: if the parent, an inspiration, or (immediate-fix) the
+    # just-failed candidate ran close to the per-eval time budget — or was timed out —
+    # surface a BOUNDED caution so the LLM keeps its synthesis within budget. This does NOT
+    # penalize a slow-but-correct candidate (still archived/scored/rewarded normally); it only
+    # makes the budget visible so a genuinely-better-but-too-slow synthesis isn't lost to a
+    # timeout. runtime_sec/timed_out are numeric (NOT in _EVAL_TEXT_KEYS), so this survives
+    # use_text_feedback:false and never echoes a raw traceback. Applies to BOTH branches.
+    _budget = payload.get("eval_budget_sec")
+    _slow_frac = float(payload.get("slow_caution_frac", 0.8) or 0.8)
+
+    def _runtime_signals(d: Any):
+        md = (d or {}).get("metadata") or {}
+        _rt = md.get("runtime_sec")
+        if _rt is None:
+            _rt = (d or {}).get("runtime_sec")
+        _to = bool(md.get("timed_out") or (d or {}).get("timed_out"))
+        return (float(_rt) if _rt is not None else None), _to
+
+    _any_timeout = bool(payload.get("parent_timed_out"))
+    _slow_rt: Optional[float] = None
+    _pr = payload.get("parent_runtime_sec")  # immediate-fix: the just-failed candidate isn't archived
+    if _pr is not None and _budget and float(_pr) >= _slow_frac * float(_budget):
+        _slow_rt = float(_pr)
+    for _d in [payload.get("parent"), *(payload.get("archive_inspirations") or []),
+               *(payload.get("top_k_inspirations") or [])]:
+        _rt, _to = _runtime_signals(_d)
+        if _to:
+            _any_timeout = True
+        if _rt is not None and _budget and _rt >= _slow_frac * float(_budget):
+            _slow_rt = _rt if _slow_rt is None else max(_slow_rt, _rt)
+
+    if _any_timeout or _slow_rt is not None:
+        _budget_txt = (f"~{float(_budget):.0f}s per evaluation" if _budget
+                       else "a fixed per-evaluation time budget")
+        _obs = ("A recent candidate was TIMED OUT by the evaluator (it exceeded the budget and "
+                "scored 0)." if _any_timeout
+                else f"A recent candidate took ~{_slow_rt:.0f}s, close to the budget.")
+        patch_sys = (
+            f"{patch_sys}\n\n# Runtime budget\n{_obs} Each evaluation has {_budget_txt}; a "
+            "candidate that exceeds it is timed out and scores 0 regardless of circuit quality. "
+            "Keep the algorithmic improvement, but make the synthesis efficient enough to finish "
+            "well within the budget — do NOT trade away correctness or depth for raw speed; just "
+            "avoid gratuitously slow constructions."
+        )
 
     return {
         "patch_sys": patch_sys,

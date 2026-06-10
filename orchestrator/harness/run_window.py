@@ -82,6 +82,20 @@ def _read_code(path: str) -> str:
         return f.read()
 
 
+def _eval_budget_sec(task: Dict[str, Any]) -> Optional[float]:
+    """C2: the per-eval time budget in seconds (task.eval_time 'HH:MM:SS'), or None.
+    construct_mutation_prompt uses it to decide whether a parent/inspiration ran 'slow'
+    vs the budget and to word the runtime-budget caution."""
+    et = task.get("eval_time")
+    if not et:
+        return None
+    try:
+        from shinka.utils import parse_time_to_seconds
+        return float(parse_time_to_seconds(et))
+    except Exception:
+        return None
+
+
 def _embed(cfg: Dict[str, Any], code: str) -> Tuple[Optional[List[float]], float]:
     """Embed candidate code for the novelty check. Returns (vector, cost_usd).
     Mock = deterministic hash vector (offline, cost 0); live = shinka's
@@ -397,6 +411,11 @@ def _attempt_immediate_fixes(
                 "failure_note": evo.get("meta_failure_note"),
                 # C3 (H6): offset by generation so fix prompts don't pin one patch type.
                 "seed": (int(evo["seed"]) + generation) if evo.get("seed") is not None else None,
+                # C2: the per-eval budget + the just-failed candidate's runtime (it is never
+                # archived, so its runtime lives only in the live `ev`) → runtime-budget caution.
+                "eval_budget_sec": _eval_budget_sec(task),
+                "parent_runtime_sec": ev.get("runtime_sec"),
+                "parent_timed_out": bool(ev.get("timed_out")),
             }
         )
         fix_payload: Dict[str, Any] = {
@@ -504,6 +523,9 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                         "db_path": db_path, "db_config": db_config,
                         "embedding_model": embedding_model,
                         "query_type": "get", "program_id": pid, "include_code": True,
+                        # C2: carry runtime_sec/timed_out metadata so the prompt builder can
+                        # surface a runtime-budget caution from a slow/timed-out inspiration.
+                        "include_metadata": True,
                     }
                 )["result"]
             )
@@ -593,6 +615,8 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             "language": language,
             "extra_guidance": evo.get("extra_guidance"),
             "use_text_feedback": evo.get("use_text_feedback", True),
+            # C2: per-eval budget → bounded runtime caution when the parent/an inspiration ran slow.
+            "eval_budget_sec": _eval_budget_sec(task),
             "seed": gseed,
         }
     )
@@ -1223,6 +1247,10 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     max_per_call = cadence.get("max_windows_per_call")  # None unless the user sets one
     base_low = float(cadence.get("base_low", 5) or 5)
     low_threshold = float(cadence.get("low_threshold", 1) or 0.0)
+    # STAGE-1 early-phase floor: the first `early_phase_windows` windows each return
+    # control individually (frequent inspection while the framework is least proven),
+    # regardless of work score; then the work-score taper takes over. 0 disables it.
+    early_phase_windows = int(cadence.get("early_phase_windows", 5) or 0)
 
     last_diag: Dict[str, Any] = {}
     if until_decision:
@@ -1277,6 +1305,10 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 {
                     "stagnation_flag": last_diag.get("stagnation_flag"),
                     "windows_run": windows_run,
+                    # window_index was incremented above → it is the count of windows
+                    # completed so far globally, which drives the Stage-1 early phase.
+                    "window_index": window_index,
+                    "early_phase_windows": early_phase_windows,
                     "recent_work_score": _recent_work,
                     "work_low_streak": _low_streak,
                     "base_low": base_low,

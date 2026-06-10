@@ -41,6 +41,8 @@ from typing import Any, AsyncIterator, Literal, cast
 
 from agents.models.openai_responses import OpenAIResponsesModel
 
+from ..constants import PER_REQUEST_TIMEOUT
+
 logger = logging.getLogger(__name__)
 
 
@@ -112,6 +114,7 @@ class BackgroundOpenAIResponsesModel(OpenAIResponsesModel):
         poll_interval_sec: float = DEFAULT_POLL_INTERVAL_SEC,
         poll_timeout_sec: float = DEFAULT_POLL_TIMEOUT_SEC,
         max_queued_wait_sec: float = DEFAULT_MAX_QUEUED_WAIT_SEC,
+        per_request_timeout_sec: float = PER_REQUEST_TIMEOUT,
     ) -> None:
         super().__init__(
             model=model,
@@ -121,6 +124,9 @@ class BackgroundOpenAIResponsesModel(OpenAIResponsesModel):
         self.poll_interval_sec = poll_interval_sec
         self.poll_timeout_sec = poll_timeout_sec
         self.max_queued_wait_sec = max_queued_wait_sec
+        # SHORT per-HTTP-request cap: a hung status GET is abandoned + retried, so it can't
+        # ride the whole poll_timeout_sec wall (see shinka.llm.constants.PER_REQUEST_TIMEOUT).
+        self.per_request_timeout_sec = per_request_timeout_sec
 
     async def _fetch_response(  # type: ignore[override]
         self,
@@ -168,7 +174,9 @@ class BackgroundOpenAIResponsesModel(OpenAIResponsesModel):
         create_kwargs["background"] = True
 
         client = self._get_client()
-        response = await client.responses.create(**create_kwargs)
+        response = await asyncio.wait_for(
+            client.responses.create(**create_kwargs), timeout=self.per_request_timeout_sec
+        )
         response_id = getattr(response, "id", None)
         status = getattr(response, "status", None)
 
@@ -205,7 +213,20 @@ class BackgroundOpenAIResponsesModel(OpenAIResponsesModel):
                 )
 
             await asyncio.sleep(self.poll_interval_sec)
-            response = await client.responses.retrieve(response_id)
+            try:
+                response = await asyncio.wait_for(
+                    client.responses.retrieve(response_id),
+                    timeout=self.per_request_timeout_sec,
+                )
+            except asyncio.TimeoutError:
+                # A hung status GET is abandoned and RETRIED — never let one wedged request
+                # ride the whole poll_timeout_sec wall (the top-of-loop deadline check still
+                # bounds the TOTAL job time and triggers best-effort cancel when it expires).
+                logger.warning(
+                    "background retrieve(%s) exceeded the %.0fs per-request cap — retrying",
+                    response_id, self.per_request_timeout_sec,
+                )
+                continue
             status = getattr(response, "status", None)
 
             if status in _TERMINAL_STATUSES:

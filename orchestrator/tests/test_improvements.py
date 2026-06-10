@@ -155,29 +155,59 @@ def test_concern_bundle():
 
 
 def test_cadence_policy():
-    """P4-T2: the work-score taper is UNCAPPED and escalating; no work score → wake
-    every window; an OPTIONAL max_windows_per_call still clamps when the user sets one."""
+    """Two-stage cadence. STAGE 1: the first `early_phase_windows` windows each return
+    control individually regardless of work score (frequent early inspection). STAGE 2:
+    past the early phase, the UNCAPPED work-score taper, with the low-streak exponent
+    counted FROM THE END OF THE EARLY PHASE so the early per-window returns don't inflate
+    the first steady-state cluster. early_phase_windows=0 restores the legacy taper; an
+    OPTIONAL max_windows_per_call still clamps."""
     import cadence_policy as cp
 
+    # stagnation always returns immediately
     assert cp.main({"stagnation_flag": True, "windows_run": 1})["reason"] == "stagnation"
-    hi = cp.main({"stagnation_flag": False, "windows_run": 1, "recent_work_score": 3})
-    assert hi["return"] is True and hi["target_cluster_size"] == 1 and hi["reason"] == "taper"
-    # no work-score signal → wake every window (safe default)
-    assert cp.main({"stagnation_flag": False, "windows_run": 1,
+
+    # STAGE 1 — early phase: per-window regardless of (low) work score + growing streak
+    early = cp.main({"stagnation_flag": False, "windows_run": 1, "window_index": 3,
+                     "early_phase_windows": 5, "recent_work_score": 0, "work_low_streak": 2})
+    assert early["return"] is True and early["target_cluster_size"] == 1 and early["reason"] == "taper"
+    # window_index == early_phase_windows is still the early phase (covers the K-th window)
+    assert cp.main({"stagnation_flag": False, "windows_run": 1, "window_index": 5,
+                    "early_phase_windows": 5, "recent_work_score": 0,
+                    "work_low_streak": 5})["target_cluster_size"] == 1
+
+    # past the early phase: high work → stay close; no signal → wake every window
+    hi = cp.main({"stagnation_flag": False, "windows_run": 1, "window_index": 99,
+                  "recent_work_score": 3})
+    assert hi["return"] is True and hi["target_cluster_size"] == 1
+    assert cp.main({"stagnation_flag": False, "windows_run": 1, "window_index": 99,
                     "recent_work_score": None})["target_cluster_size"] == 1
 
-    def _tgt(streak):
-        return cp.main({"stagnation_flag": False, "windows_run": 0, "recent_work_score": 0,
+    # STAGE 2 — work-score taper PAST the early phase. The low-streak exponent is counted
+    # from the end of the early phase, so the ramp starts at base_low once the streak
+    # clears the early phase (no base_low*2^early_phase explosion).
+    def _tgt(streak, ep=5):
+        return cp.main({"stagnation_flag": False, "windows_run": 0, "window_index": 99,
+                        "early_phase_windows": ep, "recent_work_score": 0,
                         "work_low_streak": streak})["target_cluster_size"]
 
-    assert _tgt(1) == 5 and _tgt(2) == 10 and _tgt(3) == 20  # uncapped escalation
-    assert cp.main({"stagnation_flag": False, "windows_run": 3, "recent_work_score": 0,
-                    "work_low_streak": 1})["return"] is False  # 3 < 5
-    assert cp.main({"stagnation_flag": False, "windows_run": 5, "recent_work_score": 0,
-                    "work_low_streak": 1})["return"] is True   # 5 >= 5
-    # OPTIONAL explicit ceiling still clamps if the user sets one
-    assert cp.main({"stagnation_flag": False, "windows_run": 0, "recent_work_score": 0,
-                    "work_low_streak": 3, "max_windows_per_call": 8})["target_cluster_size"] == 8
+    # early_phase_windows=5: a streak still inside the early span stays at base_low (no jump)
+    assert _tgt(5) == 5 and _tgt(6) == 5
+    # then it doubles: streak 7/8 → 10/20
+    assert _tgt(7) == 10 and _tgt(8) == 20
+    # early_phase_windows=0 restores the legacy base_low*2^(streak-1) ramp exactly
+    assert _tgt(1, ep=0) == 5 and _tgt(2, ep=0) == 10 and _tgt(3, ep=0) == 20
+
+    # the windows_run >= target gate still holds past the early phase
+    assert cp.main({"stagnation_flag": False, "windows_run": 3, "window_index": 99,
+                    "early_phase_windows": 5, "recent_work_score": 0,
+                    "work_low_streak": 7})["return"] is False  # 3 < 10
+    assert cp.main({"stagnation_flag": False, "windows_run": 5, "window_index": 99,
+                    "early_phase_windows": 5, "recent_work_score": 0,
+                    "work_low_streak": 6})["return"] is True   # 5 >= 5
+    # OPTIONAL explicit ceiling still clamps
+    assert cp.main({"stagnation_flag": False, "windows_run": 0, "window_index": 99,
+                    "early_phase_windows": 0, "recent_work_score": 0,
+                    "work_low_streak": 4, "max_windows_per_call": 8})["target_cluster_size"] == 8
     return None
 
 
@@ -618,6 +648,57 @@ def test_fix_prompt_reads_only_metadata_channels():
 
     assert "HELDOUT=0.42" in _fix_prompt("boom HELDOUT=0.42")  # marker in channel → in prompt
     assert "HELDOUT=0.42" not in _fix_prompt("")               # blank channel → NOT in prompt
+    return None
+
+
+def test_c2_runtime_budget_caution():
+    """C2: record_policy persists runtime_sec/timed_out; construct_mutation_prompt surfaces a
+    BOUNDED runtime-budget caution (both branches) when a parent/inspiration is slow or timed
+    out vs the per-eval budget — numeric only, so it survives use_text_feedback=false."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import record_policy as rp
+    import construct_mutation_prompt as cmp
+
+    # record_policy persistence: correct-but-slow → runtime recorded, no timed_out flag;
+    # timed out → both recorded; no runtime info → neither.
+    md_slow = rp.main({"eval": {"combined_score": 0.5, "correct": True, "runtime_sec": 123.4},
+                       "parent": {}, "mutation": {}, "sample": {}})["metadata"]
+    assert md_slow["runtime_sec"] == 123.4 and "timed_out" not in md_slow
+    md_to = rp.main({"eval": {"combined_score": 0.0, "correct": False, "runtime_sec": 999.0,
+                              "timed_out": True}, "parent": {}, "mutation": {}, "sample": {}})["metadata"]
+    assert md_to["timed_out"] is True and md_to["runtime_sec"] == 999.0
+    md_none = rp.main({"eval": {"combined_score": 0.1, "correct": True},
+                       "parent": {}, "mutation": {}, "sample": {}})["metadata"]
+    assert "runtime_sec" not in md_none and "timed_out" not in md_none
+
+    def _newmut(parent, **kw):
+        return cmp.main({"parent": parent, "archive_inspirations": [], "top_k_inspirations": [],
+                         "language": "python", "patch_types": ["diff"], "patch_type_probs": [1.0],
+                         "task_sys_msg": "t", "seed": 0, **kw})["patch_sys"]
+
+    fast = {"id": "p", "code": "x=1\n", "combined_score": 0.0, "metadata": {"runtime_sec": 10.0}}
+    slow = {"id": "p", "code": "x=1\n", "combined_score": 0.0, "metadata": {"runtime_sec": 90.0}}
+    tout = {"id": "p", "code": "x=1\n", "combined_score": 0.0, "metadata": {"timed_out": True}}
+    assert "# Runtime budget" not in _newmut(fast, eval_budget_sec=100.0)   # 10 < 0.8*100
+    assert "# Runtime budget" not in _newmut(slow)                          # no budget → no caution
+    assert "# Runtime budget" in _newmut(slow, eval_budget_sec=100.0)       # 90 >= 0.8*100
+    assert "TIMED OUT" in _newmut(tout, eval_budget_sec=100.0)              # timed out
+    # numeric → the caution survives use_text_feedback=false
+    assert "# Runtime budget" in _newmut(slow, eval_budget_sec=100.0, use_text_feedback=False)
+    # a slow INSPIRATION (not just the parent) also triggers it
+    assert "# Runtime budget" in cmp.main({
+        "parent": fast, "archive_inspirations": [slow], "top_k_inspirations": [],
+        "language": "python", "patch_types": ["diff"], "patch_type_probs": [1.0],
+        "task_sys_msg": "t", "seed": 0, "eval_budget_sec": 100.0})["patch_sys"]
+
+    # immediate-fix branch: the just-failed candidate's runtime arrives via parent_timed_out/
+    # parent_runtime_sec (it is never archived); the caution rides into the fix prompt too.
+    out_fix = cmp.main({"parent": {"id": "f", "code": "x=1\n", "combined_score": 0.0,
+                                   "metadata": {"stdout_log": "", "stderr_log": ""}},
+                        "needs_fix": True, "language": "python", "patch_types": ["diff"],
+                        "patch_type_probs": [1.0], "task_sys_msg": "t", "seed": 0,
+                        "eval_budget_sec": 100.0, "parent_timed_out": True})["patch_sys"]
+    assert "# Runtime budget" in out_fix
     return None
 
 
@@ -1928,6 +2009,164 @@ def test_dr_refusal_folds_cost_to_ledger():
             assert len(dr_pointers) == 1, journal.read_calls(td)
     finally:
         drc.get_dr_async_client, drc.run_dr_call = orig_client, orig_run
+    return None
+
+
+def test_dr_submitted_failure_floors_cost():
+    """A: a SUBMITTED-but-failed DR call (usage None → token cost 0) records >= search_surcharge
+    so the ledger knows Azure billed us, and carries error_code through for diagnosis."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import deep_research
+    import journal
+    import shinka.llm.agent.dr_client as drc
+
+    orig_client, orig_run = drc.get_dr_async_client, drc.run_dr_call
+    try:
+        drc.get_dr_async_client = lambda: (object(), None)
+
+        async def _raise_submitted(*a, **k):
+            e = RuntimeError("DR response d1 terminal status='failed' error.code='tool_not_supported'")
+            e.cost = 0.0          # failed response → usage None → token cost 0
+            e.submitted = True    # but the job ran (web searches) → Azure billed us
+            e.error_code = "tool_not_supported"
+            raise e
+
+        drc.run_dr_call = _raise_submitted
+        with tempfile.TemporaryDirectory() as td:
+            out = deep_research.main({"query": "q", "program_context": "c", "results_dir": td,
+                                      "search_surcharge_usd": 0.30})
+            assert out["refused"] is True
+            assert out["cost"] >= 0.30 - 1e-9, out            # floored at the surcharge, NOT $0
+            assert out["error_code"] == "tool_not_supported", out
+            ptrs = [c for c in journal.read_calls(td) if c.get("kind") == "dr"]
+            assert len(ptrs) == 1 and ptrs[0]["cost"] >= 0.30 - 1e-9, ptrs
+    finally:
+        drc.get_dr_async_client, drc.run_dr_call = orig_client, orig_run
+    return None
+
+
+def test_dr_call_surfaces_error_and_retries_hung_get():
+    """A: run_dr_call surfaces response.error.code + sets submitted on a terminal failure.
+    C1: a hung status GET is bounded by the per-request cap and RETRIED, not abandoned."""
+    import asyncio
+
+    import shinka.llm.agent.dr_client as drc
+
+    class _Err:
+        code = "tool_not_supported"
+        message = "web_search_preview not available"
+
+    class _Resp:
+        id = "d1"
+
+        def __init__(self, status, err=False):
+            self.status = status
+            self.usage = None
+            self.output_text = "brief"
+            if err:
+                self.error = _Err()
+
+    class _FailResponses:
+        async def create(self, **k):
+            return _Resp("failed", err=True)
+
+        async def retrieve(self, rid):
+            return _Resp("failed", err=True)
+
+    err = None
+    try:
+        asyncio.run(drc.run_dr_call(type("C", (), {"responses": _FailResponses()})(),
+                                    model="o3-deep-research", system_msg="s", user_msg="u",
+                                    poll_interval_sec=0.0))
+    except RuntimeError as e:
+        err = e
+    assert err is not None and getattr(err, "error_code", None) == "tool_not_supported"
+    assert getattr(err, "submitted", False) is True and "tool_not_supported" in str(err)
+
+    class _RetryResponses:
+        def __init__(self):
+            self.n = 0
+
+        async def create(self, **k):
+            return _Resp("in_progress")
+
+        async def retrieve(self, rid):
+            self.n += 1
+            if self.n == 1:
+                await asyncio.sleep(5.0)  # exceeds the tiny per-request cap → abandoned + retried
+            return _Resp("completed")
+
+    text, _c = asyncio.run(drc.run_dr_call(type("C", (), {"responses": _RetryResponses()})(),
+                                           model="o3-deep-research", system_msg="s", user_msg="u",
+                                           poll_interval_sec=0.0, poll_timeout_sec=30.0,
+                                           per_request_timeout_sec=0.05))
+    assert text == "brief"
+    return None
+
+
+def test_bg_call_hung_retrieve_retries_and_wall():
+    """C1: _bg_call bounds each status GET at the SHORT per-request cap and RETRIES a hung one;
+    only the long monotonic poll-wall ends the job (a hung GET can no longer ride the wall)."""
+    import asyncio
+    import time as _time
+
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import _azure
+
+    class _Resp:
+        id = "r1"
+        output_text = "done"
+        usage = None
+
+        def __init__(self, status):
+            self.status = status
+
+    class _RetryResponses:
+        def __init__(self):
+            self.n = 0
+
+        async def create(self, **k):
+            return _Resp("in_progress")
+
+        async def retrieve(self, rid):
+            self.n += 1
+            if self.n == 1:
+                await asyncio.sleep(5.0)
+            return _Resp("completed")
+
+    class _RC:
+        responses = _RetryResponses()
+
+        async def aclose(self):
+            pass
+
+    text, _c = asyncio.run(_azure._bg_call(_RC(), "m", "s", "u", None, None,
+                                           0.0, 30.0, None, None, 0.05))
+    assert text == "done"
+
+    class _HangResponses:
+        async def create(self, **k):
+            return _Resp("in_progress")
+
+        async def retrieve(self, rid):
+            await asyncio.sleep(10.0)
+            return _Resp("completed")
+
+    class _HC:
+        responses = _HangResponses()
+
+        async def aclose(self):
+            pass
+
+    t0 = _time.monotonic()
+    raised = False
+    try:
+        asyncio.run(_azure._bg_call(_HC(), "m", "s", "u", None, None, 0.0, 0.3, None, None, 0.05))
+    except TimeoutError:
+        raised = True
+    assert raised and (_time.monotonic() - t0) < 3.0  # ended near the 0.3s wall, not the 10s hang
     return None
 
 

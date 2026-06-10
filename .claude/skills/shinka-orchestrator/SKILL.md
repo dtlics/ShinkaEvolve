@@ -103,12 +103,17 @@ This is the single source of truth; the rest of this doc expands each step.
    check** (run a DR round if the stall looks algorithmic and warrants it). Both happen at
    every control-return. Then **record a work score** for what you just did — recorded
    AFTER acting (never let the score you intend to record influence what you choose to do).
-5. **THE TAPER.** Your recent work score drives the **next** cluster size: high recent
-   work → keep checking every window; as low work persists the cluster grows (e.g.
-   1 → 5 → 10 → 20 …) with no ceiling. The same cluster size is BOTH the framework-audit
-   cadence AND the DR-check cadence — one shared rhythm. If you forget to record a work
-   score the taper has no signal and conservatively wakes you every window (and the
-   harness prints a reminder).
+5. **THE TAPER (two-stage).** STAGE 1 — the **early phase**: for the first
+   `cadence.early_phase_windows` windows (default 5) control returns EVERY window regardless of
+   work score, so you inspect each one while the framework is least proven. STAGE 2 — the
+   **work-score taper**: past the early phase your recent work score drives the **next** cluster
+   size — high recent work → keep checking every window; as low work persists the cluster grows
+   (base_low, then doubling: 5 → 10 → 20 → 40 …) with no ceiling. The low-streak is counted FROM
+   THE END OF THE EARLY PHASE, so the early per-window returns don't make the first steady cluster
+   jump (without that, 5 early low returns would launch a ~80-window cluster). The same cluster
+   size is BOTH the framework-audit cadence AND the DR-check cadence — one shared rhythm. If you
+   forget to record a work score the taper has no signal and conservatively wakes you every window
+   (and the harness prints a reminder). Set `cadence.early_phase_windows:0` to disable Stage 1.
 
 ## The work score (record it after every control-return)
 
@@ -163,6 +168,16 @@ notification arrives. The heartbeat does NOT detach `run_window` (it stays a har
 job, so its exit still wakes you) — it keeps the *session* active so the tracked job is not
 reclaimed (the same effect a user's periodic ping has). `--resume` only RECOVERS a kill after
 the fact; the heartbeat PREVENTS the missed-wake.
+
+**Re-arm robustly — a single forgotten re-arm kills the run** (the observed failure mode: a run
+held alive for hours died the moment a long reasoning stretch lapsed the timer). On every
+heartbeat wake, RE-ARM THE NEXT TIMER FIRST — before the liveness check or any other work. Re-arm
+UNCONDITIONALLY: even on a wake that found nothing new, and *especially* right before a long
+reasoning/rewrite turn (arm the next timer immediately before you start thinking). Before ending
+ANY turn while a cluster is backgrounded, run the P0 self-check "is a live heartbeat pending?"
+(alongside "did I record a work score?"). Stop re-arming ONLY on `run_window`'s own clean-exit
+wake — a stagnation/taper return is followed by another launched cluster, which must be
+heartbeated again.
 
 Diagnostics shape (printed to stdout + appended to `journal/windows.jsonl`):
 
@@ -230,9 +245,12 @@ evaluator is foundation). Common flaw-signals (read off `steps.jsonl` + the wind
 - **Novelty rejecting most candidates** → near-duplicate flooding or too tight a gate →
   suspect `code_embed_sim_threshold` (large programs cluster 0.96–0.98) or weak mutation
   diversity. Read the dropped-on-novelty decision; watch `novelty_rejected_cost`.
-- **Eval timeouts (`timeout_count` rising)** → the synthesized code is too slow → confirm
-  the goal carries the abstract runtime caution and the fix prompt feeds the timeout
-  reason back.
+- **Eval timeouts (`timeout_count` rising)** → the synthesized code is too slow → `record_policy`
+  persists each candidate's `runtime_sec`/`timed_out`, and `construct_mutation_prompt` injects a
+  bounded "Runtime budget" caution into BOTH the fix and new-mutation prompts when a parent or an
+  inspiration ran slow (≥0.8× `task.eval_time`) or timed out — so the LLM keeps the algorithmic win
+  but finishes in time. It does NOT penalize a slow-but-correct candidate (still archived/scored
+  normally). Confirm it's firing (`runtime_sec` in metadata; the prompt shows the caution).
 - **Per-island briefs all reading the same** → islands aren't differentiating → suspect
   the meta producer prompt (confirm `island_directions` are genuinely distinct per island
   in the meta call log).
@@ -247,7 +265,8 @@ evaluator is foundation). Common flaw-signals (read off `steps.jsonl` + the wind
 1. **Author `task_sys_msg` — your first real job.** Read the task's `initial.<ext>` and
    `evaluate.py`, then write a precise problem statement: the goal, the gate set / hard
    constraints, the score's shape, and an abstract caution that each eval has a runtime
-   budget so the code must stay efficient (NO specific numbers). The harness REFUSES to
+   budget so the code must stay efficient (NO specific numbers — reinforced in-loop by the
+   numeric, no-spoil runtime-budget caution when a candidate runs slow). The harness REFUSES to
    start with a missing / empty / placeholder `task_sys_msg` (the starter ships the
    sentinel `__UNSET_AUTHOR_AT_BOOT__`); `task.require_sys_msg:false` overrides for a bare
    debug smoke, and `--warmup` flips it off for its throwaway run only.
@@ -260,10 +279,20 @@ evaluator is foundation). Common flaw-signals (read off `steps.jsonl` + the wind
    continuing. The mitigation is `use_text_feedback:false` — a COMPLETE suppression: it
    blanks both channels the fix prompt reads. (Rare; the cnot task's slope feedback is
    safe.)
-3. Decide whether to call deep research for SOTA at onset (see the DR section). Use any
+3. **Tune the proposer `reasoning_effort` — you OWN this knob; never carry the shipped default
+   just because it shipped or a run prompt said "keep defaults".** Thinking-heavy proposers are
+   GOOD for reliability on hard/algorithmic tasks, but a cheap model at `medium` can emit
+   10–35k reasoning tokens for a ~3k-token patch and wedge a single mutate call 50–90 min / a
+   window to 2–3 h. Choose proposer effort per model at boot from task difficulty (encode it in
+   the bandit arm as `model@effort`, e.g. `azure-gpt-5.4-mini@low` or `…@high`) and RE-TUNE it at
+   any control-return — raise for reliability on a hard task, lower when a cheap arm's verbosity
+   drags the run. (`evo.meta_reasoning_effort` is the same knob for the meta round.) Verbosity is
+   bounded two ways now: lower effort, or keep it — the bg transport's two-level timeout means a
+   genuinely-stuck call no longer rides the whole 1h wall (see "How you launch the inner loop").
+4. Decide whether to call deep research for SOTA at onset (see the DR section). Use any
    brief to pick the initial program, `num_islands` (4 default; 8 if multiple algorithmic
    families compete), and to sharpen the goal.
-4. Author `run.json` (schema below). Default strategy files as shipped. Then warmup.
+5. Author `run.json` (schema below). Default strategy files as shipped. Then warmup.
 
 ## What you may change, and what you must not (tiered mutability)
 
@@ -292,11 +321,11 @@ stay compatible.
 | **Scoring / reward** | `compute_reward.py` | `select_llm.py` (bandit), `sample_parent.py` (score→parent weight) | per-program `reward_used` vs `improvement_over_parent`; bandit counts |
 | **Exploration / parent** | `sample_parent.py` | (feeds the prompt) | flat progress with high novelty acceptance |
 | **Diversity / novelty** | `novelty_check.py` | `record_policy.py`, `diagnostics` | `novelty_acceptance_rate` (null when no events); `novelty_rejected_cost` |
-| **Prompt** | `construct_mutation_prompt.py` | `mutate.py` (sends it) | `evaluation_failure_rate`, recurring `exhausted_retry_slots` |
+| **Prompt** | `construct_mutation_prompt.py` (incl. the bounded runtime-budget caution, driven by `eval_budget_sec`/`parent_runtime_sec`/`parent_timed_out` + parent/inspiration runtime metadata) | `mutate.py` (sends it) | `evaluation_failure_rate`, recurring `exhausted_retry_slots`, `timeout_count` |
 | **Fix / repair** | the immediate-fix loop in `run_window.py` (`evo.fix_retry_budget`) + repair mode (`sample_parent` `select:"errored"`) | `construct_mutation_prompt.py` (the `sample_fix` prompt), `mutate.py`, `repair_record.py` | `fix_rate`, `fix_success_rate`, `repair_fail_count` |
 | **Stagnation trigger** | `stagnation_detector.py` | `diagnostics.py` | the progress trajectory + `low_streak` |
-| **Cadence (taper)** | `cadence_policy.py` | `run_window` (reads the work score) | how often control returns vs your work score |
-| **Memory** | `record_policy.py` | sampler / novelty / diagnostics readers | which metadata fields exist |
+| **Cadence (taper)** | `cadence_policy.py` (per-window for the first `early_phase_windows`, then the work-score taper) | `run_window` (passes `window_index` + the work score) | how often control returns vs `window_index` + your work score |
+| **Memory** | `record_policy.py` (now persists `runtime_sec`/`timed_out` for the runtime caution — read via `include_metadata`) | sampler / novelty / diagnostics / prompt readers | which metadata fields exist |
 | **Island structure** | `island_policy.py` (+ per-island briefs auto-written by meta) | the foundation DB | `island_health` per-island trajectory |
 | **New directions (meta)** | `meta_summarize.py` (automatic per-window) | the harness records its per-island briefs + global directions; you don't author them | persistently flat progress after rewrites |
 | **New directions (DR)** | `deep_research.py` (web-grounded, rare) | you TRIAGE its brief (new → ground in a new island; similar → combine; else ignore) | flat progress that meta can't lift |
@@ -366,6 +395,18 @@ your drafted query and confirm its GOAL is general SOTA for the task/sub-task, n
 verbatim, STOP and reshape it. A refused/failed DR call returns `refused:true` + a `reason`
 (logged with its query intact, no crash) — a `content_filter` refusal almost always means
 a reproduce-paper framing, so RESHAPE the query; never re-fire the same shape.
+
+**A server-side terminal `failed` is NOT a content_filter** — it means the `o3-deep-research`
+job itself failed, and the journal call's `reason`/`error_code` now carry the real cause (Azure
+`error.code`/`message` + `incomplete_details.reason`, surfaced by `run_dr_call`). If EVERY DR call
+fails terminally, the cause is almost always an Azure-side **deployment precondition**, not the
+query: `o3-deep-research` REQUIRES a tool (`web_search_preview`) that may not be provisioned/enabled
+on the DR resource, OR a quota/rate cap, OR a wrong deployment name / model-version (`2025-06-26`).
+Run `scripts/test_dr.py` to print the full error in isolation and FIX IT ON THE AZURE SIDE —
+re-firing won't help. **Cost-on-failure reality:** a submitted-then-failed DR call DID run web
+searches + compute server-side, so Azure BILLS it even though `usage` comes back empty; the
+framework now floors such a call's logged cost at `search_surcharge_usd` (≥$0.30) and folds it into
+the ledger/budget. Treat a failed DR as real spend, NOT free — do not loop-retry it.
 
 **Triage the returned brief — per technique, deliberately:**
 - **Novel** (no archived program or prior direction resembles it) → GROUND it (the
@@ -535,7 +576,7 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
 | `record_policy.py` | derived signals → metadata | **Yes** | No |
 | `stagnation_detector.py` | the low-window trigger | **Yes** | No |
 | `island_policy.py` | fork/migrate/retire decision | **Yes** | No |
-| `cadence_policy.py` | WHEN control returns (the work-score taper; not the budget) | **Yes** | No |
+| `cadence_policy.py` | WHEN control returns (early-phase per-window floor, then the work-score taper; not the budget) | **Yes** | No |
 | `island_brief.py` | record a per-island direction (auto-called by the meta round) | **Yes** | No |
 | `spawn_island.py` | seed a new island from a grounded program | No (foundation) | No |
 | `construct_mutation_prompt.py` | build the mutation/fix prompt | **Yes** | No |
@@ -543,6 +584,14 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
 | `meta_summarize.py` | the automatic per-window meta round (per-island directions) | prompt yes | **Yes (Azure)** |
 | `deep_research.py` | deep-research model (web-grounded directions) | No (paid service) | **Yes (Azure DR)** |
 | `_azure.py` | shared Azure background-poll transport | No (foundation) | — |
+
+**Background-poll resilience (transport, FOUNDATION).** Every Azure bg call (`mutate`/`meta`/DR)
+is bounded at TWO levels: a SHORT per-HTTP-request cap (`SHINKA_BG_HTTP_TIMEOUT_SEC`, 60s) wraps
+each submit/status-GET and RETRIES a hung request, and the LONG total-job wall
+(`SHINKA_BG_POLL_TIMEOUT_SEC` / `AZURE_DR_TIMEOUT_SEC`, 3600s) is a true monotonic deadline. So a
+wedged socket on one status GET can no longer ride the whole 1h wall (the prior ~1–2h hang); a
+genuinely-stuck job still bounds at the wall, then degrades cleanly (mutate → `applied:false`; DR →
+a degraded brief whose billed cost is captured). Don't rewrite the transport in a strategy rewrite.
 
 ## The run config (you author this)
 
@@ -562,13 +611,16 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
           "embedding_model": "azure-text-embedding-3-small", "enable_novelty": true,
           "code_embed_sim_threshold": 0.99, "stagnation_abs_floor": 0.001,
           "stagnation_rel_frac": 0.05, "consecutive_required": 2},
-  "cadence": {"mode": "until_decision", "base_low": 5, "low_threshold": 1},
+  "cadence": {"mode": "until_decision", "base_low": 5, "low_threshold": 1, "early_phase_windows": 5},
   "window_state": {"window_index": 0, "prior_low_streak": 0} }
 ```
 
 `llm_models` set → the bandit picks per candidate; `enable_novelty` → the embedding gate.
 An `llm_models` entry may be `"model@effort"` (e.g. `"azure-gpt-5.4-pro@high"`); the bandit
 learns each (model, effort) arm separately. Only encode valid combos (pro rejects `low`).
+**Use per-arm effort deliberately to manage the reliability-vs-wall-time tradeoff** (thinking
+helps hard tasks but a cheap arm at `medium` can wedge a call 50–90 min — Boot step 3); it is a
+knob you OWN at boot and re-tune at any control-return, not a default to leave alone.
 **Pro policy:** keep `azure-gpt-5.4-pro` OUT of the normal mutation pool by default — it's
 reserved for the meta round (when you escalate `meta_model`) and the DR grounding run; a
 future outer-loop may add `pro@high` to the pool if a task warrants it.
@@ -585,6 +637,8 @@ Many decisions that *look* like a code rewrite are already `evo.*` knobs. Prefer
 |---|---|---|---|
 | `auto_meta` | true | run the automatic per-window meta round | false to pause meta entirely (suppresses global + per-island briefs) |
 | `meta_model` / `meta_reasoning_effort` | `azure-gpt-5.5` / medium | the model for the automatic meta round | raise to `azure-gpt-5.4-pro` / high when directions are worth the high cost |
+| `reasoning_effort` (per arm via `model@effort`) | medium (shipped) | the proposer/fix reasoning budget per call — the biggest driver of per-call wall-time + verbosity | RAISE (high) for reliability on hard/algorithmic tasks; LOWER (low, where the model allows — pro rejects low) when a cheap arm emits 10–35k reasoning tokens per ~3k-token patch and wedges calls 50–90 min. You OWN this — not a default to leave alone (Boot step 3) |
+| `early_phase_windows` | 5 (cadence) | Stage-1 floor: control returns EVERY window for the first K windows regardless of work score (frequent early inspection) | lower / 0 to taper sooner; raise to inspect every window longer. 0 restores the old immediate work-score taper |
 | `repair_trigger_fraction` | 0.20 | errored-fraction at which repair mode turns on | raise if repairs churn; lower to repair sooner |
 | `repair_attempt_cap` | 2 | failed repairs before a parent is tombstoned | raise to give a hard failure more tries |
 | `repair_escalation_model` | null | stronger model on the last repair before removal | set to e.g. `azure-gpt-5.4-pro@high` for a stubborn class |

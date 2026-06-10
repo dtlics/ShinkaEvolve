@@ -27,6 +27,11 @@ _POLL_INTERVAL_SEC = 3.0
 # by max_output_tokens (see `_MAX_OUTPUT_TOKENS_BY_MODEL` below), not by wall-clock.
 # Override via SHINKA_BG_POLL_TIMEOUT_SEC.
 _POLL_TIMEOUT_SEC = float(os.environ.get("SHINKA_BG_POLL_TIMEOUT_SEC", "3600"))
+# SHORT per-HTTP-request cap, distinct from the long poll-wall above. A status GET returns in
+# <1s; 60s tolerates a slow hop. Each submit/retrieve below is wrapped in asyncio.wait_for at
+# this cap and a hung status GET is RETRIED (not abandoned), so one wedged request can no longer
+# ride the whole 1h wall (the prior bug). Shares SHINKA_BG_HTTP_TIMEOUT_SEC with shinka.llm.constants.
+_PER_REQUEST_TIMEOUT_SEC = float(os.environ.get("SHINKA_BG_HTTP_TIMEOUT_SEC", "60"))
 _TERMINAL = {"completed", "failed", "incomplete", "cancelled", "expired"}
 
 # Per-model max output token caps. Sized so a single max-output call costs < $10
@@ -95,6 +100,7 @@ def _usage_cost(response: Any, api_model_name: str) -> float:
 async def _bg_call(
     client, api_model_name, system_msg, user_msg, reasoning_effort, call_metadata,
     poll_interval, poll_timeout, max_output_tokens, tools=None,
+    per_request_timeout=_PER_REQUEST_TIMEOUT_SEC,
 ) -> Tuple[str, float]:
     create_kwargs: Dict[str, Any] = {
         "model": api_model_name,
@@ -120,22 +126,35 @@ async def _bg_call(
         create_kwargs["tools"] = tools
 
     try:
-        submitted = await client.responses.create(**create_kwargs)
+        submitted = await asyncio.wait_for(
+            client.responses.create(**create_kwargs), timeout=per_request_timeout
+        )
         rid = getattr(submitted, "id", None)
         if rid is None:
             raise RuntimeError("Azure submission returned no response id")
         status = getattr(submitted, "status", "unknown") or "unknown"
         response = submitted
-        # WALL-CLOCK timeout (not summed poll_intervals): a slow/hanging retrieve()
-        # makes elapsed-by-interval badly undercount real time, so a "720s" cap could
-        # run 20+ min wall (observed). time.monotonic() bounds the true wall duration.
-        _t0 = time.monotonic()
+        # TWO-LEVEL timeout. The long poll_timeout is the TOTAL job wall, enforced as a true
+        # monotonic DEADLINE. Each status GET is independently capped at the SHORT
+        # per_request_timeout: a normal GET returns <1s, so if one HANGS (a wedged socket) we
+        # abandon THAT GET and retry — a single hung request can no longer burn the whole wall
+        # (the prior bug: the elapsed check was only between requests, so a hung retrieve() rode
+        # ~65 min past the nominal wall before the flat httpx TIMEOUT finally broke it).
+        _deadline = time.monotonic() + poll_timeout
         while status not in _TERMINAL:
-            elapsed = time.monotonic() - _t0
-            if elapsed > poll_timeout:
-                raise TimeoutError(f"Azure response {rid} stuck at {status!r} after {elapsed:.0f}s (wall)")
-            await asyncio.sleep(poll_interval)
-            response = await client.responses.retrieve(rid)
+            remaining = _deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"Azure response {rid} stuck at {status!r} after {poll_timeout:.0f}s (wall)")
+            await asyncio.sleep(min(poll_interval, remaining))
+            _req_to = min(per_request_timeout, max(0.001, _deadline - time.monotonic()))
+            try:
+                response = await asyncio.wait_for(client.responses.retrieve(rid), timeout=_req_to)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Azure retrieve(%s) exceeded the %.0fs per-request cap — retrying (job still polling)",
+                    rid, per_request_timeout,
+                )
+                continue
             status = getattr(response, "status", "unknown") or "unknown"
         if status == "incomplete":
             # A max-output-tokens cap-hit is USABLE (partial text) and BILLED. Return it
@@ -178,6 +197,7 @@ def bg_query(
     max_output_tokens: Optional[int] = None,
     enable_web_search: bool = False,
     tools: Optional[list] = None,
+    per_request_timeout: float = _PER_REQUEST_TIMEOUT_SEC,
 ) -> Tuple[str, float]:
     """One Azure background-mode call. Returns (text, cost). Azure/OpenAI only.
 
@@ -204,6 +224,6 @@ def bg_query(
         _bg_call(
             client, api_model_name, system_msg, user_msg,
             reasoning_effort, call_metadata, poll_interval, poll_timeout,
-            max_output_tokens, tools,
+            max_output_tokens, tools, per_request_timeout,
         )
     )

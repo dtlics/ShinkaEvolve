@@ -13,7 +13,8 @@ hats** for the evolutionary system in [`orchestrator/`](orchestrator/): the **OR
 (the operational, in-the-flow jobs the run can't proceed without — author the goal, write
 DR queries, triage briefs, spawn/ground islands) and the **OUTER-LOOP / FRAMEWORK-AUDIT**
 role (judge whether the deterministic framework code itself is flawed and rewrite the
-mutable strategy code; this runs on a tapering cadence — frequent early, sparse once the
+mutable strategy code; this runs on a tapering cadence — per-window for the first
+`cadence.early_phase_windows` windows (frequent early, the framework least proven), sparse once the
 framework proves robust). Read [`.claude/skills/shinka-orchestrator/SKILL.md`](.claude/skills/shinka-orchestrator/SKILL.md) — your
 operating playbook — before acting. In short:
 
@@ -104,7 +105,7 @@ Both endpoints' base_url is built by appending `/openai/v1` to the bare resource
 
 ### DR resource deployment
 
-- `o3-deep-research` deployment, underlying model version `2025-06-26`. Used by `orchestrator/scripts/deep_research.py` (Stage-C DR prompt) via the dedicated `dr_client`. Override the deployment name in that script if you rename it.
+- `o3-deep-research` deployment, underlying model version `2025-06-26`. Used by `orchestrator/scripts/deep_research.py` (Stage-C DR prompt) via the dedicated `dr_client`. Override the deployment name in that script if you rename it. **It REQUIRES the `web_search_preview` tool**; if every DR call comes back terminal `failed`, that tool is most likely not provisioned/enabled on this resource (or it's a quota/rate cap, or a wrong deployment name / model-version). Run `python scripts/test_dr.py` to print the exact `error.code`/`message` in isolation. A submitted-then-failed DR call is BILLED by Azure even though `usage` is empty — the framework floors its logged cost at `search_surcharge_usd` (≥$0.30) so the ledger reflects the spend.
 
 ### Reasoning-effort gotcha
 
@@ -116,6 +117,7 @@ Setting `reasoning_effort: low` errors out for `azure-gpt-5.4-pro` (it rejects `
 conda activate shinka
 cd "$(git rev-parse --show-toplevel)"
 python scripts/test_azure.py     # hits each main-resource deployment
+python scripts/test_dr.py        # hits the DR resource (o3-deep-research); prints the full error on failure
 ```
 
 ## Running a task (you are the orchestrator)

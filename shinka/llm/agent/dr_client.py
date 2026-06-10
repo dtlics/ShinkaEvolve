@@ -35,12 +35,14 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any, Tuple
 
 import openai
 
 from shinka.env import load_shinka_dotenv
 
+from ..constants import PER_REQUEST_TIMEOUT
 from .background_model import (
     BackgroundOpenAIResponsesModel,
     DEFAULT_POLL_INTERVAL_SEC,
@@ -165,6 +167,18 @@ def _usage_cost(response: Any, model: str) -> float:
         return 0.0
 
 
+def _err_detail(response: Any) -> Tuple[Any, Any, Any]:
+    """Pull the structured failure reason off a Responses object: (error.code,
+    error.message, incomplete_details.reason). All optional. A failed DR job's REAL cause
+    (e.g. web_search_preview not provisioned on the resource, quota/rate, model-version)
+    lives here, not in the bare status — surfaced so the orchestrator/journal can see it."""
+    err = getattr(response, "error", None)
+    code = getattr(err, "code", None)
+    msg = getattr(err, "message", None)
+    inc = getattr(getattr(response, "incomplete_details", None), "reason", None)
+    return code, msg, inc
+
+
 async def run_dr_call(
     client: Any,
     *,
@@ -177,6 +191,7 @@ async def run_dr_call(
     tools: list | None = None,
     poll_interval_sec: float = DR_POLL_INTERVAL_SEC,
     poll_timeout_sec: float = DR_TIMEOUT,
+    per_request_timeout_sec: float = PER_REQUEST_TIMEOUT,
     call_metadata: dict | None = None,
     max_output_tokens: int | None = 200_000,
 ) -> tuple[str, float]:
@@ -220,34 +235,65 @@ async def run_dr_call(
             str(k): str(v) for k, v in call_metadata.items()
         }
 
-    submitted = await client.responses.create(**create_kwargs)
+    submitted = await asyncio.wait_for(
+        client.responses.create(**create_kwargs), timeout=per_request_timeout_sec
+    )
     response_id = getattr(submitted, "id", None)
     if response_id is None:
         raise RuntimeError("DR submission did not return a response id")
 
-    elapsed = 0.0
     last_status: str = getattr(submitted, "status", "unknown") or "unknown"
     response: Any = submitted
     terminal = {"completed", "failed", "incomplete", "cancelled", "expired"}
+    # TWO-LEVEL timeout (matches the main bg transport). poll_timeout_sec is the TOTAL job
+    # wall, enforced as a true monotonic DEADLINE; each status GET is capped at the SHORT
+    # per_request_timeout_sec and a hung GET is RETRIED, not abandoned. (The old loop used a
+    # summed-interval `elapsed += poll_interval_sec` clock, so a slow/hung retrieve() drifted
+    # the wall arbitrarily late.)
+    _deadline = time.monotonic() + poll_timeout_sec
     while last_status not in terminal:
-        if elapsed > poll_timeout_sec:
+        remaining = _deadline - time.monotonic()
+        if remaining <= 0:
+            _code, _msg, _inc = _err_detail(response)
             _err = TimeoutError(
-                f"DR response {response_id} did not finish: "
-                f"last status={last_status!r} after {elapsed:.1f}s"
+                f"DR response {response_id} did not finish: last status={last_status!r} "
+                f"after {poll_timeout_sec:.1f}s (wall)"
+                + (f" error.code={_code!r}" if _code else "")
             )
             _err.cost = _usage_cost(response, model)  # P7-T6: bill what was spent
+            _err.submitted = True
+            _err.error_code = _code
+            _err.error_message = _msg
             raise _err
-        await asyncio.sleep(poll_interval_sec)
-        elapsed += poll_interval_sec
-        response = await client.responses.retrieve(response_id)
+        await asyncio.sleep(min(poll_interval_sec, remaining))
+        _req_to = min(per_request_timeout_sec, max(0.001, _deadline - time.monotonic()))
+        try:
+            response = await asyncio.wait_for(
+                client.responses.retrieve(response_id), timeout=_req_to
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "DR retrieve(%s) exceeded the %.0fs per-request cap — retrying (job still polling)",
+                response_id, per_request_timeout_sec,
+            )
+            continue
         last_status = getattr(response, "status", "unknown") or "unknown"
 
     if last_status not in ("completed", "incomplete"):
-        # failed / cancelled / expired → genuinely no usable output.
+        # failed / cancelled / expired → genuinely no usable output. Surface the REAL reason
+        # (error.code/message, incomplete_details.reason) and flag it as submitted so the
+        # caller floors the spend — the bare status alone hides WHY the DR job failed.
+        _code, _msg, _inc = _err_detail(response)
         _err = RuntimeError(
             f"DR response {response_id} terminal status={last_status!r}"
+            + (f" error.code={_code!r}" if _code else "")
+            + (f" error.message={_msg!r}" if _msg else "")
+            + (f" incomplete_details.reason={_inc!r}" if _inc else "")
         )
         _err.cost = _usage_cost(response, model)  # P7-T6: bill what was spent before failing
+        _err.submitted = True
+        _err.error_code = _code
+        _err.error_message = _msg
         raise _err
     if last_status == "incomplete":
         # The model hit a cap (max_output_tokens / max_tool_calls / reasoning

@@ -163,17 +163,28 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         reason = ("content_filter" if ("content_filter" in _txt or "content filter" in _txt)
                   else f"dr_failed:{exc}")
         _billed = float(getattr(exc, "cost", 0.0) or 0.0)
-        if _billed > 0:
+        _submitted = bool(getattr(exc, "submitted", False))
+        if _submitted:
+            # The job was SUBMITTED and ran (web searches + reasoning compute) before the
+            # terminal failure/timeout. usage is typically None on failure, so token cost is
+            # 0 — floor the spend at the search surcharge so the ledger reflects that Azure
+            # billed us, then add any reported token cost on top. (A content_filter REFUSAL at
+            # submit time is NOT `submitted` → it correctly stays free.) This is the fix for
+            # "the framework doesn't know it's being billed" on a failed DR call.
+            _billed = max(_billed, 0.0) + search_surcharge
+        elif _billed > 0:
             _billed += search_surcharge
         _common.log_external_call(
             payload.get("results_dir"), "dr",
             {"query": query, "program_context": program_context, "model": model,
              "reasoning_effort": payload.get("reasoning_effort", "medium")},
-            {"refused": True, "reason": reason, "error": str(exc)},
+            {"refused": True, "reason": reason, "error": str(exc),
+             "error_code": getattr(exc, "error_code", None)},
             cost=_billed, summary=f"DR refused/failed: {reason}",
         )
         return {"brief": [], "raw_text": "", "cost": _billed, "model": model,
-                "refused": True, "degraded": True, "reason": reason}
+                "refused": True, "degraded": True, "reason": reason,
+                "error_code": getattr(exc, "error_code", None)}
     cost = float(token_cost) + search_surcharge
     brief = _parse_brief(text)
     # WS7: persist the FULL DR call (query + program_context + raw output) to the

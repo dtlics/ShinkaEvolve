@@ -1,14 +1,20 @@
 name: CI
 
+# Azure-only orchestrator fork: the CI gate is the OFFLINE orchestrator suite
+# (pyproject testpaths = orchestrator/tests — parity / improvements / smoke; no
+# Azure credentials needed). The upstream workflow linted a tests/ directory that
+# was removed in the prune and uv-synced a lockfile-less project, so it failed on
+# every push regardless of the change.
+
 on:
   push:
   pull_request:
 
 jobs:
-  checks:
-    name: Ruff, Mypy, Pytest
+  tests:
+    name: Pytest (offline orchestrator suite)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -18,24 +24,12 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v5
+          cache: pip
 
       - name: Install project
-        run: uv sync --dev
+        run: |
+          pip install -e .
+          pip install pytest pytest-cov
 
-      - name: Ruff
-        run: uv run ruff check tests --exclude tests/file.py
-
-      - name: Mypy
-        run: uv run mypy --follow-imports=skip --ignore-missing-imports tests/test_*.py tests/conftest.py
-
-      - name: Pytest + Coverage
-        run: uv run --with pytest-cov pytest -q -m "not requires_secrets" --cov=shinka --cov-report=term-missing --cov-report=xml:coverage.xml
-
-      - name: Upload Coverage XML
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-xml
-          path: coverage.xml
+      - name: Pytest
+        run: pytest -q -m "not requires_secrets"

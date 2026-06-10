@@ -36,7 +36,10 @@ def main() -> int:
                 user_msg="In one sentence, what is a CNOT gate? Cite one source.",
                 reasoning_effort="medium",
                 max_tool_calls=3,
-                max_output_tokens=4000,
+                # Deep-research spends heavily on reasoning + web-search before the final text;
+                # a too-small cap returns status='incomplete' (max_output_tokens) with empty text.
+                # 30k is enough for a trivial-query brief to actually come back (~$1 worst case).
+                max_output_tokens=30000,
                 call_metadata={"purpose": "dr_smoke", "source": "scripts/test_dr.py"},
             )
         )

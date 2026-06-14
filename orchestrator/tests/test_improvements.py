@@ -351,10 +351,12 @@ def test_diagnostics_sensor_fields():
     try:
         diag.island_policy.island_health = lambda *a, **k: []
 
-        def _summary(total, correct, tomb=0):
-            return lambda p: {"result": {"total": total, "correct": correct,
-                                         "best_score": 1.0, "islands": [],
-                                         "tombstoned_count": tomb}}
+        def _summary(total, correct, tomb=0, err_tomb=None):
+            res = {"total": total, "correct": correct, "best_score": 1.0,
+                   "islands": [], "tombstoned_count": tomb}
+            if err_tomb is not None:
+                res["errored_tombstoned_count"] = err_tomb
+            return lambda p: {"result": res}
 
         base = {"db_path": "x", "db_config": {}, "embedding_model": "m",
                 "window_index": 0, "iters_completed": 5, "best_score_start": 1.0,
@@ -367,6 +369,13 @@ def test_diagnostics_sensor_fields():
 
         diag.archive_query.main = _summary(5, 3, tomb=2)  # tombstoned excluded → releases
         assert diag.main(dict(base))["errored_fraction"] == 0.0
+
+        # H3: a CORRECT keep-the-better evictee (errored_tombstoned_count=0 of 1 tombstone)
+        # must NOT be subtracted from the errored numerator. 10 progs / 6 correct (one the
+        # evictee) / 4 errored → 4/9, NOT the double-subtracted 3/9 the old formula gave.
+        diag.archive_query.main = _summary(10, 6, tomb=1, err_tomb=0)
+        assert abs(diag.main(dict(base))["errored_fraction"] - (4 / 9)) < 1e-9, \
+            diag.main(dict(base))["errored_fraction"]
 
         diag.archive_query.main = _summary(0, 0)
         assert diag.main(dict(base))["errored_fraction"] == 0.0

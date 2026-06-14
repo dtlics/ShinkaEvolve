@@ -22,12 +22,15 @@ INPUT (stdin JSON): db_path/db_config/embedding_model + the per-window fields th
 OUTPUT (stdout JSON, "ok": true): window_index, iters_completed, best_score_start,
   best_score_end, delta, J_score (INFORMATIONAL only — rollback uses rollback_decision),
   threshold, strategy_fingerprint, novelty_acceptance_rate (NULL when no novelty events),
-  novelty_rejected_cost, evaluation_failure_rate (post-repair), fix_rate,
-  fix_success_rate, needs_fix_rate, llm_bandit_weights, llm_bandit_counts,
+  novelty_rejected_cost, evaluation_failure_rate (post-repair), eval_total (H4: 0 ⇒ nothing
+  evaluated), fix_rate, fix_success_rate, needs_fix_rate, llm_bandit_weights,
+  llm_bandit_counts (run-cumulative), llm_bandit_window_counts (THIS window — H5, rollback arm 4a),
   island_health [{id, best, diversity, stagnation_count, count}], stagnation_flag,
   low_streak, exhausted_retry_slots, exhausted_retry_count, apply_exhausted_count,
-  apply_failure_rate, timeout_count, wrong_answer_count, errored_fraction (cumulative,
-  over all NON-tombstoned programs — distinct from the per-window evaluation_failure_rate),
+  apply_failure_rate, timeout_count, wrong_answer_count, errored_fraction (cumulative, over
+  LIVE non-tombstoned programs, subtracting only repair-removed INCORRECT tombstones from the
+  numerator — a CORRECT keep-the-better evictee is NOT double-counted — H3; distinct from the
+  per-window evaluation_failure_rate),
   model_collapse {top_arm, top_share, n_arms_active, collapsed} (counts-share, SURFACED
   for the framework-audit check, never auto-corrected in steady-state), repair_mode_on,
   repair_fail_count, repair_tombstoned_count, trigger_metric,
@@ -152,9 +155,15 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     total_progs = int(summary.get("total", 0) or 0)
     correct_progs = int(summary.get("correct", 0) or 0)
     tombstoned = int(summary.get("tombstoned_count", 0) or 0)
+    # H3: subtract from the errored numerator ONLY the INCORRECT (repair-removed) tombstones.
+    # A CORRECT keep-the-better evictee is already excluded by (total-correct), so subtracting
+    # the FULL tombstoned count double-subtracts it and pins errored_fraction LOW (the repair
+    # latch then under-fires on a near-dup-heavy run). Fall back to tombstoned_count when the
+    # key is absent (old summary / mock) to preserve the prior all-repair behavior.
+    err_tomb = int(summary.get("errored_tombstoned_count", tombstoned) or 0)
     live_total = max(0, total_progs - tombstoned)
     errored_fraction = (
-        max(0, (total_progs - correct_progs) - tombstoned) / live_total
+        max(0, (total_progs - correct_progs) - err_tomb) / live_total
     ) if live_total else 0.0
 
     # Failure-type echoes (counters CREATED by run_window: apply_exhausted [P1-T1],

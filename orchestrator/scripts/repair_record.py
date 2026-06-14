@@ -19,7 +19,8 @@ INPUT (stdin JSON):
     "program_id": str,
     "action": "append_fail" | "tombstone",
     "traceback_chunk": str | null,   # the failed repair's error (action=append_fail)
-    "attempt_cap": int               # default 2; also tombstone once attempts >= cap
+    "attempt_cap": int,              # default 2; also tombstone once attempts >= cap
+    "reason": "repair" | "novelty_evict"  # H3: WHY (action=tombstone); default "repair"
   }
 
 OUTPUT (stdout JSON):
@@ -47,13 +48,17 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     program_id = str(payload["program_id"])
     action = str(payload.get("action", "append_fail"))
     attempt_cap = int(payload.get("attempt_cap", 2) or 2)
+    # H3: WHY this row is tombstoned. The keep-the-better caller (run_window novelty
+    # resolve) passes reason="novelty_evict" (a CORRECT incumbent); the repair path uses
+    # the default "repair" (an INCORRECT program). errored_fraction counts only "repair".
+    reason = str(payload.get("reason", "repair"))
 
     db = ProgramDatabase(config, embedding_model=embedding_model, read_only=False)
     try:
         repair_attempts = 0
         tombstoned = False
         if action == "tombstone":
-            tombstoned = bool(db.tombstone_program(program_id))
+            tombstoned = bool(db.tombstone_program(program_id, reason=reason))
             _p = db.get(program_id)
             repair_attempts = int(((_p.metadata if _p else None) or {}).get("repair_attempts", 0) or 0)
         else:  # "append_fail": record the failure, and tombstone once the cap is hit
@@ -62,8 +67,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             )
             if repair_attempts >= attempt_cap:
                 # The strike-N error is already on the record; now remove it from the
-                # sampling pool (append-then-tombstone in one call).
-                tombstoned = bool(db.tombstone_program(program_id))
+                # sampling pool (append-then-tombstone in one call) — a repair removal.
+                tombstoned = bool(db.tombstone_program(program_id, reason="repair"))
     finally:
         db.close()
     return {"program_id": program_id, "repair_attempts": repair_attempts,

@@ -864,12 +864,17 @@ class ProgramDatabase:
         return int(md["repair_attempts"])
 
     @db_retry()
-    def tombstone_program(self, program_id: str) -> bool:
-        """Repair-mode (P5): non-destructively remove a program from the SAMPLING pool
-        after it failed its repair attempts. Sets metadata.repair_tombstoned=True and
-        de-archives it (DELETE FROM archive) but PRESERVES the row + island_idx +
-        lineage — UNLIKE island eviction, which nulls island_idx. Returns True if the
-        program existed. Caller: orchestrator/scripts/repair_record.py."""
+    def tombstone_program(self, program_id: str, reason: str = "repair") -> bool:
+        """Non-destructively remove a program from the SAMPLING pool. Sets
+        metadata.repair_tombstoned=True and de-archives it (DELETE FROM archive) but
+        PRESERVES the row + island_idx + lineage — UNLIKE island eviction, which nulls
+        island_idx. Returns True if the program existed.
+
+        ``reason`` (H3) records WHY, in metadata.tombstone_reason, so the two tombstone
+        classes are distinguishable: "repair" = an INCORRECT program that failed its
+        repair attempts (caller: repair_record append_fail path), vs "novelty_evict" =
+        the worse-but-CORRECT incumbent evicted by keep-the-better (caller: run_window
+        novelty resolve). errored_fraction must count only the "repair" (incorrect) ones."""
         if self.read_only:
             raise PermissionError("tombstone_program requires a writable database")
         if not self.cursor or not self.conn:
@@ -879,6 +884,7 @@ class ProgramDatabase:
             return False
         md = dict(prog.metadata or {})
         md["repair_tombstoned"] = True
+        md["tombstone_reason"] = reason
         self.cursor.execute("DELETE FROM archive WHERE program_id = ?", (program_id,))
         self.cursor.execute(
             "UPDATE programs SET metadata = ? WHERE id = ?",

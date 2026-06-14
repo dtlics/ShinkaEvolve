@@ -143,12 +143,25 @@ def _dispatch(db, query_type: str, payload: Dict[str, Any]):
             1 for p in programs
             if ((getattr(p, "metadata", None) or {}).get("repair_tombstoned") is True)
         )
+        # H3: of the tombstoned rows, count ONLY the repair-removed INCORRECT ones for the
+        # errored_fraction numerator. A keep-the-better evictee is a CORRECT program, so
+        # `not correct` excludes it robustly (old + new DBs); tombstone_reason makes the
+        # distinction explicit where present (never count a "novelty_evict").
+        errored_tombstoned = sum(
+            1 for p in programs
+            if ((getattr(p, "metadata", None) or {}).get("repair_tombstoned") is True)
+            and not getattr(p, "correct", False)
+            and ((getattr(p, "metadata", None) or {}).get("tombstone_reason") != "novelty_evict")
+        )
         return {
             "total": len(programs),
             "correct": len(correct),
             # P5: repair-tombstoned programs, EXCLUDED from the errored_fraction trigger
             # (diagnostics) so repair mode releases once dead programs are removed.
             "tombstoned_count": tombstoned,
+            # H3: only the INCORRECT (repair-removed) tombstones — a CORRECT keep-the-better
+            # evictee is NOT subtracted from the errored numerator (it was never errored).
+            "errored_tombstoned_count": errored_tombstoned,
             "best_score": best,
             "islands": sorted(per_island.values(), key=lambda b: b["island_idx"]),
         }

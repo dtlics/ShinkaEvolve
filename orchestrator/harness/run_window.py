@@ -916,7 +916,10 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                     repair_record_script.main({
                         "db_path": db_path, "db_config": db_config,
                         "embedding_model": embedding_model,
-                        "program_id": _inc_id, "action": "tombstone",
+                        # H3: this incumbent is a CORRECT program evicted as the worse of a
+                        # near-dup pair — NOT a repair removal. reason keeps errored_fraction
+                        # from counting it as an errored program.
+                        "program_id": _inc_id, "action": "tombstone", "reason": "novelty_evict",
                     })
                 except Exception:
                     pass

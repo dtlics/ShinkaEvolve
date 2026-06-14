@@ -36,7 +36,7 @@ The run owner ruled on the four gating forks:
 | **S1** | Are `cadence_policy.py` + `termination_streak` **FOUNDATION** or **MUTABLE-with-railguard**? | **RULED → FOUNDATION.** Reclassify immutable; `early_phase_windows`/`base_low`/`termination_streak` boot-only. Drops L47's code change; L52/L58 become regression+doc. | L47, L52, L58, M44, S1 doc moves |
 | **H12** | Does a deliberate **config-knob flip** count as an "intervention" toward the auto-termination streak? | **RULED → Inclusive** — a knob flip counts (matches `journal.termination_streak`'s `work_audit>0 or work_dr>0` derivation). Unify all 4 doc sites + the journal docstring. | L58, L59, run lifetime |
 | **H8** | Default `brief_compose_mode`: `augment` or `replace`? | **RULED → keep `replace`.** H8 becomes **doc-only** (document that `replace` discards `meta_directions` per-gen once briefs exist; the DR recipe already wants `replace`). Reshapes M1. | H8 doc-only, M1 scope |
-| **S2 + L6** | Is warmup throwaway, or are warmup gens kept? | **RULED → HYBRID.** Failed attempts throwaway (M30/M35 auto-reset); the **orchestrator-approved final warmup is KEPT** — folded into the real archive + its spend counted (`[FND]` fold-back). | M30, M31, L6, L11, M36 |
+| **S2 + L6** | Is warmup throwaway, or are warmup gens kept? | **RULED → HYBRID. ✅ DONE (Wave 5d/5e).** Failed attempts throwaway (M30/M35 auto-reset + L80 honest cleanup); the **orchestrator-approved final warmup is KEPT** via `--accept-warmup` (`accept_warmup`) — copies the warmup archive into the real `programs.sqlite` (run continues from the warmed population) + folds its spend into the real ledger as a durable `warmup_accepted` intervention; refuses to clobber a started run or accept an all-tombstoned warmup. | M30, M31, L6, L11, M36 |
 | **M36** | `strategy_history/`: **relocate per-run** under `results_dir` (gitignored, self-contained archives — matches CLAUDE.md's current wording) or **stay repo-level + git-tracked** (fix docs + `.gitignore` + the archive source)? | **Either is fine; recommend the minimal code fix first** (archive reads from `strategy_store.index_path()`), then pick relocation as a follow-up. Decide before finalizing the README (L61). | L61, archive completeness |
 | **M45** | Strengthen the rollback verdict with a **larger `measure_window_size`** (≈2× cost) or **doc-only + arm-3 mean-reversion gate** (zero cost)? | **Arm-3 gate + doc** now (zero cost); add `measure_window_size` only if a cheap measure run shows arms 1–3 are too noisy. | M45 code scope |
 | **M42** | Ship a small default `migration_rate` (≈0.05) so islands get baseline gene flow, or keep migration off-by-default? | **Keep off; document** that default islands have no genetic interaction. (If enabled later: needs M18+L39+L30+L37 first.) | default config |
@@ -252,7 +252,18 @@ The run owner ruled on the four gating forks:
 > `cleanup_warmup` returns the REAL removal result + warns on a Windows lock; **M38** warmup
 > "STOP and CORRECT" doc disambiguated (mutable-only, pre-run, no measure/revert ceremony).
 > Test added: l80_cleanup_warmup_honest; SKILL.md warmup section + run-loop step 1 updated.
-> **S2 remaining:** the keep-approved fold-back ([FND], the riskiest piece) — see its design note below.
+>
+> **STATUS 2026-06-14 — Wave 5e (S2 keep-approved fold-back, [FND]) LANDED + GREEN (89 passed).**
+> New `--accept-warmup` / `accept_warmup(cfg)` in run_window.py: copies the approved warmup
+> archive into the real `programs.sqlite` (so `_bootstrap_initial` sees a populated, live archive
+> and the real run CONTINUES from it instead of re-seeding) and folds the warmup spend into the
+> real ledger as a DURABLE `warmup_accepted` intervention (recoverable by a corrupt-run.json
+> recompute). Pre-creates run.json via a factored `_run_meta(cfg)` (shared with main()) so the
+> add_cost path is the plain one — NOT the reconstruct path that would double-count — and main()'s
+> idempotent init_run no-ops cleanly with no config_digest drift. Refuses to clobber a started run
+> or accept an all-tombstoned warmup. Test added: s2_accept_warmup_folds_approved (incl. the
+> durability + clobber-refusal cases); SKILL.md warmup section documents the keep-vs-discard call.
+> **S2 is now COMPLETE** (both halves of the HYBRID ruling).
 
 1. **Islands:** M15 (spawn fires ≤once per stagnation episode), M18 (a spawned idx≥`num_islands` participates in migration), M28 (`diversity_kind` discriminator present), M10 (cross-island child's island == parent's), M16 retire executor protects island 0 + global-best.
 2. **Bandit:** M23/M26 (neg-parent floored arm ≠ failed arm; one repair success doesn't flip the posterior), M24 (escalated repair credits no arm; spend still in the ledger), M25 (atomic pkl + reset signal on a corrupt load).

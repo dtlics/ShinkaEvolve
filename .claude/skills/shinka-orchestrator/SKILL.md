@@ -77,7 +77,8 @@ This is the single source of truth; the rest of this doc expands each step.
    plain edit-and-rerun is fine here — no snapshot/measure/revert ceremony, that discipline is
    only for *mid-run* rewrites; FOUNDATION stays off-limits, never the evaluator), then RESTART
    warmup (it auto-resets the workspace) until the window is meaningful and the trace confirms
-   it. Then CLEAN UP the warmup workspace.
+   it. Then make the S2 keep-or-discard call: `--accept-warmup` to KEEP the approved population
+   (fold it + its spend into the real run) or `--cleanup-warmup` to DISCARD and boot fresh.
    Warmup's narrow job: confirm the inner loop is mechanically sound (sampler → prompt →
    eval → novelty → record all wired correctly) on a FRESH archive. It cannot reproduce a
    flaw that only emerges with a populated archive — those surface on the real run's
@@ -228,7 +229,8 @@ python orchestrator/harness/run_window.py --config <run>/run.json --warmup
 # then prints the workspace path. Read <results_dir>/warmup/journal/steps.jsonl, then either
 # fix a policy and rerun --warmup, or, when satisfied, clean up and start the real run.
 python orchestrator/harness/run_window.py --config <run>/run.json --warmup --iters 5   # widen
-python orchestrator/harness/run_window.py --config <run>/run.json --cleanup-warmup
+python orchestrator/harness/run_window.py --config <run>/run.json --accept-warmup    # KEEP it
+python orchestrator/harness/run_window.py --config <run>/run.json --cleanup-warmup   # DISCARD it
 ```
 
 Each `--warmup` **auto-resets the throwaway workspace** at start (M30/M35): it wipes any
@@ -236,12 +238,25 @@ prior `<results_dir>/warmup/` before running, so a rerun after a fix always vali
 a FRESH archive — never against the previous broken attempt's population / bandit /
 errored-fraction (a stale workspace could silently flip the rerun into repair mode and mask
 the very fix you are checking). You therefore do NOT need `--cleanup-warmup` between attempts;
-keep it for the final teardown before the real run. Warmup runs a small **configured** number
-of iterations (default 3, set `warmup.iters` in `run.json` or pass `--iters`), NOT one — a
-single iteration can't surface the sampler-spread / bandit-collapse / brief-differentiation
-signals warmup exists to observe. `--cleanup-warmup` reports the REAL removal result (L80):
-if a Windows lock (an open sqlite handle) blocks the delete it warns and returns failure
-rather than falsely claiming success — close inspectors before tearing down.
+it is one of the two **terminal** choices once the trace looks meaningful. Warmup runs a small
+**configured** number of iterations (default 3, set `warmup.iters` in `run.json` or pass
+`--iters`), NOT one — a single iteration can't surface the sampler-spread / bandit-collapse /
+brief-differentiation signals warmup exists to observe.
+
+**Keep vs discard — the S2 decision you make when the trace is clean.** Failed/abandoned
+warmup attempts are throwaway (the next `--warmup` auto-resets them). For the FINAL attempt you
+judge mechanically sound, you pick ONE of:
+- `--accept-warmup` — **KEEP** it: folds the warmup archive into the real `programs.sqlite` (the
+  real run then CONTINUES from that warmed, reviewed population instead of re-seeding from
+  scratch) and folds its spend into the real ledger as a durable `warmup_accepted` intervention
+  (so the budget cap counts the tokens already burned). It then cleans up the warmup workspace.
+  Run it **BEFORE** the first real window — it refuses if the real archive already exists (it
+  will not clobber a started run) and refuses an all-tombstoned warmup (nothing worth keeping).
+- `--cleanup-warmup` — **DISCARD** it: deletes the workspace and the real run boots from a fresh
+  seed. Use this when the warmed population isn't worth carrying (e.g. you only wanted to confirm
+  the mechanism). It reports the REAL removal result (L80): a Windows lock (an open sqlite
+  handle) makes it warn + return failure rather than falsely claim success — close inspectors
+  first.
 
 Read the per-step trace after each warmup window and stop-correct-restart on a bad step.
 Never fix the evaluator — if warmup fails because of the evaluator, STOP and report (the

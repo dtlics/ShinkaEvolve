@@ -2647,6 +2647,55 @@ def test_l80_cleanup_warmup_honest():
     return None
 
 
+def test_s2_accept_warmup_folds_approved():
+    # S2 keep-approved fold-back: accept_warmup copies the approved warmup archive into the real
+    # db, folds its spend DURABLY into the real ledger, cleans up the warmup, and refuses to
+    # clobber a started real run.
+    import tempfile
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+    import journal
+    with tempfile.TemporaryDirectory() as td:
+        rd = os.path.join(td, "run")
+        warm = os.path.join(rd, "warmup")
+        os.makedirs(warm)
+        wdb = os.path.join(warm, "programs.sqlite")
+        open(wdb, "wb").write(b"FAKE_SQLITE")  # copied verbatim; content irrelevant here
+        journal.init_run(warm, {"run_id": "w"})
+        journal.add_cost(warm, 0.25)  # warmup spend to fold
+        cfg = {
+            "results_dir": rd,
+            "db_path": os.path.join(rd, "programs.sqlite"),
+            "db_config": {"num_islands": 2},
+            "evo": {},
+            "task": {},
+            "budget_usd": 10.0,
+            "run_id": "r",
+        }
+        # Stub the live-count so the test needs no real sqlite schema.
+        orig = run_window.archive_query.main
+        run_window.archive_query.main = lambda payload: {"result": {"live": 3, "total": 3}}
+        try:
+            res = run_window.accept_warmup(cfg)
+            assert res["accepted"] is True, res
+            assert res["live_programs"] == 3 and abs(res["folded_cost_usd"] - 0.25) < 1e-9
+            assert os.path.exists(cfg["db_path"]), "warmup archive not copied to real db"
+            assert not os.path.isdir(warm), "warmup workspace not cleaned after accept"
+            # spend folded into the real ledger...
+            assert abs(journal.total_cost(rd) - 0.25) < 1e-9
+            # ...and DURABLY (recoverable from interventions.jsonl if run.json is lost)
+            os.remove(os.path.join(rd, "journal", "run.json"))
+            assert abs(journal.total_cost(rd) - 0.25) < 1e-9, "fold not durable in the stream"
+            # refuse to clobber a started real run (real db now exists)
+            os.makedirs(warm)
+            open(wdb, "wb").write(b"X")
+            res2 = run_window.accept_warmup(cfg)
+            assert res2["accepted"] is False and "clobber" in res2["reason"], res2
+        finally:
+            run_window.archive_query.main = orig
+    return None
+
+
 def test_s1_cadence_policy_is_foundation():
     # S1: cadence_policy.py is FOUNDATION (the wake-decay schedule + run termination are not
     # orchestrator-rewritable) — removed from MUTABLE_TARGETS, so snapshot()/deploy() refuse it.
@@ -2968,6 +3017,7 @@ if __name__ == "__main__":
         ("m1_recent_meta_output_rehydrates", test_m1_recent_meta_output_rehydrates),
         ("s1_cadence_policy_is_foundation", test_s1_cadence_policy_is_foundation),
         ("l80_cleanup_warmup_honest", test_l80_cleanup_warmup_honest),
+        ("s2_accept_warmup_folds_approved", test_s2_accept_warmup_folds_approved),
         ("m21_index_failclosed_and_n14_record_outcome", test_m21_index_failclosed_and_n14_record_outcome),
         ("m48_eval_foundation_smoke", test_m48_eval_foundation_smoke),
         ("dr_parse_and_env_robustness", test_dr_parse_and_env_robustness),

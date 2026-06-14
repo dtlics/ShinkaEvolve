@@ -1099,25 +1099,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     os.makedirs(cfg["results_dir"], exist_ok=True)
     _boot_embed_cost = _bootstrap_initial(cfg)
 
-    journal.init_run(
-        cfg["results_dir"],
-        {
-            "run_id": cfg.get("run_id"),
-            "goal": cfg.get("task", {}).get("task_sys_msg"),
-            "task": cfg.get("task", {}).get("eval_program_path"),
-            "budget_usd": cfg.get("budget_usd"),
-            "config_digest": {
-                "num_islands": db_config.get("num_islands"),
-                "window_size": window_size,
-                "llm_models": evo.get("llm_models"),
-                # M27: record the REAL stagnation knobs actually in force (not just the
-                # deprecated `tau` alias) so the journal shows the bar that was used.
-                "stagnation_abs_floor": evo.get("stagnation_abs_floor"),
-                "stagnation_rel_frac": evo.get("stagnation_rel_frac"),
-                "consecutive_required": evo.get("consecutive_required"),
-            },
-        },
-    )
+    journal.init_run(cfg["results_dir"], _run_meta(cfg))
 
     # Fold the bootstrap seed's embedding cost (F7) into the ledger now that the
     # journal exists — bootstrap runs before init_run, so it couldn't account it.
@@ -1580,6 +1562,95 @@ def _hold_no_idle_sleep():
     return None  # Linux / other: no-op, no raise
 
 
+def _run_meta(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """The run.json meta passed to journal.init_run. Factored so the S2 accept-warmup fold can
+    PRE-CREATE run.json with the SAME shape main() would — main()'s init_run is idempotent, so a
+    pre-created run.json makes it a clean no-op with no config_digest drift."""
+    evo = cfg.get("evo", {}) or {}
+    db_config = cfg.get("db_config", {}) or {}
+    window_size = int(cfg.get("iters") or evo.get("window_size", 10))
+    return {
+        "run_id": cfg.get("run_id"),
+        "goal": cfg.get("task", {}).get("task_sys_msg"),
+        "task": cfg.get("task", {}).get("eval_program_path"),
+        "budget_usd": cfg.get("budget_usd"),
+        "config_digest": {
+            "num_islands": db_config.get("num_islands"),
+            "window_size": window_size,
+            "llm_models": evo.get("llm_models"),
+            # M27: record the REAL stagnation knobs actually in force (not just the
+            # deprecated `tau` alias) so the journal shows the bar that was used.
+            "stagnation_abs_floor": evo.get("stagnation_abs_floor"),
+            "stagnation_rel_frac": evo.get("stagnation_rel_frac"),
+            "consecutive_required": evo.get("consecutive_required"),
+        },
+    }
+
+
+def accept_warmup(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """S2 keep-approved fold-back: promote the orchestrator-APPROVED final warmup into the real
+    run. Copies the warmup archive over the (still-absent) real db so the run CONTINUES from the
+    warmed, reviewed population, and folds the warmup's spend into the real ledger as a DURABLE
+    intervention (so the budget cap counts the tokens already burned). Failed/abandoned warmups
+    are never accepted — the next ``--warmup`` simply auto-resets them away (M30/M35).
+
+    Refuses (no-op, accepted:False) if there is no populated warmup archive, if the warmup
+    archive has no LIVE rows, or if the real archive ALREADY exists (the real run has started —
+    folding would clobber it). On success the warmup workspace is cleaned up so the kept
+    population now lives only in the real archive."""
+    results_dir = cfg["results_dir"]
+    warm = os.path.join(results_dir, "warmup")
+    wdb = os.path.join(warm, "programs.sqlite")
+    rdb = cfg.get("db_path") or os.path.join(results_dir, "programs.sqlite")
+    if not os.path.exists(wdb):
+        return {"ok": False, "accepted": False, "reason": "no warmup archive to accept"}
+    if os.path.exists(rdb):
+        return {"ok": False, "accepted": False,
+                "reason": f"real archive already exists at {rdb}; refusing to clobber a "
+                          f"started run (accept-warmup must run BEFORE the first real window)"}
+    # Require LIVE rows — an all-tombstoned warmup (repair struck out the whole population) is
+    # not worth keeping; let the orchestrator rerun --warmup instead.
+    live = int(
+        archive_query.main(
+            {
+                "db_path": wdb,
+                "db_config": cfg["db_config"],
+                "embedding_model": cfg.get("evo", {}).get(
+                    "embedding_model", "azure-text-embedding-3-small"
+                ),
+                "query_type": "count",
+            }
+        )["result"].get("live", 0)
+        or 0
+    )
+    if live <= 0:
+        return {"ok": False, "accepted": False,
+                "reason": "warmup archive has no live rows — nothing worth keeping"}
+    import shutil
+
+    os.makedirs(os.path.dirname(rdb) or ".", exist_ok=True)
+    shutil.copy2(wdb, rdb)
+    # Fold the warmup spend DURABLY: pre-create run.json on a genuinely fresh boot (no journal
+    # streams yet, so add_cost takes the plain path — NOT the reconstruct path, which would
+    # double-count the just-appended intervention), then record the spend as an intervention so
+    # a later corrupt/deleted-run.json recompute recovers it from interventions.jsonl.
+    wcost = float(journal.total_cost(warm) or 0.0)
+    journal.init_run(results_dir, _run_meta(cfg))
+    if wcost:
+        journal.append_intervention(
+            results_dir,
+            {
+                "type": "warmup_accepted",
+                "cost": wcost,
+                "reason": "S2: folded the orchestrator-approved final warmup into the real run",
+                "outcome": f"copied {live} live program(s) + ${wcost:.4f} prior spend",
+            },
+        )
+    cleanup_warmup(results_dir)
+    return {"ok": True, "accepted": True, "live_programs": live,
+            "folded_cost_usd": wcost, "db": rdb}
+
+
 def cleanup_warmup(results_dir: str) -> bool:
     """Delete the throwaway <results_dir>/warmup workspace so warmup artifacts never pollute the
     real run. Returns True ONLY if the dir is actually gone afterward. L80: rmtree(ignore_errors)
@@ -1637,12 +1708,25 @@ def _cli() -> None:
         "--cleanup-warmup", action="store_true",
         help="delete the <results_dir>/warmup throwaway workspace and exit.",
     )
+    ap.add_argument(
+        "--accept-warmup", action="store_true",
+        help="S2: KEEP the orchestrator-approved final warmup — fold its archive into the real "
+             "db (the run then CONTINUES from the warmed population) and its spend into the real "
+             "ledger, then clean up, and exit. Run this BEFORE the first real window; it refuses "
+             "if the real archive already exists. Failed warmups are NOT accepted (just rerun "
+             "--warmup, which auto-resets).",
+    )
     args = ap.parse_args()
     with open(args.config, encoding="utf-8") as f:
         cfg = json.load(f)
     if args.cleanup_warmup:
         removed = cleanup_warmup(cfg["results_dir"])
         sys.stdout.write(_common.dumps({"ok": True, "cleaned_warmup": removed}))
+        sys.stdout.flush()
+        return
+    if args.accept_warmup:
+        res = accept_warmup(cfg)
+        sys.stdout.write(_common.dumps(res))
         sys.stdout.flush()
         return
     _warmup_dir = None

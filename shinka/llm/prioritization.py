@@ -192,12 +192,20 @@ class BanditBase(ABC):
         raise NotImplementedError
 
     def save_state(self, path: Union[str, Path]) -> None:
-        """Save bandit state to a pickle file."""
+        """Save bandit state to a pickle file ATOMICALLY (M25): write a temp file, fsync, then
+        os.replace — ~20+ writes/window means a kill mid-write would otherwise truncate the
+        pickle, and the next load silently starts a ZEROED bandit (all learning lost)."""
+        import os as _os
+
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         state = self.get_state()
-        with open(path, "wb") as f:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "wb") as f:
             pickle.dump(state, f)
+            f.flush()
+            _os.fsync(f.fileno())
+        _os.replace(tmp, path)
 
     def load_state(self, path: Union[str, Path]) -> None:
         """Load bandit state from a pickle file."""
@@ -697,9 +705,13 @@ class AsymmetricUCB(BanditBase):
                     # apply cost_power to amplify cost differences
                     # power > 1 more aggressively favors cheap models
                     cost_ratio_scaled = np.power(cost_ratio_norm, self.cost_power)
-                    # additive blend: at k=1, only cost matters; at k=0, only reward
-                    k = self.cost_aware_coefficient
-                    scores = (1.0 - k) * scores + k * cost_ratio_scaled
+                    # additive blend: at kc=1, only cost matters; at kc=0, only reward.
+                    # L73: use `kc`, NOT `k` — here `k` is the virtual-pull LOOP counter
+                    # (`while k > 0` / `k -= 1`); reassigning it collapsed the batch posterior
+                    # to one-hot after one iteration. Dead on the default route (samples==1),
+                    # but a trap for an anti-collapse rewrite reaching for samples>1.
+                    kc = self.cost_aware_coefficient
+                    scores = (1.0 - kc) * scores + kc * cost_ratio_scaled
 
             winners = np.where(scores == scores.max())[0]
             p = np.zeros(A, dtype=np.float64)

@@ -723,12 +723,18 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     # P5-T4: escalation hook (present-but-off, default None). On a repair generation's
     # LAST attempt before the tombstone fires (the parent's repair_attempts would reach
     # the cap this round), optionally route the repair to a stronger model.
+    # M24: when a repair slot ESCALATES to repair_escalation_model, that model is NOT a bandit
+    # arm — its reward/cost must NOT be credited/charged to the bandit-SELECTED (cheap) arm,
+    # which would inflate the cheap arm's posterior with pro-level successes + cost. _escalated
+    # gates the bandit feeds below; the spend still lands in counters['cost'] (the ledger).
+    _escalated = False
     if _repair_gen and evo.get("repair_escalation_model"):
         _cap = int(evo.get("repair_attempt_cap", 2) or 2)
         _att = int(((parent.get("metadata") or {}).get("repair_attempts", 0)) or 0)
         if _att >= _cap - 1:
             model_name, reasoning_effort = _parse_arm(
                 evo.get("repair_escalation_model"), evo.get("reasoning_effort"))
+            _escalated = True
 
     # 3. mutate: LLM call + apply (IMMUTABLE body, MUTABLE prompt) — mockable
     mut_payload = {
@@ -779,7 +785,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         counters["apply_exhausted"] = counters.get("apply_exhausted", 0) + 1
         counters.setdefault("exhausted_retry_slots", []).append(f"gen{generation}")
         counters["exhausted_retry_count"] = counters.get("exhausted_retry_count", 0) + 1
-        if llm_models and arm_id:
+        if llm_models and arm_id and not _escalated:  # M24: escalated repair credits no arm
             # cost-only bandit feed (mirrors the novelty-reject feed): the arm pays its
             # real spend with NO fabricated reward.
             select_llm_script.main({
@@ -889,7 +895,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                 counters["repair_tombstoned_count"] = counters.get("repair_tombstoned_count", 0) + 1
         except Exception:
             pass
-        if llm_models and arm_id:  # charge the arm's spend (cost-only, no reward)
+        if llm_models and arm_id and not _escalated:  # M24: escalated repair credits no arm (cost-only otherwise)
             select_llm_script.main({
                 "mode": "update", "models": llm_models, "state_path": state_path,
                 "bandit_kwargs": evo.get("llm_dynamic_selection_kwargs", {}),
@@ -943,7 +949,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                 counters["novelty_rejects"] += 1
                 _rej_cost = _slot_mut_cost + _slot_embed_cost
                 counters["rejected_cost"] = counters.get("rejected_cost", 0.0) + _rej_cost
-                if llm_models and arm_id:
+                if llm_models and arm_id and not _escalated:  # M24: escalated repair credits no arm
                     _penalize = str(evo.get("reward_on_reject", "cost_only")) == "penalize"
                     select_llm_script.main({
                         "mode": "update", "models": llm_models, "state_path": state_path,
@@ -1045,8 +1051,9 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             "reward": reward.get("reward"), "arm": arm_id})
 
     # 6. bandit update (MUTABLE — scoring concern, consumption half) using the
-    # reward from compute_reward.py (NOT a hardcoded score).
-    if llm_models:
+    # reward from compute_reward.py (NOT a hardcoded score). M24: skip on an escalated repair
+    # slot — the escalation model is not a bandit arm, so crediting arm_id would distort it.
+    if llm_models and not _escalated:
         select_llm_script.main(
             {
                 "mode": "update", "models": llm_models, "state_path": state_path,

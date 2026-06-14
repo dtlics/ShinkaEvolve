@@ -49,16 +49,27 @@ except ImportError:
     import _common  # type: ignore
 
 
-def _make_bandit(models: List[str], bandit_kwargs: Dict[str, Any], state_path):
+def _make_bandit(models: List[str], bandit_kwargs: Dict[str, Any], state_path, seed=None):
     from shinka.llm import AsymmetricUCB
 
-    bandit = AsymmetricUCB(arm_names=list(models), **(bandit_kwargs or {}))
+    # L74: forward the seed to the bandit's INSTANCE rng — the global np.random.seed in main
+    # does NOT govern bandit.select_llm's draw, so arm selection was irreproducible despite
+    # evo.seed. bandit_kwargs wins if it carries its own seed.
+    bandit = AsymmetricUCB(arm_names=list(models), **{"seed": seed, **(bandit_kwargs or {})})
+    was_reset = False
     if state_path and os.path.exists(state_path):
         try:
             bandit.load_state(state_path)
-        except Exception:
-            pass  # incompatible/old state -> start fresh (logged by caller if needed)
-    return bandit
+        except Exception as exc:
+            # M25: a present-but-unloadable state (corrupt/truncated/incompatible) is DISCARDED.
+            # Signal it (was a silent `pass`, indistinguishable from a cold start) so the caller
+            # surfaces a reset instead of the agent seeing near-zero counts with no reason.
+            was_reset = True
+            import sys as _sys
+
+            print(f"[select_llm] bandit_state load failed ({type(exc).__name__}: {exc}) — "
+                  f"starting FRESH (bandit learning reset)", file=_sys.stderr)
+    return bandit, was_reset
 
 
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -72,7 +83,22 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     if seed is not None:
         np.random.seed(int(seed))
 
-    bandit = _make_bandit(models, bandit_kwargs, state_path)
+    bandit, _bandit_reset = _make_bandit(models, bandit_kwargs, state_path, seed=seed)
+
+    # L75: sanitize the subset/explore pool against the KNOWN arm names so a typo or a missing
+    # @effort suffix (the exact recovery levers SKILL recommends for a starved arm) DROPS the
+    # unknown entries with a warning instead of raising an unhandled ValueError that aborts the
+    # whole cluster at the first slot of the relaunch.
+    _subset = payload.get("subset")
+    if _subset:
+        _known = set(models)
+        _clean = [a for a in _subset if a in _known]
+        if len(_clean) != len(_subset):
+            import sys as _sys
+
+            print(f"[select_llm] dropping unknown subset arm(s) {sorted(set(_subset) - _known)}; "
+                  f"known={models}", file=_sys.stderr)
+        payload = {**payload, "subset": (_clean or None)}  # empty after cleaning -> full set
 
     if mode == "weights":
         # Read-only posterior snapshot for diagnostics. `posterior()` is
@@ -129,7 +155,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         bandit.update_submitted(model_name)
         if state_path:
             bandit.save_state(state_path)
-        return {"model_name": model_name, "probs": probs, "models": list(pool), "explored": True}
+        return {"model_name": model_name, "probs": probs, "models": list(pool),
+                "explored": True, "bandit_state_reset": _bandit_reset}
 
     one_hot, probs = bandit.select_llm(subset=payload.get("subset"))
     one_hot = np.asarray(one_hot, dtype=float)
@@ -141,6 +168,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "model_name": model_name,
         "probs": [float(p) for p in np.asarray(probs, dtype=float).tolist()],
         "models": models,
+        "bandit_state_reset": _bandit_reset,  # M25: True if a corrupt state file was discarded
     }
 
 

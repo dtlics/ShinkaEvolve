@@ -2632,6 +2632,46 @@ def test_m27_stagnation_abs_floor_fallback():
     return None
 
 
+def test_m21_index_failclosed_and_n14_record_outcome():
+    # M21: a present-but-corrupt index fails LOUD (not silently [], which would disarm the
+    # rejected-hash guard); writes are atomic. N14: record_outcome on an unmatched hash RAISES
+    # (no silent no-op leaving the deploy stuck 'deployed', no fabricated phantom history dir).
+    import importlib
+    import pytest
+    with tempfile.TemporaryDirectory() as td:
+        sc, hi = os.path.join(td, "scripts"), os.path.join(td, "hist")
+        os.makedirs(sc)
+        os.environ["SHINKA_ORCH_SCRIPTS_DIR"] = sc
+        os.environ["SHINKA_ORCH_HISTORY_DIR"] = hi
+        try:
+            import strategy_store as ss
+            importlib.reload(ss)
+            open(os.path.join(sc, "compute_reward.py"), "w").write("def main(p):\n    return {'v': 1}\n")
+            cand = os.path.join(td, "c.py")
+            open(cand, "w").write("def main(p):\n    return {'v': 2}\n")
+            ss.deploy(cand, "compute_reward.py", reason="r", window_index=1, prior_J=0.3)
+            assert ss.read_index(), "deploy must record an index entry"
+            nh = ss.current_hash("compute_reward.py")
+            with pytest.raises(ValueError):  # N14: unmatched hash raises
+                ss.record_outcome("deadbeefdeadbeef", J=1.0, accepted=False)
+            assert not (Path(hi) / "deadbeefdeadbeef").exists()  # no phantom dir fabricated
+            ss.record_outcome(nh, J=0.4, accepted=True)  # the real outcome still works
+            assert [e for e in ss.read_index() if e.get("status") == "accepted"]
+            # M21: corrupt the index in place -> read_index raises (not silent [])
+            ss.index_path().write_text("{ this is not json", encoding="utf-8")
+            with pytest.raises(RuntimeError):
+                ss.read_index()
+            os.environ["SHINKA_STRATEGY_INDEX_FAILOPEN"] = "1"
+            try:
+                assert ss.read_index() == []  # override -> fail open
+            finally:
+                del os.environ["SHINKA_STRATEGY_INDEX_FAILOPEN"]
+        finally:
+            del os.environ["SHINKA_ORCH_SCRIPTS_DIR"]
+            del os.environ["SHINKA_ORCH_HISTORY_DIR"]
+    return None
+
+
 def test_m1_recent_meta_output_rehydrates():
     # M1: the last logged meta round's {directions, failure_note} is recoverable from the
     # journal so a fresh cluster process re-hydrates the global channel after a relaunch.
@@ -2899,6 +2939,7 @@ if __name__ == "__main__":
         ("h9_parent_pin_targets_program", test_h9_parent_pin_targets_program),
         ("h10_island_policy_decoupled_gates", test_h10_island_policy_decoupled_gates),
         ("m1_recent_meta_output_rehydrates", test_m1_recent_meta_output_rehydrates),
+        ("m21_index_failclosed_and_n14_record_outcome", test_m21_index_failclosed_and_n14_record_outcome),
         ("m48_eval_foundation_smoke", test_m48_eval_foundation_smoke),
         ("dr_parse_and_env_robustness", test_dr_parse_and_env_robustness),
         ("validate_select_llm_all_modes", test_validate_select_llm_all_modes),

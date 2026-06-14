@@ -65,12 +65,27 @@ def read_index() -> List[Dict[str, Any]]:
     try:
         return json.loads(index_path().read_text())
     except json.JSONDecodeError:
-        return []
+        # M21: a PRESENT-but-corrupt index must NOT silently read as [] — that erases the whole
+        # deploy/outcome audit trail AND disarms the rejected-hash guard (deploy iterates this).
+        # The atomic write below prevents self-corruption; an externally-corrupted index fails
+        # LOUD (env override to force the old fail-open behavior).
+        if os.environ.get("SHINKA_STRATEGY_INDEX_FAILOPEN"):
+            return []
+        raise RuntimeError(
+            f"strategy index {index_path()} is present but unparseable (corruption?) — refusing "
+            f"to read it as empty, which would disarm the rejected-hash guard. Set "
+            f"SHINKA_STRATEGY_INDEX_FAILOPEN=1 to override."
+        )
 
 
 def _write_index(entries: List[Dict[str, Any]]) -> None:
     history_dir().mkdir(parents=True, exist_ok=True)
-    index_path().write_text(json.dumps(entries, indent=2))
+    # M21: atomic write (unique temp + os.replace) so a kill mid-write can't truncate the index
+    # into the corrupt state read_index now refuses to read as empty.
+    _p = index_path()
+    _tmp = _p.with_suffix(_p.suffix + f".{os.getpid()}.{uuid.uuid4().hex}.tmp")
+    _tmp.write_text(json.dumps(entries, indent=2))
+    os.replace(_tmp, _p)
 
 
 def append_index(entry: Dict[str, Any]) -> None:
@@ -377,6 +392,7 @@ def record_outcome(
     compact ``measure_diagnostics`` summary are stored on the entry so the index
     records WHY the rewrite was accepted/rejected and the evidence behind it (F4)."""
     entries = read_index()
+    _found = False
     for entry in reversed(entries):
         if entry.get("new_hash") == new_hash and entry.get("status") == "deployed":
             entry["J"] = J
@@ -387,7 +403,16 @@ def record_outcome(
             ms = _measure_summary(measure_diagnostics)
             if ms is not None:
                 entry["measure"] = ms
+            _found = True
             break
+    if not _found:
+        # N14: an unmatched/typo'd hash must NOT silently no-op — that leaves the REAL deploy
+        # stuck at status 'deployed' (so the rejected-hash guard never arms) and update_meta
+        # would fabricate a phantom strategy_history/<bogus>/ dir. Raise so the caller fixes it.
+        raise ValueError(
+            f"record_outcome: no deployed index entry for hash {new_hash[:8]} — nothing to "
+            f"record (refusing to fabricate a phantom history entry)."
+        )
     _write_index(entries)
     update_meta(new_hash, J=J, accepted=accepted)
 

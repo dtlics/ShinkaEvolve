@@ -2632,6 +2632,21 @@ def test_m27_stagnation_abs_floor_fallback():
     return None
 
 
+def test_l80_cleanup_warmup_honest():
+    # L80: cleanup_warmup returns the REAL result — False for a missing dir, True only when the
+    # dir is actually gone (not a false True if rmtree silently failed).
+    import tempfile
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+    with tempfile.TemporaryDirectory() as td:
+        assert run_window.cleanup_warmup(td) is False  # nothing to remove
+        os.makedirs(os.path.join(td, "warmup", "journal"))
+        open(os.path.join(td, "warmup", "x.txt"), "w", encoding="utf-8").write("x")
+        assert run_window.cleanup_warmup(td) is True  # removed
+        assert not os.path.isdir(os.path.join(td, "warmup"))
+    return None
+
+
 def test_s1_cadence_policy_is_foundation():
     # S1: cadence_policy.py is FOUNDATION (the wake-decay schedule + run termination are not
     # orchestrator-rewritable) — removed from MUTABLE_TARGETS, so snapshot()/deploy() refuse it.
@@ -2952,6 +2967,7 @@ if __name__ == "__main__":
         ("h10_island_policy_decoupled_gates", test_h10_island_policy_decoupled_gates),
         ("m1_recent_meta_output_rehydrates", test_m1_recent_meta_output_rehydrates),
         ("s1_cadence_policy_is_foundation", test_s1_cadence_policy_is_foundation),
+        ("l80_cleanup_warmup_honest", test_l80_cleanup_warmup_honest),
         ("m21_index_failclosed_and_n14_record_outcome", test_m21_index_failclosed_and_n14_record_outcome),
         ("m48_eval_foundation_smoke", test_m48_eval_foundation_smoke),
         ("dr_parse_and_env_robustness", test_dr_parse_and_env_robustness),

@@ -1581,15 +1581,24 @@ def _hold_no_idle_sleep():
 
 
 def cleanup_warmup(results_dir: str) -> bool:
-    """Delete the throwaway <results_dir>/warmup workspace so warmup artifacts never
-    pollute the real run. Idempotent: True if it removed a dir, False if none existed."""
+    """Delete the throwaway <results_dir>/warmup workspace so warmup artifacts never pollute the
+    real run. Returns True ONLY if the dir is actually gone afterward. L80: rmtree(ignore_errors)
+    can SILENTLY fail on a Windows lock (e.g. an open sqlite handle), so the old unconditional
+    True could report 'cleaned' while the dir survived — compounding M30/M35 (a stale workspace
+    persisting into the next warmup). A missing dir returns False (nothing to remove)."""
     import shutil
 
     warm = os.path.join(results_dir, "warmup")
+    if not os.path.isdir(warm):
+        return False
+    shutil.rmtree(warm, ignore_errors=True)
     if os.path.isdir(warm):
-        shutil.rmtree(warm, ignore_errors=True)
-        return True
-    return False
+        sys.stderr.write(
+            f"[warmup] WARNING: could not fully remove {warm} (locked? close any open sqlite "
+            f"handle and retry) — it may persist into the next warmup\n"
+        )
+        return False
+    return True
 
 
 def _cli() -> None:
@@ -1638,10 +1647,13 @@ def _cli() -> None:
         return
     _warmup_dir = None
     if args.warmup:
-        # Run in a THROWAWAY workspace so the real archive/journal stay pristine; the
-        # agent oversees this fresh-archive window, then cleans it up. Trace ON; the
-        # boot sentinel guard is relaxed for THIS invocation only (warmup runs BEFORE the
-        # agent has authored task_sys_msg) — the real run keeps require_sys_msg=True.
+        # Run in a THROWAWAY workspace so the real archive/journal stay pristine; the agent
+        # oversees this fresh-archive window. Trace ON; the boot sentinel guard is relaxed for
+        # THIS invocation only — the real run keeps require_sys_msg=True.
+        # M30/M35: AUTO-RESET the workspace at the START of every --warmup, so a rerun never
+        # validates a fix against the PRIOR broken attempt's population / bandit / errored_fraction
+        # (which could silently flip the rerun into repair mode). Each --warmup is a fresh archive.
+        cleanup_warmup(cfg["results_dir"])
         _warmup_dir = os.path.join(cfg["results_dir"], "warmup")
         cfg["results_dir"] = _warmup_dir
         cfg["db_path"] = os.path.join(_warmup_dir, "programs.sqlite")
@@ -1651,7 +1663,10 @@ def _cli() -> None:
         if args.windows is None:
             cfg["windows"] = 1
         if args.iters is None:
-            cfg["iters"] = 1
+            # M31: warmup runs a small CONFIGURED number of iterations (default 3), NOT 1 — a
+            # single iteration can't surface the sampler-spread / bandit-collapse /
+            # brief-differentiation signals warmup exists to observe. Override with --iters.
+            cfg["iters"] = int((cfg.get("warmup") or {}).get("iters", 3))
     elif args.trace_steps:
         cfg["trace_steps"] = True
     if args.windows is not None:

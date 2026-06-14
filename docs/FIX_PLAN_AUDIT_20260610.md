@@ -242,9 +242,17 @@ The run owner ruled on the four gating forks:
 > **STILL TODO in Wave 4:** islands (M15/M16/M18/M28/M42/L30–L39); strategy-store revert-completeness
 > (M19/M20/M22/L60–L67); bandit reward baseline (M23/M26; M43 geometry = foundation→ending doc);
 > M2 (per-candidate cost stream), M45 (rollback noise); meta L19/L23 (per-island context floor);
-> the Wave 3 doc tail (M37/M38/M39, L41/L43/L88, + the L-series doc corrections); Wave 5 lows/nits;
-> and the S1/S2 design-ruling [FND] implementations (cadence→foundation reclassify; warmup
-> keep-approved fold-back). All queued + resumable from the commits + this plan.
+> the Wave 3 doc tail (M37/M39, L41/L43/L88, + the L-series doc corrections); Wave 5 lows/nits;
+> and the S2 keep-approved [FND] fold-back. All queued + resumable from the commits + this plan.
+>
+> **STATUS 2026-06-14 — Wave 5d (warmup foundation, S2 throwaway half) LANDED + GREEN (88 passed).**
+> Committed: S1 cadence→FOUNDATION reclassify (5c); then 5d — **M30/M35** every `--warmup`
+> auto-resets `<results_dir>/warmup/` at start (no stale population leaking into a rerun);
+> **M31** warmup runs a configured iters (default 3, `warmup.iters`/`--iters`), not 1; **L80**
+> `cleanup_warmup` returns the REAL removal result + warns on a Windows lock; **M38** warmup
+> "STOP and CORRECT" doc disambiguated (mutable-only, pre-run, no measure/revert ceremony).
+> Test added: l80_cleanup_warmup_honest; SKILL.md warmup section + run-loop step 1 updated.
+> **S2 remaining:** the keep-approved fold-back ([FND], the riskiest piece) — see its design note below.
 
 1. **Islands:** M15 (spawn fires ≤once per stagnation episode), M18 (a spawned idx≥`num_islands` participates in migration), M28 (`diversity_kind` discriminator present), M10 (cross-island child's island == parent's), M16 retire executor protects island 0 + global-best.
 2. **Bandit:** M23/M26 (neg-parent floored arm ≠ failed arm; one repair success doesn't flip the posterior), M24 (escalated repair credits no arm; spend still in the ledger), M25 (atomic pkl + reset signal on a corrupt load).

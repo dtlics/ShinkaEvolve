@@ -73,8 +73,11 @@ This is the single source of truth; the rest of this doc expands each step.
    after the window — which parent the sampler chose and why, the assembled prompt summary,
    the code/summary the model returned (and whether the patch applied), the eval result
    and its failure type, and what the framework decided next. The moment a step looks
-   wrong you STOP and CORRECT the implicated policy file, then RESTART warmup until the
-   window is meaningful and the trace confirms it. Then CLEAN UP the warmup workspace.
+   wrong you STOP and CORRECT the implicated **mutable** policy file (warmup is PRE-run, so a
+   plain edit-and-rerun is fine here — no snapshot/measure/revert ceremony, that discipline is
+   only for *mid-run* rewrites; FOUNDATION stays off-limits, never the evaluator), then RESTART
+   warmup (it auto-resets the workspace) until the window is meaningful and the trace confirms
+   it. Then CLEAN UP the warmup workspace.
    Warmup's narrow job: confirm the inner loop is mechanically sound (sampler → prompt →
    eval → novelty → record all wired correctly) on a FRESH archive. It cannot reproduce a
    flaw that only emerges with a populated archive — those surface on the real run's
@@ -221,11 +224,24 @@ journal).
 
 ```
 python orchestrator/harness/run_window.py --config <run>/run.json --warmup
-# runs ONE window in <results_dir>/warmup (its own db + journal), tracing ON, then prints
-# the workspace path. Read <results_dir>/warmup/journal/steps.jsonl, then either fix a
-# policy and rerun --warmup, or, when satisfied, clean up and start the real run.
+# runs ONE window of a few iters in <results_dir>/warmup (its own db + journal), tracing ON,
+# then prints the workspace path. Read <results_dir>/warmup/journal/steps.jsonl, then either
+# fix a policy and rerun --warmup, or, when satisfied, clean up and start the real run.
+python orchestrator/harness/run_window.py --config <run>/run.json --warmup --iters 5   # widen
 python orchestrator/harness/run_window.py --config <run>/run.json --cleanup-warmup
 ```
+
+Each `--warmup` **auto-resets the throwaway workspace** at start (M30/M35): it wipes any
+prior `<results_dir>/warmup/` before running, so a rerun after a fix always validates against
+a FRESH archive — never against the previous broken attempt's population / bandit /
+errored-fraction (a stale workspace could silently flip the rerun into repair mode and mask
+the very fix you are checking). You therefore do NOT need `--cleanup-warmup` between attempts;
+keep it for the final teardown before the real run. Warmup runs a small **configured** number
+of iterations (default 3, set `warmup.iters` in `run.json` or pass `--iters`), NOT one — a
+single iteration can't surface the sampler-spread / bandit-collapse / brief-differentiation
+signals warmup exists to observe. `--cleanup-warmup` reports the REAL removal result (L80):
+if a Windows lock (an open sqlite handle) blocks the delete it warns and returns failure
+rather than falsely claiming success — close inspectors before tearing down.
 
 Read the per-step trace after each warmup window and stop-correct-restart on a bad step.
 Never fix the evaluator — if warmup fails because of the evaluator, STOP and report (the

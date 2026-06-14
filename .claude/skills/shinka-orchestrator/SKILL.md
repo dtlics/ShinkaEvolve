@@ -392,8 +392,11 @@ the best score. You DECIDE by reading the logs/history yourself (there is no aut
 similarity helper — DR returns a text idea, the archive holds code, so only you judge
 whether the idea already exists). Examine `journal.read_calls`, `archive_query`
 `top_n`/`recent_failures`, and the directions already in `evo.meta_directions`. Always
-pass `results_dir` so the call self-logs (query + brief) to `journal/calls/` and folds
-cost into the ledger. DR is bounded by the run budget (no hard count cap).
+pass BOTH `results_dir` AND `budget_usd` (M5): `results_dir` makes the call self-log (query +
+brief) to `journal/calls/` and fold cost into the ledger; `budget_usd` arms the pre-flight that
+SKIPS the spend when the remaining budget can't cover `dr_estimated_cost_usd` (~$5). Passing
+`results_dir` alone does NOT bound DR by the budget — without `budget_usd` there is no
+pre-flight and DR (the single most expensive action) can overshoot the cap.
 
 **How to write the DR query (you write this).** Ask for the *general SOTA techniques for
 the task* — or for a well-defined sub-problem — in the model's OWN words with a citation
@@ -436,11 +439,15 @@ spend, NOT free — do not loop-retry it.
 **The grounding run.** Author/override a small `run.json` with `llm_models:
 ["azure-gpt-5.4-pro@high"]` (pinned — the one time pro is in the mutation pool), a single
 weighted direction `evo.meta_directions:[{text:"<technique + reference + steps>",
-weight:1}]`, `evo.mutation_web_search:true`, `fix_retry_budget:3` (novel) or `1`
-(similar), and a short window. Web search fires on the mutation + its fixes; pro reads the
-reference and implements it. Never run pro with web search on a direction with NO solid
-reference — that's the only sanctioned pro+websearch use. Then fold the grounded program
-back into the shared archive and resume normal evolution.
+weight:1}]`, `evo.mutation_web_search:true`, AND `evo.fix_web_search:true` (L85 — web search
+on the MUTATION is `mutation_web_search`; the immediate-fix retries are gated SEPARATELY by
+`fix_web_search`, default false, so without it up to 3 of 4 attempts run searchless),
+`fix_retry_budget:3` (novel) or `1` (similar), and a short window. Pro reads the reference and
+implements it. Never run pro with web search on a direction with NO solid reference — that's
+the only sanctioned pro+websearch use. AFTER the grounding window REVERT these grounding-only
+knobs (`llm_models`, `mutation_web_search:false`, `fix_web_search:false`, clear the pinned
+direction) so pro + web search never persist into normal evolution; the grounded program is
+already in the shared archive (in-place, shared db — there is no separate-db fold-back).
 
 `spawn_island.py` (stdin `{db_path, db_config, embedding_model, program_id}`) seeds a NEW
 island with a copy of the grounded program as its root. It honors `db_config.max_islands`:

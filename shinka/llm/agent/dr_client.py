@@ -264,6 +264,17 @@ async def run_dr_call(
             _err.submitted = True
             _err.error_code = _code
             _err.error_message = _msg
+            # L46: best-effort CANCEL the abandoned background job before raising. Otherwise it
+            # keeps running server-side (a single DR job fires many large reasoning+search calls
+            # for 30-60 min) and keeps BILLING + consuming the quota-constrained o3-deep-research
+            # deployment (this repo's CONFIRMED failure mode). Never let a cancel failure mask
+            # the TimeoutError.
+            try:
+                await asyncio.wait_for(
+                    client.responses.cancel(response_id), timeout=per_request_timeout_sec
+                )
+            except Exception:
+                logger.warning("DR cancel failed for %s (job may keep billing)", response_id)
             raise _err
         await asyncio.sleep(min(poll_interval_sec, remaining))
         _req_to = min(per_request_timeout_sec, max(0.001, _deadline - time.monotonic()))

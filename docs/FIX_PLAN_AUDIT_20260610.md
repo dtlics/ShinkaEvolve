@@ -195,6 +195,17 @@ The run owner ruled on the four gating forks:
 ---
 
 ### ✅ Wave 3 verification (doc-heavy)
+
+> **STATUS 2026-06-13 — Wave 3 core LANDED + GREEN (82 passed). ALL 13 HIGHS NOW CLEARED.**
+> 3a `H7`+`H11`+`H12`+`H8-doc`+`M9`+`N8` (doc/code traps); 3b `H9` (parent/island pin for COMBINE);
+> 3c `H10`+`M17`+`L37` (island_policy real lever). M41 landed with Wave 1. Tests added:
+> h7_meta_model_effort_shorthand, h9_parent_pin_targets_program, h10_island_policy_decoupled_gates.
+> **STILL TODO (next continuation):** Wave 3 doc tail (M5/M40 DR docs, M37/M38/M39/L-series doc
+> corrections); Wave 4 subsystem mediums (islands M15/M16/M18/M28/M42; bandit M23/M24/M25/M26/M43;
+> meta M1/M14/L19-L23; DR M6/L40-L46; strategy-store M19-M22/L60-L67; eval M48/M49); Wave 5 lows/nits;
+> the deferred Wave 2 tail (L16 reorder, M2 cost stream); and the S1/S2 design-ruling *implementations*
+> (S1 reclassify cadence as FOUNDATION; S2 warmup keep-approved fold-back — both [FND]).
+
 1. **Doc-lint** `test_skill_doc_teaches_run_loop_and_roles` GREEN — all required phrases present, killed jargon absent (re-run after every SKILL.md/CLAUDE.md edit).
 2. **grep gates:** no `@high`/`pro@high` near `meta_model` in CLAUDE.md/SKILL.md; the `proportional` "When to flip" cell matches the code (most-populous); ONE consistent "intervention" definition across the 4 sites + the journal docstring; novelty teaching uses the conditional/diff-embedding framing (no bare "raise"/"lower"); `island_selection_strategy`/`enforce_island_separation` tagged `(db_config)`; the DR section requires `budget_usd` for the pre-flight; `audit-evolution-logic.js` still parses (template literals intact).
 3. **H7 code:** `meta_summarize.main(model_name="azure-gpt-5.4-pro@high")` resolves to model `azure-gpt-5.4-pro` + effort `high` (split BEFORE the mock branch).

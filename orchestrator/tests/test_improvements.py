@@ -2628,6 +2628,49 @@ def test_m27_stagnation_abs_floor_fallback():
     return None
 
 
+def test_m48_eval_foundation_smoke():
+    # M48 (keystone): a dependency-free END-TO-END test of the eval primitive
+    # (evaluate.main -> JobScheduler -> local.monitor -> load_results) — the contract that had
+    # ZERO real tests. Pins the field names + the H13/M47/M49 corrected behavior: (a) a correct
+    # program, (b) a crash, (c) a timeout. M49: the shipped default eval_time exceeds 30 min.
+    import json as _json
+    from shinka.utils import parse_time_to_seconds
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import evaluate as _evaluate
+
+    def _run(evaluator_src, time_="00:01:00"):
+        with tempfile.TemporaryDirectory() as td:
+            gen = os.path.join(td, "gen_0")
+            rd = os.path.join(gen, "results")
+            os.makedirs(rd)
+            open(os.path.join(gen, "main.py"), "w", encoding="utf-8").write("x = 1\n")
+            evalp = os.path.join(td, "ev.py")
+            open(evalp, "w", encoding="utf-8").write(evaluator_src)
+            return _evaluate.main({"program_path": os.path.join(gen, "main.py"),
+                                   "results_dir": rd, "eval_program_path": evalp,
+                                   "job_type": "local", "time": time_})
+
+    ok_src = (
+        "import sys, json, os\n"
+        "rd = sys.argv[sys.argv.index('--results_dir') + 1]\n"
+        "os.makedirs(rd, exist_ok=True)\n"
+        "json.dump({'correct': True}, open(os.path.join(rd, 'correct.json'), 'w'))\n"
+        "json.dump({'combined_score': 0.75, 'public': {'p': 1}, 'private': {}, 'text_feedback': 'ok'},"
+        " open(os.path.join(rd, 'metrics.json'), 'w'))\n"
+    )
+    a = _run(ok_src)
+    assert a["correct"] is True and abs(a["combined_score"] - 0.75) < 1e-9, a
+    assert a["public_metrics"] == {"p": 1} and a["text_feedback"] == "ok", a
+    b = _run("import sys\nsys.exit(1)\n")  # crash before writing
+    assert b["correct"] is False and b["combined_score"] == 0.0, b
+    c = _run("import time\ntime.sleep(30)\n", time_="00:00:02")  # timeout
+    assert c["correct"] is False and c["timed_out"] is True, c
+    # M49: the shipped default config's eval_time exceeds the 30-min cnot wallclock budget.
+    _cfg = _json.loads((_REPO_ROOT / "configs" / "orchestrator_run.default.json").read_text())
+    assert parse_time_to_seconds(_cfg["task"]["eval_time"]) > 30 * 60, _cfg["task"]["eval_time"]
+    return None
+
+
 def test_dr_parse_and_env_robustness():
     # M6: a brief whose JSON is preceded by prose LONGER than the JSON used to parse to [] (the
     # trim loop's lower bound was a blob-coordinate on the rebased candidate). L45: the
@@ -2829,6 +2872,7 @@ if __name__ == "__main__":
         ("h7_meta_model_effort_shorthand", test_h7_meta_model_effort_shorthand),
         ("h9_parent_pin_targets_program", test_h9_parent_pin_targets_program),
         ("h10_island_policy_decoupled_gates", test_h10_island_policy_decoupled_gates),
+        ("m48_eval_foundation_smoke", test_m48_eval_foundation_smoke),
         ("dr_parse_and_env_robustness", test_dr_parse_and_env_robustness),
         ("validate_select_llm_all_modes", test_validate_select_llm_all_modes),
         ("dr_refusal_graceful", test_dr_refusal_graceful),

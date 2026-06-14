@@ -617,7 +617,11 @@ a degraded brief whose billed cost is captured). Don't rewrite the transport in 
 { "results_dir": "<run dir>", "run_id": "<id>", "budget_usd": 50,
   "task": {"eval_program_path": "...evaluate.py", "init_program_path": "...initial.py",
            "task_sys_msg": "<precise goal>", "require_sys_msg": true,
-           "language": "python", "eval_time": "00:05:00"},
+           "language": "python", "eval_time": "00:35:00"},
+  // M49: eval_time is the harness hard-kill — it MUST exceed the task evaluator's internal
+  // wallclock budget, or slow candidates are SIGKILLed before the evaluator's graceful
+  // early-abort can write a score (a result-less death). The cnot evaluator's default budget
+  // is 30 min, so eval_time >= 00:35:00; set per task.
   "db_config": {"num_islands": 4, "archive_size": 40, "parent_selection_lambda": 10.0,
                 "migration_interval": 10, "enable_dynamic_islands": false,
                 "max_islands": 0, "island_evict_strategy": "worst_best_fitness"},

@@ -7,7 +7,7 @@
     "init_program_path": "initial.py",
     "task_sys_msg": "__UNSET_AUTHOR_AT_BOOT__",
     "language": "python",
-    "eval_time": "00:05:00"
+    "eval_time": "00:35:00"
   },
   "db_config": {"num_islands": 4, "archive_size": 40, "parent_selection_lambda": 10.0},
   "evo": {

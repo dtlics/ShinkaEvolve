@@ -264,6 +264,24 @@ The run owner ruled on the four gating forks:
 > or accept an all-tombstoned warmup. Test added: s2_accept_warmup_folds_approved (incl. the
 > durability + clobber-refusal cases); SKILL.md warmup section documents the keep-vs-discard call.
 > **S2 is now COMPLETE** (both halves of the HYBRID ruling).
+>
+> **STATUS 2026-06-14 — Wave 5f (strategy-store revert-completeness) LANDED + GREEN (90 passed).**
+> The full-rewind safety net behind the framework-audit power: **M19** a SINGLE deploy is now
+> blocked by a hash a BUNDLE outcome rejected (shared `_hash_was_rejected` helper used by both
+> deploy paths). **L63** `rollback_bundle` is all-or-nothing — it verifies every snapshot exists
+> BEFORE copying any (no more half-rewound scripts/ on a missing snapshot). **L66** `restore_state`
+> DELETES a managed state file that did NOT exist at snapshot time (a measure-window-born
+> `bandit_state.pkl` / `programs.sqlite` no longer survives a "full" rewind); the ledger is exempt.
+> **L64** the ledger re-stamp tolerates a corrupt READ but RAISES on a WRITE failure (the old
+> blanket `except: pass` could silently leave the ledger rewound to the snapshot's lower total).
+> **L60** `_prune_state_snapshots` pins any state snapshot still referenced by an UNRESOLVED
+> `deployed` index entry, so a rewrite still under measurement can always be reverted. **M20**
+> `snapshot_state` detects `<results_dir>/.window_active` (run_window now writes it around the
+> sqlite/bandit-writing candidate loop), flags `window_active_at_snapshot` in state_meta, and
+> REFUSES under `SHINKA_REFUSE_SNAPSHOT_DURING_WINDOW`. Test added: revert_completeness_cluster.
+> **STILL TODO (strategy store):** M22 (warn-and-stamp `revertible:False` — verify/land), L61/M36
+> (archive reads `strategy_history` from `index_path()`), L67/L81 (no fair-trial reset on revert +
+> trace-step version stamping).
 
 1. **Islands:** M15 (spawn fires ≤once per stagnation episode), M18 (a spawned idx≥`num_islands` participates in migration), M28 (`diversity_kind` discriminator present), M10 (cross-island child's island == parent's), M16 retire executor protects island 0 + global-best.
 2. **Bandit:** M23/M26 (neg-parent floored arm ≠ failed arm; one repair success doesn't flip the posterior), M24 (escalated repair credits no arm; spend still in the ledger), M25 (atomic pkl + reset signal on a corrupt load).

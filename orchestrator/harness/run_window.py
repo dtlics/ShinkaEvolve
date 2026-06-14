@@ -1175,13 +1175,30 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         _prev_win = journal.read_windows(cfg["results_dir"], last_n=1)
         _errored_frac = float((_prev_win[-1].get("errored_fraction", 0.0) if _prev_win else 0.0) or 0.0)
         repair_on = _errored_frac >= float(evo.get("repair_trigger_fraction", 0.20))
-        for i in range(window_size):
-            if budget is not None and (prior_total + counters["cost"]) >= float(budget):
-                budget_hit = True
-                break
-            counters["iter_index"] = i
-            _run_one_candidate(cfg, next_gen + i, counters, repair=(repair_on and i == 0))
-            iters_run += 1
+        # M20: mark the window LIVE for the duration of the sqlite/bandit-writing candidate loop,
+        # so strategy_store.snapshot_state can DETECT (and flag) a framework snapshot taken while
+        # a window subprocess is mutating the archive/selector — which could capture a half-written
+        # programs.sqlite / bandit_state.pkl as a "restore point". Best-effort; removed in finally
+        # so a crash never leaks a stale sentinel.
+        _wact = os.path.join(cfg["results_dir"], ".window_active")
+        try:
+            with open(_wact, "w", encoding="utf-8") as _wf:
+                _wf.write(str(os.getpid()))
+        except Exception:
+            pass
+        try:
+            for i in range(window_size):
+                if budget is not None and (prior_total + counters["cost"]) >= float(budget):
+                    budget_hit = True
+                    break
+                counters["iter_index"] = i
+                _run_one_candidate(cfg, next_gen + i, counters, repair=(repair_on and i == 0))
+                iters_run += 1
+        finally:
+            try:
+                os.remove(_wact)
+            except OSError:
+                pass
 
         # H8/O3 (opt-in): drive island spawn/migrate via the MUTABLE island_policy
         # DECISION at the window boundary (not just the db_config add()-time

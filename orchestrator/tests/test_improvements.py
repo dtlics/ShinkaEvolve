@@ -2632,6 +2632,109 @@ def test_m27_stagnation_abs_floor_fallback():
     return None
 
 
+def test_revert_completeness_cluster():
+    # Strategy-store full-rewind safety net: M19 (single deploy blocked by a bundle-rejected
+    # hash), L63 (all-or-nothing bundle restore), L66 (restore removes snapshot-absent state
+    # files), L64 (ledger never rewound), L60 (unresolved-deploy snapshot pinned from pruning),
+    # M20 (snapshot during a live window is flagged / refusable).
+    import importlib
+    import tempfile
+    import json as _json
+    from pathlib import Path as _Path
+    with tempfile.TemporaryDirectory() as td:
+        sc, hi = os.path.join(td, "scripts"), os.path.join(td, "hist")
+        os.makedirs(sc)
+        os.environ["SHINKA_ORCH_SCRIPTS_DIR"] = sc
+        os.environ["SHINKA_ORCH_HISTORY_DIR"] = hi
+        try:
+            import strategy_store as ss
+            importlib.reload(ss)
+            for f in ("compute_reward.py", "select_llm.py"):
+                open(os.path.join(sc, f), "w", encoding="utf-8").write("def main(p):\n    return 1\n")
+            c1 = os.path.join(td, "c1.py"); open(c1, "w", encoding="utf-8").write("def main(p):\n    return 2\n")
+            c2 = os.path.join(td, "c2.py"); open(c2, "w", encoding="utf-8").write("def main(p):\n    return 3\n")
+
+            # --- M19: a hash REJECTED in a BUNDLE also blocks a SINGLE deploy of that file.
+            changes = [{"candidate_path": c1, "target": "compute_reward.py"},
+                       {"candidate_path": c2, "target": "select_llm.py"}]
+            res = ss.deploy_bundle(changes, reason="b", window_index=1)
+            ss.record_bundle_outcome(res["new_hashes"], J=0.0, accepted=False)
+            _m19 = False
+            try:
+                ss.deploy(c1, "compute_reward.py", reason="single-retread", window_index=2)
+            except ValueError:
+                _m19 = True
+            assert _m19, "M19: single deploy should reject a bundle-rejected hash"
+
+            # --- L63: a bundle restore with one missing snapshot copies NOTHING (all-or-nothing).
+            ss.deploy_bundle(changes, reason="b2", window_index=3, force=True)  # apply c1/c2 to scripts
+            cur_cr = open(os.path.join(sc, "compute_reward.py"), encoding="utf-8").read()
+            cur_sl = open(os.path.join(sc, "select_llm.py"), encoding="utf-8").read()
+            _l63 = False
+            try:
+                ss.rollback_bundle({"compute_reward.py": ss.current_hash("compute_reward.py"),
+                                    "select_llm.py": "deadbeefdeadbeef"}, reason="x")
+            except FileNotFoundError:
+                _l63 = True
+            assert _l63, "L63: a missing bundle snapshot must raise"
+            assert open(os.path.join(sc, "compute_reward.py"), encoding="utf-8").read() == cur_cr
+            assert open(os.path.join(sc, "select_llm.py"), encoding="utf-8").read() == cur_sl, \
+                "L63: a partial bundle restore left scripts/ half-rewound"
+
+            # --- snapshot_state cold-start (no bandit_state.pkl present)
+            rd = os.path.join(td, "run")
+            os.makedirs(os.path.join(rd, "journal"))
+            open(os.path.join(rd, "programs.sqlite"), "wb").write(b"DB_v1")
+            _json.dump({"total_cost": 0.50}, open(os.path.join(rd, "journal", "run.json"), "w", encoding="utf-8"))
+            sid = ss.snapshot_state(rd, label="pre")
+
+            # --- M20: snapshot taken while .window_active exists is FLAGGED (and refusable).
+            open(os.path.join(rd, ".window_active"), "w", encoding="utf-8").write("123")
+            sid2 = ss.snapshot_state(rd, label="during-window")
+            meta2 = _json.loads((_Path(hi) / f"state_{sid2}" / "state_meta.json").read_text())
+            assert meta2["window_active_at_snapshot"] is True, "M20: live-window snapshot not flagged"
+            os.environ["SHINKA_REFUSE_SNAPSHOT_DURING_WINDOW"] = "1"
+            try:
+                _m20 = False
+                try:
+                    ss.snapshot_state(rd, label="refused")
+                except RuntimeError:
+                    _m20 = True
+                assert _m20, "M20: env override should REFUSE a live-window snapshot"
+            finally:
+                os.environ.pop("SHINKA_REFUSE_SNAPSHOT_DURING_WINDOW", None)
+            os.remove(os.path.join(rd, ".window_active"))
+
+            # --- L66 + L64: a measure window created bandit_state.pkl + bumped the ledger; restore
+            #     the cold-start snapshot `sid`.
+            open(os.path.join(rd, "bandit_state.pkl"), "wb").write(b"BANDIT_new")
+            open(os.path.join(rd, "programs.sqlite"), "wb").write(b"DB_v2")
+            _json.dump({"total_cost": 0.90}, open(os.path.join(rd, "journal", "run.json"), "w", encoding="utf-8"))
+            out = ss.restore_state(rd, sid)
+            assert open(os.path.join(rd, "programs.sqlite"), "rb").read() == b"DB_v1", "archive not rewound"
+            assert not os.path.exists(os.path.join(rd, "bandit_state.pkl")), \
+                "L66: a snapshot-absent bandit_state.pkl survived a full rewind"
+            assert "bandit_state.pkl" in out["removed"]
+            led = _json.loads(open(os.path.join(rd, "journal", "run.json"), encoding="utf-8").read())
+            assert abs(led["total_cost"] - 0.90) < 1e-9, "L64: ledger was rewound below the live total"
+
+            # --- L60: an UNRESOLVED deploy's state snapshot is pinned from pruning.
+            c3 = os.path.join(td, "c3.py"); open(c3, "w", encoding="utf-8").write("def main(p):\n    return 9\n")
+            dres = ss.deploy(c3, "compute_reward.py", reason="measure", window_index=9, results_dir=rd)
+            pinned = dres["state_snap_id"]
+            assert pinned
+            for _ in range(6):
+                ss.snapshot_state(rd, label="filler")
+            ss._prune_state_snapshots(keep=1)
+            assert (_Path(hi) / f"state_{pinned}").exists(), "L60: unresolved deploy snapshot pruned"
+            assert not (_Path(hi) / f"state_{sid}").exists(), "prune did not run (unpinned old snapshot survived)"
+        finally:
+            os.environ.pop("SHINKA_ORCH_SCRIPTS_DIR", None)
+            os.environ.pop("SHINKA_ORCH_HISTORY_DIR", None)
+            importlib.reload(ss)  # restore real dirs for later tests
+    return None
+
+
 def test_l80_cleanup_warmup_honest():
     # L80: cleanup_warmup returns the REAL result — False for a missing dir, True only when the
     # dir is actually gone (not a false True if rmtree silently failed).
@@ -3017,6 +3120,7 @@ if __name__ == "__main__":
         ("m1_recent_meta_output_rehydrates", test_m1_recent_meta_output_rehydrates),
         ("s1_cadence_policy_is_foundation", test_s1_cadence_policy_is_foundation),
         ("l80_cleanup_warmup_honest", test_l80_cleanup_warmup_honest),
+        ("revert_completeness_cluster", test_revert_completeness_cluster),
         ("s2_accept_warmup_folds_approved", test_s2_accept_warmup_folds_approved),
         ("m21_index_failclosed_and_n14_record_outcome", test_m21_index_failclosed_and_n14_record_outcome),
         ("m48_eval_foundation_smoke", test_m48_eval_foundation_smoke),

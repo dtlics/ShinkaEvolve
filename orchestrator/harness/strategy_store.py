@@ -94,6 +94,25 @@ def append_index(entry: Dict[str, Any]) -> None:
     _write_index(entries)
 
 
+def _hash_was_rejected(
+    idx: List[Dict[str, Any]], target: str, cand_hash: str
+) -> Optional[Dict[str, Any]]:
+    """Return the index entry that REJECTED ``cand_hash`` for ``target`` (single OR bundle), or
+    None. The 'don't retread a failed strategy' guard, shared by deploy() and deploy_bundle()
+    (M19): a SINGLE deploy must also be blocked by a hash a BUNDLE outcome rejected for that
+    target — otherwise the orchestrator could slip a known-bad version back in one file at a
+    time. Checks both the single-entry shape (new_hash/target) and the bundle shape
+    (new_hashes[target])."""
+    for _e in idx:
+        if _e.get("status") != "rejected":
+            continue
+        if _e.get("new_hash") == cand_hash and _e.get("target") == target:
+            return _e
+        if _e.get("type") == "bundle" and (_e.get("new_hashes") or {}).get(target) == cand_hash:
+            return _e
+    return None
+
+
 def _assert_mutable(target: str) -> None:
     """E1/H10: refuse to snapshot/deploy/rollback a NON-mutable target. The rewrite
     protocol must NEVER touch a FOUNDATION file (the JSON contract, evaluator,
@@ -170,16 +189,12 @@ def deploy(
     # invariant) — unless explicitly forced. Cheap guard over the append-only index.
     if not force:
         _cand_hash = file_hash(Path(candidate_path))
-        for _e in read_index():
-            if (
-                _e.get("new_hash") == _cand_hash
-                and _e.get("target") == target
-                and _e.get("status") == "rejected"
-            ):
-                raise ValueError(
-                    f"candidate hash {_cand_hash[:8]} for {target} was REJECTED at window "
-                    f"{_e.get('window_index')}; pass force=True to re-deploy anyway"
-                )
+        _rej = _hash_was_rejected(read_index(), target, _cand_hash)  # M19: single OR bundle
+        if _rej is not None:
+            raise ValueError(
+                f"candidate hash {_cand_hash[:8]} for {target} was REJECTED at window "
+                f"{_rej.get('window_index')}; pass force=True to re-deploy anyway"
+            )
     # P7-T1 + C1: snapshot the pre-deploy CODE first, then the run STATE (archive DB +
     # bandit + ledger), recording the code hash INTO the state snapshot so a regressing/
     # crashing measure window can be FULLY rewound — code AND state (ledger preserved).
@@ -239,8 +254,22 @@ def rollback(target: str, prior_hash: str, reason: str = "J regression") -> Dict
 def _prune_state_snapshots(keep: int) -> None:
     if keep <= 0:
         return
+    # L60: never prune a state snapshot still referenced by an UNRESOLVED deploy (status
+    # 'deployed' — its measure outcome has not been recorded yet). Pruning it would destroy the
+    # ONLY revert point for a rewrite still under measurement, so a later regression verdict
+    # could not be rolled back. Pinned snapshots are retained regardless of age/keep.
+    pinned: set = set()
+    try:
+        for e in read_index():
+            if e.get("status") == "deployed" and e.get("state_snap_id"):
+                pinned.add(f"state_{e['state_snap_id']}")
+    except Exception:
+        pinned = set()
     states = sorted(history_dir().glob("state_*"), key=lambda p: p.stat().st_mtime)
-    for old in states[:-keep]:
+    stale = states[:-keep] if keep < len(states) else []
+    for old in stale:
+        if old.name in pinned:
+            continue  # L60: protect an unresolved deploy's revert point
         shutil.rmtree(old, ignore_errors=True)
 
 
@@ -262,6 +291,23 @@ def snapshot_state(results_dir: str, label: Optional[str] = None, keep: int = 5,
     dest = history_dir() / f"state_{snap_id}"
     dest.mkdir(parents=True, exist_ok=True)
     rd = Path(results_dir)
+    # M20: DETECT a snapshot taken while a window is LIVE (the candidate loop mutates
+    # programs.sqlite / bandit_state.pkl; run_window writes <results_dir>/.window_active for that
+    # span). Snapshotting then risks capturing a half-written file as the restore point. The
+    # rewrite protocol serializes deploy/measure/restore so this should never happen — so we WARN
+    # loudly and FLAG the snapshot rather than silently trusting it (the env override REFUSES).
+    window_live = (rd / ".window_active").exists()
+    if window_live:
+        import sys as _sys
+
+        msg = (f"[strategy_store] WARNING: snapshot_state({results_dir}) taken while a window is "
+               f"LIVE (.window_active present) — the captured programs.sqlite/bandit_state.pkl may "
+               f"be mid-write. Snapshots must be taken between windows (deploy/measure/restore are "
+               f"serialized).")
+        if os.environ.get("SHINKA_REFUSE_SNAPSHOT_DURING_WINDOW"):
+            shutil.rmtree(dest, ignore_errors=True)
+            raise RuntimeError(msg + " Refusing (SHINKA_REFUSE_SNAPSHOT_DURING_WINDOW set).")
+        print(msg, file=_sys.stderr)
     for rel in ("programs.sqlite", "bandit_state.pkl", os.path.join("journal", "run.json")):
         src = rd / rel
         if src.exists():
@@ -269,6 +315,8 @@ def snapshot_state(results_dir: str, label: Optional[str] = None, keep: int = 5,
     (dest / "state_meta.json").write_text(json.dumps(
         {"snap_id": snap_id, "label": label, "created_at": _now(),
          "results_dir": str(results_dir),
+         # M20: flag in the audit trail if this snapshot was taken during a live window.
+         "window_active_at_snapshot": bool(window_live),
          # C1: {target: pre-deploy code-hash} so restore_state rewinds code too ({} for a bare snapshot).
          "prior_code": dict(prior_code or {})}, indent=2))
     _prune_state_snapshots(keep)
@@ -304,17 +352,29 @@ def restore_state(results_dir: str, snap_id: str) -> Dict[str, Any]:
             snap_total = float(json.loads(_snap_run.read_text()).get("total_cost", 0.0) or 0.0)
         except Exception:
             snap_total = 0.0
-    # 1) Restore run STATE (archive DB + bandit + the ledger file).
+    # 1) Restore run STATE (archive DB + bandit + the ledger file). L66: a managed state file
+    #    that did NOT exist at snapshot time but the measure window CREATED (e.g. a cold-start run
+    #    had no bandit_state.pkl / no programs.sqlite yet) must be DELETED on revert — otherwise
+    #    the selector / archive keeps measure-window-born state after a "full" rewind. The LEDGER
+    #    (run.json) is exempt: it is never rewound (handled below), so we never delete it here.
+    _LEDGER = "run.json"
     restored: List[str] = []
+    removed: List[str] = []
     for name, rel in (("programs.sqlite", "programs.sqlite"),
                       ("bandit_state.pkl", "bandit_state.pkl"),
                       ("run.json", os.path.join("journal", "run.json"))):
         src = dest / name
+        tgt = rd / rel
         if src.exists():
-            tgt = rd / rel
             tgt.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, tgt)
             restored.append(name)
+        elif name != _LEDGER and tgt.exists():
+            try:
+                tgt.unlink()
+                removed.append(name)
+            except Exception:
+                pass
     # 2) C1: restore the strategy CODE for every target captured at deploy. The pre-deploy
     #    snapshots already live under strategy_history/<hash>/; copy each back over scripts/.
     code_restored: List[str] = []
@@ -349,19 +409,24 @@ def restore_state(results_dir: str, snap_id: str) -> Dict[str, Any]:
     _cands = [v for v in (live_total, snap_total) if v is not None]
     preserved = max(_cands) if _cands else None
     if preserved is not None:
+        # L64: TOLERATE a corrupt/missing run.json READ (fall back to {}), but do NOT swallow a
+        # WRITE failure. The old blanket try/except: pass meant a failed re-stamp left run.json at
+        # the snapshot's (lower) total_cost — silently REWINDING the ledger, the exact invariant
+        # this code exists to protect. A write failure now propagates so the caller sees it.
         try:
             run = json.loads(live_run.read_text()) if live_run.exists() else {}
             if not isinstance(run, dict):
                 run = {}
-            run["total_cost"] = preserved
-            run["restored_from_state"] = snap_id
-            tmp = str(live_run) + ".tmp"
-            live_run.parent.mkdir(parents=True, exist_ok=True)
-            Path(tmp).write_text(json.dumps(run, indent=2, default=str))
-            os.replace(tmp, live_run)
         except Exception:
-            pass
-    return {"restored": restored, "code_restored": code_restored,
+            run = {}
+        run["total_cost"] = preserved
+        run["restored_from_state"] = snap_id
+        # L70 parity: unique temp name so concurrent writers can't clobber each other's temp.
+        tmp = f"{live_run}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        live_run.parent.mkdir(parents=True, exist_ok=True)
+        Path(tmp).write_text(json.dumps(run, indent=2, default=str))
+        os.replace(tmp, live_run)
+    return {"restored": restored, "removed": removed, "code_restored": code_restored,
             "total_cost_preserved": preserved}
 
 
@@ -487,15 +552,11 @@ def deploy_bundle(
         idx = read_index()
         for ch in changes:
             _ch = file_hash(Path(ch["candidate_path"]))
-            for _e in idx:
-                _rej_single = (_e.get("new_hash") == _ch and _e.get("target") == ch["target"]
-                               and _e.get("status") == "rejected")
-                _rej_bundle = (_e.get("type") == "bundle" and _e.get("status") == "rejected"
-                               and (_e.get("new_hashes") or {}).get(ch["target"]) == _ch)
-                if _rej_single or _rej_bundle:
-                    raise ValueError(
-                        f"bundle candidate hash {_ch[:8]} for {ch['target']} was REJECTED "
-                        f"at window {_e.get('window_index')}; pass force=True to re-deploy")
+            _rej = _hash_was_rejected(idx, ch["target"], _ch)  # M19: shared single-OR-bundle guard
+            if _rej is not None:
+                raise ValueError(
+                    f"bundle candidate hash {_ch[:8]} for {ch['target']} was REJECTED "
+                    f"at window {_rej.get('window_index')}; pass force=True to re-deploy")
     # C1: snapshot every target's pre-bundle CODE first, then the run STATE recording the
     # {target: hash} map, so restore_state(snap_id) rewinds the whole bundle's code too.
     prior_hashes: Dict[str, str] = {}
@@ -546,12 +607,18 @@ def deploy_bundle(
 
 def rollback_bundle(prior_hashes: Dict[str, str], reason: str = "J regression") -> Dict[str, Any]:
     """Restore every target in the bundle from its prior snapshot."""
+    # L63: all-or-nothing — verify EVERY target is mutable AND its snapshot exists BEFORE copying
+    # any. The old loop copied targets one-by-one and only raised when it HIT a missing snapshot,
+    # leaving scripts/ half-restored (a partial, incompatible concern) on disk. Pre-check first.
     for target, h in prior_hashes.items():
         _assert_mutable(target)
-        snap = history_dir() / h / target
-        if not snap.exists():
-            raise FileNotFoundError(f"bundle snapshot not found: {snap}")
-        shutil.copy2(snap, scripts_dir() / target)
+        if not (history_dir() / h / target).exists():
+            raise FileNotFoundError(
+                f"bundle snapshot not found: {history_dir() / h / target} — refusing a "
+                f"partial bundle restore (no file copied)"
+            )
+    for target, h in prior_hashes.items():
+        shutil.copy2(history_dir() / h / target, scripts_dir() / target)
     append_index(
         {
             "type": "bundle",

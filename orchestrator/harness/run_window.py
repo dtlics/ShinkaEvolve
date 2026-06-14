@@ -1188,15 +1188,24 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         # auto-triggers off (enable_dynamic_islands=false + migration_rate=0, the
         # defaults) to avoid double-execution. Never let it break the window.
         if evo.get("island_policy_driven"):
+            import sys as _sys
             try:
-                island_policy_script.main({
+                _ip_res = island_policy_script.main({
                     "db_path": db_path, "db_config": db_config,
                     "embedding_model": embedding_model,
                     "current_generation": (next_gen + iters_run - 1) if iters_run else next_gen,
                     "apply": True,
                 })
+                # M17: SURFACE what actually ran (the result was discarded), so the agent can
+                # tell "policy decided nothing" from "policy crashed". stderr (not log_step,
+                # which only writes the trace stream; not _trace, out of scope here).
+                print(f"[island_policy] window {widx}: actions={(_ip_res or {}).get('actions')} "
+                      f"executed={(_ip_res or {}).get('executed')}", file=_sys.stderr)
             except Exception:
-                pass
+                # M17: log the traceback instead of a silent pass; never break the window.
+                import traceback as _tb
+
+                print(f"[island_policy] FAILED (window {widx}):\n{_tb.format_exc()}", file=_sys.stderr)
 
         # F9: read the REAL bandit posterior (+ per-arm tallies) for diagnostics,
         # so `llm_bandit_weights` reflects bandit_state.pkl instead of an empty

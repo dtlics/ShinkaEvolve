@@ -2628,6 +2628,54 @@ def test_m27_stagnation_abs_floor_fallback():
     return None
 
 
+def test_h10_island_policy_decoupled_gates():
+    # H10: island_policy decides spawn/migrate from its OWN payload gates, so it works with the
+    # db_config auto-triggers OFF (the documented prerequisite) instead of being a no-op. Without
+    # the policy_* keys it defaults to the db_config values (back-compat).
+    import dataclasses as _dc
+    import tempfile
+    from shinka.database import DatabaseConfig, Program, ProgramDatabase
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import island_policy
+
+    def _mk(pid):
+        kw = {}
+        for f in _dc.fields(Program):
+            if f.default is not _dc.MISSING or f.default_factory is not _dc.MISSING:
+                continue
+            tn = getattr(f.type, "__name__", str(f.type))
+            kw[f.name] = {"str": "", "int": 0, "float": 0.0, "bool": False}.get(tn, None)
+        kw.update(id=pid, code=f"# {pid}\nx = 1\n", combined_score=0.5, correct=True)
+        names = {f.name for f in _dc.fields(Program)}
+        if "generation" in names:
+            kw.setdefault("generation", 1)
+        if "language" in names:
+            kw["language"] = "python"
+        p = Program(**kw)
+        p.metadata = {}
+        return p
+
+    with tempfile.TemporaryDirectory() as td:
+        dbp = os.path.join(td, "p.sqlite")
+        # db_config auto-triggers OFF (the documented prerequisite for island_policy_driven)
+        dbc = {"num_islands": 2, "migration_rate": 0.0, "enable_dynamic_islands": False,
+               "migration_interval": 1}
+        db = ProgramDatabase(DatabaseConfig(db_path=dbp, **dbc), embedding_model="", read_only=False)
+        try:
+            db.add(_mk("p0"))
+        finally:
+            db.close()
+        base = {"db_path": dbp, "db_config": dbc, "embedding_model": "",
+                "current_generation": 2, "apply": False}
+        # decoupled: policy_migrate_enabled fires the decision despite migration_rate=0
+        out = island_policy.main({**base, "policy_migrate_enabled": True, "policy_migrate_interval": 1})
+        assert out["actions"]["migrate"] is True, out
+        # back-compat: without the policy_* key it defaults to db_config (migration_rate=0) → no migrate
+        out2 = island_policy.main(dict(base))
+        assert out2["actions"]["migrate"] is False, out2
+    return None
+
+
 def test_h9_parent_pin_targets_program():
     # H9: a valid parent_id pins THAT program for the COMBINE/grounding run (even though
     # weighted sampling would prefer the higher-scored one); an unknown pin falls back to
@@ -2754,6 +2802,7 @@ if __name__ == "__main__":
         ("m46_count_live_excludes_tombstoned", test_m46_count_live_excludes_tombstoned),
         ("h7_meta_model_effort_shorthand", test_h7_meta_model_effort_shorthand),
         ("h9_parent_pin_targets_program", test_h9_parent_pin_targets_program),
+        ("h10_island_policy_decoupled_gates", test_h10_island_policy_decoupled_gates),
         ("validate_select_llm_all_modes", test_validate_select_llm_all_modes),
         ("dr_refusal_graceful", test_dr_refusal_graceful),
         ("deploy_bundle_rejected_guard", test_deploy_bundle_rejected_guard),

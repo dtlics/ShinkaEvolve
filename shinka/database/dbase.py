@@ -2805,8 +2805,10 @@ class ProgramDatabase:
         if not self.island_manager:
             return done
         if actions.get("migrate"):
-            self.island_manager.perform_migration(int(current_generation))
-            done["migrated"] = True
+            # L37: report what ACTUALLY ran — perform_migration returns False when it moved
+            # nothing (its bool was discarded, so done["migrated"] was always True even on a
+            # no-op, contradicting the "returns what actually ran" contract the spawn branch honors).
+            done["migrated"] = bool(self.island_manager.perform_migration(int(current_generation)))
         if actions.get("spawn"):
             done["spawned"] = bool(self.island_manager.spawn_new_island())
         # retire: island_policy's default never returns a retire index. A future

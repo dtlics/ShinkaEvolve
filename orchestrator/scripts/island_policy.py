@@ -161,12 +161,24 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     migration_interval = int(db_config.get("migration_interval", 10))
     num_islands = int(db_config.get("num_islands", 2))
 
-    spawn = enable_dynamic and gens_since_best >= stagnation_threshold
+    # H10: decouple the POLICY's spawn/migrate decision from the db_config AUTO-TRIGGER knobs
+    # (enable_dynamic_islands / migration_rate>0) that ALSO drive the foundation add()-time
+    # maintenance. Keying on the SAME knobs made island_policy_driven a no-op under its
+    # documented prerequisite (auto-triggers OFF → both decisions always False, result
+    # discarded) and a DOUBLE-execution when the knobs are flipped ON. The policy now reads its
+    # OWN payload keys, defaulting to the db_config values for back-compat — so the correct way
+    # to drive island_policy_driven is: add()-time triggers OFF (enable_dynamic_islands=false,
+    # migration_rate=0) AND these policy_* keys set.
+    _policy_spawn_enabled = bool(payload.get("policy_spawn_enabled", enable_dynamic))
+    _policy_spawn_stag = int(payload.get("policy_spawn_stagnation", stagnation_threshold))
+    _policy_migrate_enabled = bool(payload.get("policy_migrate_enabled", migration_rate > 0.0))
+    _policy_migrate_interval = int(payload.get("policy_migrate_interval", migration_interval))
+    spawn = _policy_spawn_enabled and gens_since_best >= _policy_spawn_stag
     migrate = (
-        migration_rate > 0.0
+        _policy_migrate_enabled
         and num_islands >= 2
-        and migration_interval > 0
-        and current_generation % migration_interval == 0
+        and _policy_migrate_interval > 0
+        and current_generation % _policy_migrate_interval == 0
         and current_generation > 0
     )
 

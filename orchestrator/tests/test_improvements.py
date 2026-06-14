@@ -515,6 +515,9 @@ def test_auto_meta_per_window():
                 "embedding_model": "text-embedding-3-small",
                 "query_type": "island_brief", "island_idx": 0})["result"]
             assert (brief or {}).get("content") == "island0 dir", brief
+            # M14: meta health is on the returned diag; island 0 got a brief.
+            assert d["meta_health"]["status"] == "ok", d["meta_health"]
+            assert 0 in d["meta_health"]["islands_written"], d["meta_health"]
 
         called = {"n": 0}
 
@@ -534,6 +537,7 @@ def test_auto_meta_per_window():
         with tempfile.TemporaryDirectory() as td:
             d = run_window.main(_cfg(os.path.join(td, "run"), True))
             assert d.get("ok") is True  # a meta failure never crashes the window
+            assert d["meta_health"]["status"] == "crashed", d["meta_health"]  # M14
     finally:
         run_window.meta_summarize_script.main = orig_meta
     return None
@@ -2628,6 +2632,28 @@ def test_m27_stagnation_abs_floor_fallback():
     return None
 
 
+def test_m1_recent_meta_output_rehydrates():
+    # M1: the last logged meta round's {directions, failure_note} is recoverable from the
+    # journal so a fresh cluster process re-hydrates the global channel after a relaunch.
+    import tempfile
+    sys.path.insert(0, str(_ORCH / "harness"))
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import journal
+    import _common
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "r"})
+        journal.log_call(td, "meta", {"u": "U"},
+                         {"directions": [{"text": "use a CX ladder", "weight": 1.0}],
+                          "failure_note": "timeouts dominate"}, cost=0.0, summary="meta")
+        out = _common.recent_meta_output(td)
+        assert out["failure_note"] == "timeouts dominate", out
+        assert out["directions"][0]["text"] == "use a CX ladder", out
+    with tempfile.TemporaryDirectory() as td2:
+        journal.init_run(td2, {"run_id": "r2"})
+        assert _common.recent_meta_output(td2) == {}  # no meta calls -> empty
+    return None
+
+
 def test_m48_eval_foundation_smoke():
     # M48 (keystone): a dependency-free END-TO-END test of the eval primitive
     # (evaluate.main -> JobScheduler -> local.monitor -> load_results) — the contract that had
@@ -2872,6 +2898,7 @@ if __name__ == "__main__":
         ("h7_meta_model_effort_shorthand", test_h7_meta_model_effort_shorthand),
         ("h9_parent_pin_targets_program", test_h9_parent_pin_targets_program),
         ("h10_island_policy_decoupled_gates", test_h10_island_policy_decoupled_gates),
+        ("m1_recent_meta_output_rehydrates", test_m1_recent_meta_output_rehydrates),
         ("m48_eval_foundation_smoke", test_m48_eval_foundation_smoke),
         ("dr_parse_and_env_robustness", test_dr_parse_and_env_robustness),
         ("validate_select_llm_all_modes", test_validate_select_llm_all_modes),

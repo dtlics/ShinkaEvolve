@@ -1124,6 +1124,18 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if _boot_embed_cost:
         journal.add_cost(cfg["results_dir"], _boot_embed_cost)
 
+    # M1: the global meta channel (evo.meta_directions / meta_failure_note) is written only into
+    # the in-memory cfg, so it is LOST at every cluster relaunch (every window of the early phase
+    # runs in a fresh process). Re-hydrate it from the last logged meta round so the failure_note
+    # (which rides into every gen) and the global directions (pre-brief / no-brief islands)
+    # survive a relaunch. Fill ONLY when empty; this window's meta round overwrites it.
+    if not evo.get("meta_directions") or not evo.get("meta_failure_note"):
+        _mh = _common.recent_meta_output(cfg["results_dir"])
+        if _mh.get("directions") and not evo.get("meta_directions"):
+            evo["meta_directions"] = _mh["directions"]
+        if _mh.get("failure_note") and not evo.get("meta_failure_note"):
+            evo["meta_failure_note"] = _mh["failure_note"]
+
     window_state = cfg.get("window_state", {}) or {}
     window_index = int(window_state.get("window_index", 0))
     prior_low_streak = int(window_state.get("prior_low_streak", 0))
@@ -1331,6 +1343,12 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     _meta_payload["mock"] = True
                     _meta_payload["mock_text"] = _mock.get("meta_mock_text", "")
                 _meta = meta_summarize_script.main(_meta_payload)
+                # M14/L22: track island coverage so the returned diag's meta_health can report a
+                # degraded/skipped/crashed round + which live islands got a brief, were OMITTED,
+                # or were HALLUCINATED (a non-existent island_idx — don't write a phantom brief).
+                _live_ids = {h.get("id") for h in (diag.get("island_health") or [])}
+                _written: set = set()
+                _hallucinated: List[int] = []
                 if not (_meta.get("skipped") or _meta.get("degraded")):
                     # Write global output into the LIVE evo dict (don't clobber a non-empty
                     # prior with None). run_window samples meta_directions per gen; the
@@ -1339,44 +1357,50 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                         evo["meta_directions"] = _meta["directions"]
                     if _meta.get("failure_note"):
                         evo["meta_failure_note"] = _meta["failure_note"]
-                    # Auto-record ONE brief per live island so islands diverge. Prefer the
-                    # RICH per-island output (H1/M13): persist each island's directions +
-                    # assigned program ids into structured_json so the SAMPLER can be
-                    # direction-oriented. Fall back to the flat island_directions (content
-                    # only) when only the legacy schema is present.
+                    # Auto-record ONE brief per live island so islands diverge. Prefer the RICH
+                    # per-island output (H1/M13): persist directions + assigned program ids into
+                    # structured_json so the SAMPLER can be direction-oriented; fall back to the
+                    # flat island_directions (content only) when only the legacy schema is present.
                     import json as _json
                     _rich = _meta.get("islands") or []
-                    if _rich:
-                        for _isl in _rich:
-                            try:
+                    _entries = _rich if _rich else (_meta.get("island_directions", []) or [])
+                    for _isl in _entries:
+                        try:
+                            _iid = int(_isl["island_idx"])
+                            if _live_ids and _iid not in _live_ids:
+                                _hallucinated.append(_iid)  # L22: skip phantom-island briefs
+                                continue
+                            if _rich:
                                 _dirs = _isl.get("directions") or []
-                                _headline = _dirs[0]["text"] if _dirs else ""
-                                island_brief_script.main({
-                                    "db_path": db_path, "db_config": db_config,
-                                    "embedding_model": embedding_model,
-                                    "island_idx": int(_isl["island_idx"]),
-                                    "generation": _meta_gen,
-                                    "content": _headline,
-                                    "structured_json": _json.dumps({"directions": _dirs}),
-                                    "stage": "auto_meta", "cost": 0.0,
-                                })
-                            except Exception:
-                                pass  # one bad island entry must not abort the rest
-                    else:
-                        for _isl in _meta.get("island_directions", []) or []:
-                            try:
-                                island_brief_script.main({
-                                    "db_path": db_path, "db_config": db_config,
-                                    "embedding_model": embedding_model,
-                                    "island_idx": int(_isl["island_idx"]),
-                                    "generation": _meta_gen,
-                                    "content": _isl.get("text", ""),
-                                    "stage": "auto_meta", "cost": 0.0,
-                                })
-                            except Exception:
-                                pass  # one bad island entry must not abort the rest
-            except Exception:
-                pass  # a meta/parse/brief failure must NEVER crash a window
+                                # N11: headline = highest-WEIGHT direction (matches the derived
+                                # island_directions headline), not directions[0].
+                                _headline = (max(_dirs, key=lambda d: d.get("weight", 0.0))["text"]
+                                             if _dirs else "")
+                                _extra = {"structured_json": _json.dumps({"directions": _dirs})}
+                            else:
+                                _headline = _isl.get("text", "")
+                                _extra = {}
+                            island_brief_script.main({
+                                "db_path": db_path, "db_config": db_config,
+                                "embedding_model": embedding_model,
+                                "island_idx": _iid, "generation": _meta_gen,
+                                "content": _headline, "stage": "auto_meta", "cost": 0.0, **_extra,
+                            })
+                            _written.add(_iid)
+                        except Exception:
+                            pass  # one bad island entry must not abort the rest
+                # M14: attach meta health to the RETURNED diag (control-return surface).
+                diag["meta_health"] = {
+                    "status": ("skipped" if _meta.get("skipped")
+                               else "degraded" if _meta.get("degraded") else "ok"),
+                    "n_global_directions": len(_meta.get("directions") or []),
+                    "islands_written": sorted(_written),
+                    "islands_missing": sorted(_live_ids - _written) if _live_ids else [],
+                    "islands_hallucinated": sorted(_hallucinated),
+                    "error": _meta.get("error"),
+                }
+            except Exception as _exc:
+                diag["meta_health"] = {"status": "crashed", "error": repr(_exc)}  # M14
 
         # Refresh AFTER the meta round so the returned diag includes meta spend.
         diag["total_cost"] = journal.total_cost(cfg["results_dir"])

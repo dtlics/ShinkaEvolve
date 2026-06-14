@@ -536,6 +536,14 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         "seed": gseed,
         "validity_floor": evo.get("validity_floor"),
     }
+    # H9: COMBINE / grounding-run targeting — pin the parent (and thereby its island) so a DR
+    # technique lands on the closest existing program. Set evo.grounding_parent_id (preferred)
+    # or evo.grounding_island_idx on the one-window grounding override; both are unset on the
+    # normal path (no behavior change). A stale/invalid pin falls back in sample_parent.
+    if evo.get("grounding_parent_id"):
+        _sp_payload["parent_id"] = evo.get("grounding_parent_id")
+    if evo.get("grounding_island_idx") is not None:
+        _sp_payload["island_idx"] = evo.get("grounding_island_idx")
     if repair:
         _sp_payload["select"] = "errored"
         _sp_payload["repair_attempt_cap"] = int(evo.get("repair_attempt_cap", 2) or 2)

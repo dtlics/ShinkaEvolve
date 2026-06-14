@@ -2628,6 +2628,50 @@ def test_m27_stagnation_abs_floor_fallback():
     return None
 
 
+def test_h9_parent_pin_targets_program():
+    # H9: a valid parent_id pins THAT program for the COMBINE/grounding run (even though
+    # weighted sampling would prefer the higher-scored one); an unknown pin falls back to
+    # normal sampling without crashing.
+    import dataclasses as _dc
+    import tempfile
+    from shinka.database import DatabaseConfig, Program, ProgramDatabase
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import sample_parent
+
+    def _mk(pid, score):
+        kw = {}
+        for f in _dc.fields(Program):
+            if f.default is not _dc.MISSING or f.default_factory is not _dc.MISSING:
+                continue
+            tn = getattr(f.type, "__name__", str(f.type))
+            kw[f.name] = {"str": "", "int": 0, "float": 0.0, "bool": False}.get(tn, None)
+        kw.update(id=pid, code=f"# {pid}\nx = 1\n", combined_score=score, correct=True)
+        names = {f.name for f in _dc.fields(Program)}
+        if "generation" in names:
+            kw.setdefault("generation", 1)
+        if "language" in names:
+            kw["language"] = "python"
+        p = Program(**kw)
+        p.metadata = {}
+        return p
+
+    with tempfile.TemporaryDirectory() as td:
+        dbp = os.path.join(td, "p.sqlite")
+        cfg = {"num_islands": 1, "archive_size": 20}
+        db = ProgramDatabase(DatabaseConfig(db_path=dbp, **cfg), embedding_model="", read_only=False)
+        try:
+            db.add(_mk("p_hi", 0.9))   # high score — weighted sampling would prefer this
+            db.add(_mk("p_lo", 0.1))   # low score — but the pin must override
+        finally:
+            db.close()
+        base = {"db_path": dbp, "db_config": cfg, "embedding_model": "", "seed": 0}
+        out = sample_parent.main({**base, "parent_id": "p_lo"})
+        assert out["parent_id"] == "p_lo" and out["island_idx"] is not None, out  # pin overrides weighting
+        out2 = sample_parent.main({**base, "parent_id": "nope"})
+        assert out2["parent_id"] in ("p_hi", "p_lo"), out2  # invalid pin → fell back, no crash
+    return None
+
+
 def test_h7_meta_model_effort_shorthand():
     # H7: a "model@effort" value handed to meta (the shorthand the docs once taught) must be
     # SPLIT, not passed verbatim to a nonexistent deployment (which silently degraded every
@@ -2709,6 +2753,7 @@ if __name__ == "__main__":
         ("m27_stagnation_abs_floor_fallback", test_m27_stagnation_abs_floor_fallback),
         ("m46_count_live_excludes_tombstoned", test_m46_count_live_excludes_tombstoned),
         ("h7_meta_model_effort_shorthand", test_h7_meta_model_effort_shorthand),
+        ("h9_parent_pin_targets_program", test_h9_parent_pin_targets_program),
         ("validate_select_llm_all_modes", test_validate_select_llm_all_modes),
         ("dr_refusal_graceful", test_dr_refusal_graceful),
         ("deploy_bundle_rejected_guard", test_deploy_bundle_rejected_guard),

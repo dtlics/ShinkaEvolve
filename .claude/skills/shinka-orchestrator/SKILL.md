@@ -428,7 +428,9 @@ spend, NOT free — do not loop-retry it.
   grounding run below), then give it **its own island** via `spawn_island.py` so it isn't
   out-competed before it matures.
 - **History-similar** → combine it into the closest existing program with the grounding
-  run (`fix_retry_budget:1`).
+  run (`fix_retry_budget:1`), TARGETING that program via `evo.grounding_parent_id:"<id>"`
+  (H9 — pins the parent + its island; without it the grounding mutation lands on an
+  arbitrary sigmoid-sampled parent). Use `evo.grounding_island_idx` to pin only the island.
 - **Otherwise → ignore it.** Don't dilute the search.
 
 **The grounding run.** Author/override a small `run.json` with `llm_models:

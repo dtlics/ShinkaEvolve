@@ -20,6 +20,7 @@ INPUT (stdin JSON):
   {
     "db_path": str, "db_config": {..}, "embedding_model": str,
     "island_idx": int | null,     # null => auto-select per config.island_selection_strategy (N8: default uniform among initialized islands; proportional/weighted otherwise)
+    "parent_id": str | null,      # H9: PIN this archived-correct program as the parent (its island drives the pool); for the COMBINE/grounding run. Invalid pin => fall back to normal sampling.
     "seed": int | null,           # for deterministic sampling (tests/parity)
     "validity_floor": float | null,  # O6 lever: floor VALID parents' scores; null = inert
     "select": "errored" | null,   # P5 repair mode: pick an ERRORED parent to fix in place
@@ -253,11 +254,28 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "selection_probs": [],
         }
 
+    # H9: explicit PARENT PIN for the COMBINE / grounding run — land a DR technique on the
+    # CLOSEST existing program (SKILL DR triage / S9 "merge at the original entry"). A valid
+    # archived-correct parent_id is selected DIRECTLY (its island drives the pool +
+    # inspirations), skipping the sigmoid draw; an unknown/incorrect pin falls back to normal
+    # sampling with a stderr warning (never crash the window on a stale pin).
+    _pinned = None
+    _pin_id = payload.get("parent_id")
+    if _pin_id:
+        _pinned = next((p for p in archived_correct if getattr(p, "id", None) == _pin_id), None)
+        if _pinned is None:
+            import sys as _sys
+
+            print(f"[sample_parent] parent_id pin {_pin_id!r} is not an archived-correct "
+                  f"program — falling back to normal sampling", file=_sys.stderr)
+
     # Island selection (MUTABLE-LEVER, M11): honor config.island_selection_strategy
     # instead of a hardcoded uniform draw. Default "uniform" reproduces today's
     # behavior (+ the WeightedSamplingStrategy parity).
     islands = sorted({getattr(p, "island_idx", 0) for p in archived_correct})
     island_idx = payload.get("island_idx")
+    if _pinned is not None:
+        island_idx = getattr(_pinned, "island_idx", island_idx)  # H9: the pin's island drives the pool
     if island_idx is None:
         island_idx = _select_island(archived_correct, islands, config, rng)
 
@@ -284,8 +302,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     lam = float(getattr(config, "parent_selection_lambda", 10.0))
     probs = _weighted_probs(scores, children, lam)
 
-    # Sample a parent by the weighted probabilities.
-    parent = rng.choices(pool, weights=probs, k=1)[0]
+    # Sample a parent by the weighted probabilities — or use the H9 pin when given.
+    parent = _pinned if _pinned is not None else rng.choices(pool, weights=probs, k=1)[0]
 
     # Inspirations (H1): DIRECTION-ORIENTED when this island has a STRUCTURED meta brief —
     # sample ONE of its directions and use the programs ASSIGNED to it as the exemplars

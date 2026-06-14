@@ -19,7 +19,7 @@ num_archive_inspirations, num_top_k_inspirations, num_islands.
 INPUT (stdin JSON):
   {
     "db_path": str, "db_config": {..}, "embedding_model": str,
-    "island_idx": int | null,     # null => auto-select uniformly among initialized islands
+    "island_idx": int | null,     # null => auto-select per config.island_selection_strategy (N8: default uniform among initialized islands; proportional/weighted otherwise)
     "seed": int | null,           # for deterministic sampling (tests/parity)
     "validity_floor": float | null,  # O6 lever: floor VALID parents' scores; null = inert
     "select": "errored" | null,   # P5 repair mode: pick an ERRORED parent to fix in place

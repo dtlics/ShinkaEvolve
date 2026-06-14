@@ -474,8 +474,9 @@ def work_low_streak(results_dir: str, low_threshold: float = 1.0) -> int:
 
 def termination_streak(results_dir: str) -> int:
     """Count trailing consecutive 'control_return' rows that are BOTH stagnant AND had an
-    orchestrator intervention (a framework rewrite OR a DR). This is the deterministic
-    termination signal (H6/H7/H8): N-in-a-row means the search cannot escape stagnation
+    orchestrator intervention (H12 INCLUSIVE: a framework rewrite, a DR, OR a deliberate
+    config-lever flip — the automatic per-window meta round does NOT count). This is the
+    deterministic termination signal (H6/H7/H8): N-in-a-row means the search cannot escape stagnation
     DESPITE intervening at every return. A stagnation-break (stagnation_flag False) or a
     no-intervention return resets the streak. Computed from interventions.jsonl — the agent
     writes one canonical control_return row per control-return; the harness reads it.

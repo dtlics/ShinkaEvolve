@@ -2628,6 +2628,18 @@ def test_m27_stagnation_abs_floor_fallback():
     return None
 
 
+def test_h7_meta_model_effort_shorthand():
+    # H7: a "model@effort" value handed to meta (the shorthand the docs once taught) must be
+    # SPLIT, not passed verbatim to a nonexistent deployment (which silently degraded every
+    # meta round). Both the canonical two-knob form and a habitual @-suffix now work.
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import meta_summarize
+    out = meta_summarize.main({"mock": True, "mock_text": "{}",
+                               "model_name": "azure-gpt-5.4-pro@high", "reasoning_effort": "medium"})
+    assert out["model"] == "azure-gpt-5.4-pro", out  # split before the deployment lookup
+    return None
+
+
 def test_m46_count_live_excludes_tombstoned():
     # M46: archive_query 'count' reports live (non-tombstoned) rows so the bootstrap can detect
     # an all-tombstoned archive (live==0 while total>0) and re-seed instead of crash-looping.
@@ -2696,6 +2708,7 @@ if __name__ == "__main__":
         ("rollback_fail_closed_and_collapse", test_rollback_fail_closed_and_collapse),
         ("m27_stagnation_abs_floor_fallback", test_m27_stagnation_abs_floor_fallback),
         ("m46_count_live_excludes_tombstoned", test_m46_count_live_excludes_tombstoned),
+        ("h7_meta_model_effort_shorthand", test_h7_meta_model_effort_shorthand),
         ("validate_select_llm_all_modes", test_validate_select_llm_all_modes),
         ("dr_refusal_graceful", test_dr_refusal_graceful),
         ("deploy_bundle_rejected_guard", test_deploy_bundle_rejected_guard),

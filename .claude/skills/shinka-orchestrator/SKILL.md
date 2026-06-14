@@ -128,7 +128,9 @@ work_score, intervened}`:
 - `work_score` — their sum (the scalar the taper reads via `journal.recent_work_score`;
   `journal.work_low_streak` counts the recent low-work returns the escalation uses).
 - `stagnation_flag` — copy this return's window-diagnostics value (the stall state NOW).
-- `intervened` — `work_audit>0 or work_dr>0` (did you actually act this return?).
+- `intervened` — `work_audit>0 or work_dr>0` (did you actually act this return?). INCLUSIVE:
+  a deliberate config-LEVER flip counts (log it as `work_audit` ≥ 1); the automatic per-window
+  meta round does NOT (it isn't your action); a pure no-op read leaves it false.
 
 Record it AFTER acting, never before — the row must describe what happened, not steer what
 you do. The harness reads `stagnation_flag`+`intervened` across the last rows for the
@@ -349,7 +351,8 @@ directions + their program assignments are auto-recorded as each island's brief
 (`structured_json`), and the SAMPLER reads them (see the islands note below) so islands
 diverge in BOTH their prompt direction AND the exemplar code shown — not text alone. You
 don't hand-author briefs. Your meta levers: `evo.meta_model` / `evo.meta_reasoning_effort`
-(default `azure-gpt-5.5` medium; raise to `pro@high` when worth it — pro rejects `low`);
+(default `azure-gpt-5.5` medium; to escalate set `meta_model: azure-gpt-5.4-pro` AND
+`meta_reasoning_effort: high` — two knobs, NOT a `model@effort` suffix; pro rejects `low`);
 `evo.meta_code_preview_chars` (default 1200 — shrink if meta cost climbs); or
 `evo.auto_meta:false` (suppresses the WHOLE round — global + per-island; islands keep their
 last brief). Its cost folds automatically; budget-gated and wrapped so a meta failure never
@@ -520,9 +523,10 @@ recommendation, forget the detail. For periodic structural reads, spawn
 ## Termination + end of run
 
 **Stop when:** the budget is exhausted; the user says stop; OR **five consecutive
-control-returns were each STAGNANT and each had an intervention** (a framework rewrite OR a
-DR) that still could not break the stagnation → the search is stuck despite intervening, so
-stop. This is now **harness-computed and auto-finalized** (parity with budget): the harness
+control-returns were each STAGNANT and each had an intervention** (a framework rewrite, a DR,
+OR a deliberate config-lever flip — the AUTOMATIC per-window meta round does NOT count, it
+isn't your action) that still could not break the stagnation → the search is stuck despite
+intervening, so stop. This is now **harness-computed and auto-finalized** (parity with budget): the harness
 reads your canonical `control_return` rows (`stagnation_flag`+`intervened`) via
 `journal.termination_streak`, and when the streak reaches `cadence.termination_streak`
 (default 5) the next `--until-decision` call returns
@@ -668,8 +672,8 @@ Many decisions that *look* like a code rewrite are already `evo.*` knobs. Prefer
 | `force_explore` / `llm_subset` | false / null | ignore the collapsed bandit (uniform) / restrict to a subset | re-open a starved/locked-out arm (the framework-audit check) |
 | `use_text_feedback` | true | feed the evaluator's failure reason into the fix/repair/meta prompts | false on a spoil-risk task — a COMPLETE suppression (gates the fix, sampled-ancestor, AND meta error-text channels — H9) |
 | `island_policy_driven` | false | drive spawn/migrate/retire via mutable `island_policy.py` at window boundaries | repairing population structure |
-| `brief_compose_mode` | replace | a per-island brief replaces vs augments the global direction | a strong per-island direction is being diluted by a stale global one |
-| `island_selection_strategy` / `enforce_island_separation` | uniform / true | island selection pressure (`uniform`=`equal` are aliases; `proportional`=by population; `weighted`=by island best-fitness) / same-island vs cross-island inspirations | spread sampling toward smaller islands → `proportional` (⚠️ `weighted` REINFORCES the leading island — use it to exploit, NOT to rescue a starved one); cross-pollination → separation `false` |
+| `brief_compose_mode` | replace | how a per-island brief combines with the global `meta_directions`: `replace` (default) = the brief STANDS IN for the global direction; `augment` = the brief LAYERS on top | NOTE (H8): under the default `replace`, once an island has a brief (window 1+) the global `meta_directions` is computed then DISCARDED per-gen — set `augment` to keep BOTH. The DR-grounding recipe relies on `replace` so its pinned direction steers the run (target it via the H9 parent/island pin, not the global direction). |
+| `island_selection_strategy` / `enforce_island_separation` (db_config) | uniform / true | island selection pressure (`uniform`=`equal` are aliases; `proportional`=by population count; `weighted`=by island best-fitness) / same-island vs cross-island inspirations | concentrate sampling on the LARGEST island → `proportional`; on the best-fitness island → `weighted`. ⚠️ BOTH REINFORCE the leader — NEITHER rescues a starved/small island (no live strategy does; small-island rescue needs `archive_floor_per_island` ↑ or a `_select_island` rewrite). cross-pollination → separation `false`. (These are `db_config` knobs, not `evo.*`.) |
 | `archive_floor_per_island` | 3 (db_config) | per-island archive floor — a dominant island can't evict another island below this many members (H2) | islands collapsing to one lineage → raise; a single-family task → 0 (pure global fitness) |
 | `migration_rate` / `migration_interval` | 0 / 10 (db_config) | island elite migration; **0 = OFF by default**. Execution IS wired (every archive add runs deferred migration), so flipping it on is a live config change — NOT a code rewrite | turn it on at BOOT (run.json `db_config`) OR mid-run (edit `db_config` at a control-return; the next relaunched cluster reads it — schema-safe) → `migration_rate` ≈ 0.05 |
 | `termination_streak` | 5 (cadence) | consecutive stagnant+intervened control-returns that auto-terminate the run | raise to give a stuck search more intervention attempts before stopping |

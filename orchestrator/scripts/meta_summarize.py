@@ -326,6 +326,14 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     n = int(payload.get("max_recommendations", 5))
     model = payload.get("model_name", "azure-gpt-5.5")
     effort = payload.get("reasoning_effort") or "medium"  # default medium (pro rejects "low")
+    # H7: meta does NOT parse a "model@effort" arm id (only the bandit's _parse_arm does), so a
+    # value like "azure-gpt-5.4-pro@high" resolved to a NONEXISTENT deployment and silently
+    # degraded EVERY meta round (no briefs/directions written, the only trace a calls.jsonl
+    # line). Split it here — BEFORE the mock branch — so both the two-knob form and a habitual
+    # @-suffix work. (The canonical config is evo.meta_model + evo.meta_reasoning_effort.)
+    if isinstance(model, str) and "@" in model:
+        model, _eff = model.split("@", 1)
+        effort = _eff or effort
 
     if payload.get("mock"):
         text = payload.get("mock_text", "") or ""

@@ -47,10 +47,11 @@ operating playbook — before acting. In short:
   Defer foundation ideas to the end-of-run **ending document**.
 - **Do not stop until a termination criterion is met:** budget exhausted; user says stop;
   OR five consecutive control-returns that were each STAGNANT and each had an intervention
-  (a framework rewrite OR a DR) that still could not break the stagnation. This is now
+  (a framework rewrite, a DR, OR a deliberate config-lever flip — the AUTOMATIC per-window meta
+  round does NOT count) that still could not break the stagnation. This is now
   harness-computed + auto-finalized (`return_reason="stagnation_intervention_exhausted"`,
   via `journal.termination_streak` over your canonical `control_return` rows); there is no
-  "≥1 DR" requirement — a DR just counts as an intervention. Keep launching the next cluster.
+  "≥1 DR" requirement — a DR just counts as one intervention class. Keep launching the next cluster.
 - **The budget is hard-capped in code and the ledger is crash-durable.** Set `budget_usd`;
   the harness sums every LLM cost (mutation/meta/DR/embeddings) + your logged interventions
   and hard-stops at the cap (`budget_exhausted`); a per-call ~$10 max-output-token cap
@@ -109,7 +110,7 @@ Both endpoints' base_url is built by appending `/openai/v1` to the bare resource
 
 ### Reasoning-effort gotcha
 
-Setting `reasoning_effort: low` errors out for `azure-gpt-5.4-pro` (it rejects `low`). Use `medium` (or `high`) for any pool containing `gpt-5.4-pro`. The cheaper models support all three. The **automatic per-window meta round** defaults to `azure-gpt-5.5` at `medium` (raise `evo.meta_model` to `azure-gpt-5.4-pro@high` only when the directions are worth the high cost — pro rejects `low`); novelty embeddings need no reasoning effort.
+Setting `reasoning_effort: low` errors out for `azure-gpt-5.4-pro` (it rejects `low`). Use `medium` (or `high`) for any pool containing `gpt-5.4-pro`. The cheaper models support all three. The **automatic per-window meta round** defaults to `azure-gpt-5.5` at `medium` (to escalate, set `evo.meta_model: azure-gpt-5.4-pro` **AND** `evo.meta_reasoning_effort: high` — two SEPARATE knobs; `meta_model` is the bare Azure deployment name, NOT a `model@effort` bandit-arm id. A `@high` suffix on `meta_model` is now auto-split as a safety net, but the two-knob form is canonical — pro rejects `low`); novelty embeddings need no reasoning effort.
 
 ### Smoke tests
 

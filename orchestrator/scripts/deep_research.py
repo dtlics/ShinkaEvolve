@@ -63,39 +63,42 @@ def _parse_brief(text: str) -> List[Dict[str, Any]]:
     """
     if not text:
         return []
-    # Strip markdown fences if present.
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-    blob = fenced.group(1) if fenced else text
-    # Find the first JSON object/array in the blob.
-    start = min(
-        [i for i in (blob.find("{"), blob.find("[")) if i != -1], default=-1
-    )
-    if start == -1:
-        return []
-    candidate = blob[start:]
-    try:
-        data = json.loads(candidate)
-    except json.JSONDecodeError:
-        # Try trimming to the last closing brace/bracket.
-        for end in range(len(candidate), start, -1):
+
+    def _items_from(blob: str):
+        start = min([i for i in (blob.find("{"), blob.find("[")) if i != -1], default=-1)
+        if start == -1:
+            return None
+        candidate = blob[start:]
+        try:
+            return _extract(json.loads(candidate))
+        except json.JSONDecodeError:
+            pass
+        # M6: trim from the end in CANDIDATE-relative coordinates (candidate is blob[start:],
+        # rebased to 0) — NOT the blob-coordinate `start`. The old `range(..., start, -1)` was
+        # EMPTY whenever the leading prose was longer than the JSON, so a billed brief that
+        # contained usable techniques was silently parsed to [].
+        for end in range(len(candidate), 0, -1):
             try:
-                data = json.loads(candidate[:end])
-                break
+                return _extract(json.loads(candidate[:end]))
             except json.JSONDecodeError:
                 continue
-        else:
-            return []
-    if isinstance(data, dict):
-        items = data.get("techniques") or data.get("items") or []
-    elif isinstance(data, list):
-        items = data
-    else:
-        items = []
-    out = []
-    for it in items:
-        if not isinstance(it, dict):
+        return None
+
+    def _extract(data):
+        if isinstance(data, dict):
+            return data.get("techniques") or data.get("items") or []
+        if isinstance(data, list):
+            return data
+        return None
+
+    # L45: try EACH fenced block (the techniques JSON may sit in a SECOND ``` fence after a
+    # non-JSON code sample — the old first-fence-wins missed it), then the unfenced text; take
+    # the first that yields items.
+    for blob in re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL) + [text]:
+        items = _items_from(blob)
+        if not items:
             continue
-        out.append(
+        out = [
             {
                 "idea": it.get("idea", ""),
                 "rationale": it.get("rationale", ""),
@@ -103,8 +106,12 @@ def _parse_brief(text: str) -> List[Dict[str, Any]]:
                 "reference_snippet": it.get("reference_snippet", ""),
                 "gotchas": it.get("gotchas", ""),
             }
-        )
-    return out
+            for it in items
+            if isinstance(it, dict)
+        ]
+        if out:
+            return out
+    return []
 
 
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -139,8 +146,11 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     # web-search surcharge (the DR model runs web_search internally; not in token usage).
     search_surcharge = float(payload.get("search_surcharge_usd", 0.30))
-    client, _base = get_dr_async_client()
     try:
+        # L40: construct the DR client INSIDE the try so a missing AZURE_DR_* env (RuntimeError)
+        # returns the documented degraded `refused` envelope instead of escaping main() as an
+        # ok:false crash that bypasses the orchestrator's refused-handling and journals nothing.
+        client, _base = get_dr_async_client()
         text, token_cost = asyncio.run(
             run_dr_call(
                 client,
@@ -161,6 +171,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         # means a "reproduce paper X" framing; never re-fire the same query shape.
         _txt = str(exc).lower()
         reason = ("content_filter" if ("content_filter" in _txt or "content filter" in _txt)
+                  else "dr_env_missing" if "azure_dr" in _txt  # L40: missing AZURE_DR_* creds
                   else f"dr_failed:{exc}")
         _billed = float(getattr(exc, "cost", 0.0) or 0.0)
         _submitted = bool(getattr(exc, "submitted", False))

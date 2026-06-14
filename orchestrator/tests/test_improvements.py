@@ -2628,6 +2628,32 @@ def test_m27_stagnation_abs_floor_fallback():
     return None
 
 
+def test_dr_parse_and_env_robustness():
+    # M6: a brief whose JSON is preceded by prose LONGER than the JSON used to parse to [] (the
+    # trim loop's lower bound was a blob-coordinate on the rebased candidate). L45: the
+    # techniques JSON in a SECOND fence must still be found. L40: a missing-env client
+    # construction returns the degraded refused envelope, not an ok:false crash.
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import deep_research
+    import shinka.llm.agent.dr_client as drc
+    prose = "Here is my detailed analysis of the problem. " * 5
+    one = deep_research._parse_brief(prose + '[{"idea":"x","rationale":"y"}]' + " Hope this helps.")
+    assert len(one) == 1 and one[0]["idea"] == "x", one
+    two = deep_research._parse_brief(
+        "```python\nprint(1)\n```\nthen:\n```json\n[{\"idea\":\"z\"}]\n```")
+    assert len(two) == 1 and two[0]["idea"] == "z", two
+    _orig = drc.get_dr_async_client
+    try:
+        def _raise():
+            raise RuntimeError("AZURE_DR_ENDPOINT is required")
+        drc.get_dr_async_client = _raise
+        out = deep_research.main({"query": "q", "program_context": "c"})
+        assert out["refused"] is True and out["reason"] == "dr_env_missing", out
+    finally:
+        drc.get_dr_async_client = _orig
+    return None
+
+
 def test_h10_island_policy_decoupled_gates():
     # H10: island_policy decides spawn/migrate from its OWN payload gates, so it works with the
     # db_config auto-triggers OFF (the documented prerequisite) instead of being a no-op. Without
@@ -2803,6 +2829,7 @@ if __name__ == "__main__":
         ("h7_meta_model_effort_shorthand", test_h7_meta_model_effort_shorthand),
         ("h9_parent_pin_targets_program", test_h9_parent_pin_targets_program),
         ("h10_island_policy_decoupled_gates", test_h10_island_policy_decoupled_gates),
+        ("dr_parse_and_env_robustness", test_dr_parse_and_env_robustness),
         ("validate_select_llm_all_modes", test_validate_select_llm_all_modes),
         ("dr_refusal_graceful", test_dr_refusal_graceful),
         ("deploy_bundle_rejected_guard", test_deploy_bundle_rejected_guard),

@@ -1,6 +1,6 @@
 ---
 name: shinka-convert
-description: Convert an existing codebase in the current working directory into a ShinkaEvolve task directory by snapshotting the relevant code, adding evolve blocks, and generating `evaluate.py` plus Shinka runner/config files. Use when the user wants to optimize existing code with Shinka instead of creating a brand-new task from a natural-language description.
+description: Convert an existing codebase in the current working directory into a ShinkaEvolve task directory by snapshotting the relevant code, adding evolve blocks, and generating `evaluate.py` plus an `initial.<ext>` baseline (no per-task runner — the shinka-orchestrator outer loop drives the run). Use when the user wants to optimize existing code with Shinka instead of creating a brand-new task from a natural-language description.
 ---
 
 # Shinka Convert Skill

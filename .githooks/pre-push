@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
+# L92: run the REAL offline suite (orchestrator/tests, per pyproject `testpaths`). The old hook
+# linted a removed `tests/` dir via `uv` (not installed) and failed every push the moment anyone
+# wired hooksPath. Resolve a python that can import pytest; skip with a clear message if none is
+# found (CI gates pushes too). Mirrors .github/workflows/ci.yml's `pytest -m "not requires_secrets"`.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
-echo "[pre-push] ruff"
-uv run ruff check tests --exclude tests/file.py
+PY=""
+for c in python python3 "${CONDA_PREFIX:-}/python.exe" "${CONDA_PREFIX:-}/bin/python"; do
+  if [ -n "$c" ] && command -v "$c" >/dev/null 2>&1 && "$c" -c "import pytest" >/dev/null 2>&1; then
+    PY="$c"; break
+  fi
+done
 
-echo "[pre-push] mypy"
-uv run mypy --follow-imports=skip --ignore-missing-imports tests/test_*.py tests/conftest.py
+if [ -z "$PY" ]; then
+  echo "[pre-push] no python with pytest on PATH — skipping local tests (CI will run them)"
+  exit 0
+fi
 
-echo "[pre-push] pytest + coverage"
-uv run --with pytest-cov pytest -q --cov=shinka --cov-report=term-missing
+echo "[pre-push] pytest (offline suite: orchestrator/tests)"
+PYTHONPATH="$repo_root${PYTHONPATH:+:$PYTHONPATH}" "$PY" -m pytest -q -m "not requires_secrets"

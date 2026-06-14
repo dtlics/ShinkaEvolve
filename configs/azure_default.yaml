@@ -1,49 +1,27 @@
-# Default Azure-backed Shinka portfolio (model-list reference).
-# NOTE: the `shinka_run`/`shinka_launch` CLIs were removed in the Azure-only prune.
-# The orchestrator drives runs via `orchestrator/harness/run_window.py` (see
-# .claude/skills/shinka-orchestrator/SKILL.md); copy the model list below into your run.json `evo.llm_models`.
+# Azure model-list + bandit-kwargs REFERENCE for the run.json `evo.*` block.
 #
-# Models below correspond to deployments in the "Shinka" Foundry project (East US 2 Global Standard).
-# Pricing, reasoning behavior, and temperature constraints are read from
-# `shinka/llm/providers/pricing.csv` automatically.
+# L84: the orchestrator (orchestrator/harness/run_window.py) reads run.json, NOT this YAML — this
+# is a copy-from reference only. ONLY the keys the orchestrator actually reads from `evo.*` are
+# kept here. PRUNED (read by nothing on the orchestrator path): `llm_kwargs`, `meta_llm_models`/
+# `meta_llm_kwargs`, `novelty_llm_models`/`novelty_llm_kwargs`, the bare `llm_dynamic_selection:
+# ucb1` string, and `max_api_costs` (which read like a spend cap but capped nothing — the REAL
+# cap is run.json `budget_usd`). The meta model is set via `evo.meta_model` + `evo.meta_reasoning_effort`.
+# Pricing / reasoning / temperature constraints are read from shinka/llm/providers/pricing.csv.
 
 evo:
-  # Proposal pool — bandit chooses among these per generation.
+  # Proposal pool — the bandit chooses among these per generation. Pro is NOT in the default pool
+  # (it is reserved for the meta round / DR grounding run); the shipped starter uses mini + 5.5.
   llm_models:
-    - azure-gpt-5.4-pro     # strong reasoning anchor ($30/$180 per 1M tokens)
-    - azure-gpt-5.5         # newer, mid-cost reasoning ($5/$30)
-    - azure-gpt-5.3-codex   # coding-specialized; let UCB decide if it pays off ($1.75/$14)
-    - azure-gpt-5.4-mini    # cheap fallback for easy generations ($0.75/$4.50)
+    - azure-gpt-5.4-mini    # cheap workhorse ($0.75/$4.50 per 1M)
+    - azure-gpt-5.5         # mid-cost reasoning ($5/$30)
+    - azure-gpt-5.3-codex   # coding-specialized; let the bandit decide if it pays off ($1.75/$14)
 
-  llm_kwargs:
-    temperatures: [0, 0.5, 1.0]      # ignored for these reasoning models (forced to 1.0)
-    reasoning_efforts: [medium, high] # gpt-5.4-pro REQUIRES >= medium (low rejected)
-    max_tokens: 32768
-
-  # Cheap model only — meta and novelty roles don't need premium reasoning.
-  meta_llm_models:
-    - azure-gpt-5.4-mini
-  meta_llm_kwargs:
-    temperatures: [0]
-    reasoning_efforts: [low]
-    max_tokens: 16384
-
-  novelty_llm_models:
-    - azure-gpt-5.4-mini
-  novelty_llm_kwargs:
-    temperatures: [0]
-    reasoning_efforts: [low]
-
-  # Azure embedding deployment. The bare 'text-embedding-3-small' name routes
-  # to the OpenAI provider and demands OPENAI_API_KEY — keep the azure- prefix.
+  # Azure embedding deployment. The bare 'text-embedding-3-small' name routes to the OpenAI
+  # provider and demands OPENAI_API_KEY — keep the azure- prefix.
   embedding_model: azure-text-embedding-3-small
 
-  # UCB1 cost-aware bandit — learns which model wins on this task.
-  llm_dynamic_selection: ucb1
+  # Cost-aware bandit kwargs (the only selection knobs the orchestrator reads).
   llm_dynamic_selection_kwargs:
-    cost_aware_coef: 0.5    # 0=reward-only, 1=cost-only. Raise toward 0.7 if budget-sensitive.
+    cost_aware_coef: 0.25   # 0=reward-only, 1=cost-only (SKILL shipped default; raise toward 0.7 if budget-sensitive)
     exploration_coef: 1.0
     epsilon: 0.2
-
-  # Hard cap. Override per task — start small while calibrating.
-  max_api_costs: 25.0

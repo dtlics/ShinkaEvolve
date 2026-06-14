@@ -21,8 +21,9 @@ shinka/configs/
 This `configs/` directory at the repo root holds:
 
 * [orchestrator_run.default.json](orchestrator_run.default.json) — the canonical run-config starter the `shinka-setup` / `shinka-convert` skills point you to. Copy it next to your run, set `task.*` / `budget_usd` / a no-spoil `task_sys_msg`, and drive `orchestrator/harness/run_window.py`. It ships `task_sys_msg` as the `__UNSET_AUTHOR_AT_BOOT__` sentinel, so the run refuses to start until you author the goal.
-* [azure_default.yaml](azure_default.yaml) — Azure model portfolio (the four `azure-gpt-5.*` chat deployments + the `azure-text-embedding-3-small` embedding deployment) with sensible UCB bandit + reasoning_effort settings. Use as a base for per-task `evo.*` overrides.
+* [azure_default.yaml](azure_default.yaml) — a REFERENCE for the run.json `evo.llm_models` + `evo.embedding_model` + `evo.llm_dynamic_selection_kwargs` (the only `evo.*` keys the orchestrator reads). Copy those into your run config; do NOT copy the pruned `meta_llm_models`/`novelty_llm_models`/`llm_kwargs`/`max_api_costs` keys — they were read by nothing (L84).
 
 The orchestrator run config (`orchestrator_run.json`) supersedes the old
-`shinka_launch` CLI; copy the model list from `azure_default.yaml` into your run
-config's `evo.*` block rather than launching from here.
+`shinka_launch` CLI; copy ONLY the readable keys (`llm_models`, `embedding_model`,
+`llm_dynamic_selection_kwargs`) from `azure_default.yaml` into your run config's
+`evo.*` block rather than launching from here.

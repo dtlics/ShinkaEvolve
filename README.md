@@ -26,9 +26,11 @@ orchestrator/         the outer-loop framework code
   scripts/           JSON-contract subroutines — mutable strategy policies
                      (sample_parent, novelty_check, select_llm, compute_reward,
                      record_policy, stagnation_detector, island_policy,
-                     construct_mutation_prompt, mutate) + immutable foundation
-                     (evaluate, archive_record, archive_query, diagnostics,
-                     deep_research, _common)
+                     cadence_policy, island_brief, construct_mutation_prompt;
+                     meta_summarize + mutate are prompt-mutable / body-foundation)
+                     + immutable foundation (evaluate, archive_record, archive_query,
+                     diagnostics, deep_research, repair_record, spawn_island,
+                     _azure, _common)
   harness/           run_window (inner loop), validate_strategy, strategy_store, journal
   strategy_history/  append-only audit of every deployed strategy version
   NOTES.md           the orchestrator's per-run note (cleared at each run start)
@@ -37,7 +39,8 @@ shinka/              slimmed framework source (Azure-only) — imported in-place
 configs/             orchestrator_run.default.json (run-config starter) + azure_default.yaml
 tasks/               user tasks (evaluate.py + initial.<ext>)
 examples/circle_packing/  reference task used by the smoke test
-scripts/test_azure.py     Azure deployment smoke test
+scripts/test_azure.py     Azure (main-resource) deployment smoke test
+scripts/test_dr.py        deep-research resource (o3-deep-research) smoke test
 taxonomy.md               four-cell mutability map of the strategy files (HISTORICAL)
 ```
 

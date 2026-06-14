@@ -300,8 +300,9 @@ evaluator is foundation). Common flaw-signals (read off `steps.jsonl` + the wind
    bounded two ways now: lower effort, or keep it — the bg transport's two-level timeout means a
    genuinely-stuck call no longer rides the whole 1h wall (see "How you launch the inner loop").
 4. Decide whether to call deep research for SOTA at onset (see the DR section). Use any
-   brief to pick the initial program, `num_islands` (4 default; 8 if multiple algorithmic
-   families compete), and to sharpen the goal.
+   brief to pick the initial program, `num_islands` (L83: the starter ships 4; the ENGINE
+   default if you omit it is 2 — set it explicitly; 8 if multiple algorithmic families
+   compete), and to sharpen the goal.
 5. Author `run.json` (schema below). Default strategy files as shipped. Then warmup.
 
 ## What you may change, and what you must not (tiered mutability)
@@ -524,8 +525,9 @@ attempt before removal to a stronger model. The single combined failure-rate is 
 read at a glance *because* each trial's specific failure detail is logged and fed verbatim
 into the fix prompt; open a failing slot's record for the failure kind.
 
-Escalate to `subagents/debug-agent.md` only when one candidate exhausts its retry budget
-across two parents; write its report to `strategy_history/debug_<w>.md`, act on its one
+Escalate to `subagents/debug-agent.md` only when the SAME failure signature recurs across two
+DIFFERENT parents in a window (each having exhausted its in-loop repair budget — L91, matching
+the subagent's own precondition); write its report to `strategy_history/debug_<w>.md`, act on its one
 recommendation, forget the detail. For periodic structural reads, spawn
 `subagents/archive-analyst.md`.
 

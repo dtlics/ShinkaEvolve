@@ -90,7 +90,7 @@ orchestrator forces the repo root onto `sys.path`. From the repo root,
 ## Language Support (`initial.<ext>`)
 Shinka supports multiple candidate-program languages. Choose one, then keep extension/config/evaluator aligned.
 
-| `evo_config.language` | `initial.<ext>` |
+| `task.language` (in run.json) | `initial.<ext>` |
 |---|---|
 | `python` | `initial.py` |
 | `julia` | `initial.jl` |
@@ -104,7 +104,7 @@ Rules:
 - `evaluate.py` stays the evaluator entrypoint.
 - Python candidates: prefer `run_shinka_eval` + `experiment_fn_name`.
 - Non-Python candidates: evaluate via `subprocess` and write `metrics.json` + `correct.json`.
-- Always set both `evo_config.language` and matching `evo_config.init_program_path`.
+- Always set both `task.language` and a matching `task.init_program_path` in the run config (L4: the pruned `evo_config.*` keys are read by nothing; the live keys are `task.*` — see the shinka-orchestrator run.json schema).
 
 ## Template: `initial.<ext>` (Python example)
 ```py

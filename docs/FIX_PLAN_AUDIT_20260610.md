@@ -142,6 +142,11 @@ The run owner ruled on the four gating forks:
 ---
 
 ### ✅ Wave 2 verification
+
+> **STATUS 2026-06-13 — Wave 2 ~85% LANDED + GREEN (78 passed).** Committed in 5 sub-commits:
+> 2a `H13`+`M47` (eval ground-truth); 2b `H6`+`L68/L70/L72` (ledger durability); 2c `H4`+`H5`+`M27`+`N18` (rollback safety nets); 2d `H3` (errored_fraction); 2e `M8`+`L14`+`N12` (NaN-safe sampling + azure embedding defaults). Each landed code + docs + tests.
+> **STILL TODO in Wave 2** (deferred to the next continuation — all delicate/medium and best done fresh): `M29`/`M34`/`L17`/`L16`/`N4` (novelty observability — more diagnostics fields + the keep-better block reorder), `M46` (all-tombstoned re-seed), `M2` (per-candidate durable cost stream — the C6 reviewer's double-count-risk item).
+
 1. Full suite green — the diagnostics-additive batch changed `diagnostics.py`/`archive_query` output shape, so confirm `test_diagnostics_sensor_fields` was updated and passes and the 3 `test_rollback_*` accepts are unchanged.
 2. **H4:** `decide({}, {...,"apply_failure_rate":1.0})["regressed"] is True`; a valid flat window (`apply_failure_rate<1.0`) → `False`.
 3. **H5:** prior+measure with balanced cumulative `llm_bandit_counts` but collapsed per-window `llm_bandit_window_counts` → `regressed True` (arm 4a now reachable mid-run).

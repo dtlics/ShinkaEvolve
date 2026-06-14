@@ -7,7 +7,7 @@ from dataclasses import dataclass, asdict, field
 from typing import Optional, Dict, Any, Tuple, Union, List
 from concurrent.futures import ThreadPoolExecutor
 from .local import submit as submit_local, monitor as monitor_local
-from .local import ProcessWithLogging
+from .local import ProcessWithLogging, kill_process_tree
 from .slurm import (
     submit_docker as submit_slurm_docker,
     submit_conda as submit_slurm_conda,
@@ -332,7 +332,7 @@ class JobScheduler:
                                 f"timeout of {self.config.time}. Killing. "
                                 f"=> Gen. {job.generation}"
                             )
-                        job.job_id.kill()
+                        kill_process_tree(job.job_id)  # M47: tree-kill (conda grandchild)
                         return False
 
                 # More robust status checking with exception handling
@@ -431,7 +431,7 @@ class JobScheduler:
                 else:
                     # For local jobs, kill the process
                     if isinstance(job_id, ProcessWithLogging):
-                        job_id.kill()
+                        kill_process_tree(job_id)  # M47: tree-kill (conda grandchild)
                         return True
                 return False
             except Exception as e:

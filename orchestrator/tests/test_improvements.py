@@ -2509,6 +2509,35 @@ def test_h2_diff_embedding_separates_distinct_edits():
     return None
 
 
+def test_h13_pre_clean_neutralizes_stale_results():
+    # H13: a REUSED gen dir can hold a PRIOR candidate's metrics.json/correct.json. evaluate.py
+    # now wipes results_dir before each eval, so a result-less death (here: an evaluator that
+    # exits before writing) returns correct=False + score 0.0 — NOT the stale correct=true/9.9
+    # that would otherwise be read as this candidate's ground truth and fabricate reward.
+    import json as _json
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import evaluate as _evaluate  # orchestrator/scripts/evaluate.py
+    with tempfile.TemporaryDirectory() as td:
+        gen = os.path.join(td, "gen_0")
+        results_dir = os.path.join(gen, "results")
+        os.makedirs(results_dir)
+        with open(os.path.join(results_dir, "correct.json"), "w", encoding="utf-8") as f:
+            _json.dump({"correct": True}, f)
+        with open(os.path.join(results_dir, "metrics.json"), "w", encoding="utf-8") as f:
+            _json.dump({"combined_score": 9.9, "public": {}, "private": {}}, f)
+        prog = os.path.join(gen, "main.py")
+        open(prog, "w", encoding="utf-8").write("x = 1\n")
+        evalp = os.path.join(td, "evaluate_prog.py")  # dies before writing any results
+        open(evalp, "w", encoding="utf-8").write("import sys\nsys.exit(1)\n")
+        out = _evaluate.main({
+            "program_path": prog, "results_dir": results_dir,
+            "eval_program_path": evalp, "job_type": "local", "time": "00:01:00",
+        })
+        assert out["correct"] is False, out
+        assert out["combined_score"] == 0.0, f"stale 9.9 must NOT survive the H13 pre-clean: {out}"
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
@@ -2538,6 +2567,7 @@ if __name__ == "__main__":
         ("immediate_fix", test_immediate_fix),
         ("mutate_fix_routes_to_full_applier", test_mutate_fix_routes_to_full_applier),
         ("h2_diff_embedding_separates_distinct_edits", test_h2_diff_embedding_separates_distinct_edits),
+        ("h13_pre_clean_neutralizes_stale_results", test_h13_pre_clean_neutralizes_stale_results),
         ("meta_summarize_parsing", test_meta_summarize_parsing),
         ("meta_direction_sampling", test_meta_direction_sampling),
         ("call_logging", test_call_logging),

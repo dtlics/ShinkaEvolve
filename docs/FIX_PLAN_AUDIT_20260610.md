@@ -232,6 +232,17 @@ The run owner ruled on the four gating forks:
 ---
 
 ### ✅ Wave 4 verification (per subsystem)
+
+> **STATUS 2026-06-14 — Wave 4 partial LANDED + GREEN (84 passed).** Committed: 4a DR parse/env
+> (M6/L45/L40); 4b eval keystone (M48 + M49); 4c bandit robustness (M25/M24/L73/L74/L75); 4d DR
+> cancel + docs (L46/M5/L85/M40). Tests added: m48_eval_foundation_smoke, dr_parse_and_env_robustness.
+> **STILL TODO in Wave 4:** meta (M1 re-hydrate, M14 meta_health, L19–L23); islands (M15/M16/M18/
+> M28/M42/L30–L39); strategy-store (M19–M22/L60–L67); bandit reward baseline (M23/M26; M43 geometry
+> = foundation, deferred to ending doc); M2 (per-candidate cost stream), M45 (rollback noise); the
+> Wave 3 doc tail (M37/M38/M39, L41/L43/L88, + the L-series doc corrections); Wave 5 lows/nits; and
+> the S1/S2 design-ruling [FND] implementations (cadence→foundation reclassify; warmup keep-approved
+> fold-back). All queued + resumable from the commits + this plan.
+
 1. **Islands:** M15 (spawn fires ≤once per stagnation episode), M18 (a spawned idx≥`num_islands` participates in migration), M28 (`diversity_kind` discriminator present), M10 (cross-island child's island == parent's), M16 retire executor protects island 0 + global-best.
 2. **Bandit:** M23/M26 (neg-parent floored arm ≠ failed arm; one repair success doesn't flip the posterior), M24 (escalated repair credits no arm; spend still in the ledger), M25 (atomic pkl + reset signal on a corrupt load).
 3. **Meta:** M1 (re-hydrate `failure_note` across relaunch), M14 (`meta_health` in the returned diag), L19/L23 (per-island recency floor — no `(no recent attempts)` for a populated island).

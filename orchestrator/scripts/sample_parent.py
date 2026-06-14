@@ -184,7 +184,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     cfg_kwargs = dict(payload.get("db_config", {}))
     cfg_kwargs["db_path"] = db_path
     config = DatabaseConfig(**cfg_kwargs)
-    embedding_model = payload.get("embedding_model", "text-embedding-3-small")
+    embedding_model = payload.get("embedding_model", "azure-text-embedding-3-small")
     rng = random.Random(payload.get("seed"))
 
     db = ProgramDatabase(config, embedding_model=embedding_model, read_only=True)
@@ -225,12 +225,18 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Bootstrap / fix fallback: no correct archived programs yet.
     if not archived_correct:
         # Prefer the best correct program; else the earliest program (the seed).
-        correct = [p for p in programs if getattr(p, "correct", False)]
-        # Exclude tombstoned (repair-removed) rows from the bootstrap fallback so a dead
-        # row is never re-selected as the seed (correct programs are never tombstoned).
+        # L14: exclude tombstoned rows from the correct pool too. The old comment claimed
+        # "correct programs are never tombstoned" — FALSE since keep-the-better tombstones a
+        # CORRECT incumbent (H3/H5), so a dead correct row could otherwise be re-seeded here.
+        correct = [p for p in programs
+                   if getattr(p, "correct", False) and not _is_tombstoned(p)]
         live_incorrect = [p for p in programs if not _is_tombstoned(p)]
         if correct:
-            parent = max(correct, key=lambda p: getattr(p, "combined_score", 0.0))
+            # M8: _finite_score so a stored None/NaN combined_score can't raise (None vs
+            # float) — the bootstrap/pre-brief sorts used RAW scores while the main weighted
+            # path already guards with _finite_score (an unguarded NaN/None crashed the slot
+            # and made --resume a crash-loop).
+            parent = max(correct, key=lambda p: _finite_score(getattr(p, "combined_score", 0.0)))
             needs_fix = False
         elif live_incorrect:
             parent = min(live_incorrect, key=lambda p: getattr(p, "generation", 0))
@@ -303,7 +309,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         # else: a direction with no realized programs yet → direction-centered, code optional.
     else:
         # Pre-brief default: top-k by score (excluding parent) + a couple of elites.
-        ranked = sorted(pool, key=lambda p: getattr(p, "combined_score", 0.0), reverse=True)
+        ranked = sorted(pool, key=lambda p: _finite_score(getattr(p, "combined_score", 0.0)), reverse=True)  # M8: NaN/None-safe
         top_k_n = int(getattr(config, "num_top_k_inspirations", 1))
         top_k = [p.id for p in ranked if p.id != parent.id][:top_k_n]
         arch_n = int(getattr(config, "num_archive_inspirations", 1))

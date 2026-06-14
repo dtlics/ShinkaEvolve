@@ -46,7 +46,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     cfg_kwargs = dict(payload.get("db_config", {}))
     cfg_kwargs["db_path"] = db_path
     config = DatabaseConfig(**cfg_kwargs)
-    embedding_model = payload.get("embedding_model", "text-embedding-3-small")
+    embedding_model = payload.get("embedding_model", "azure-text-embedding-3-small")
 
     db = ProgramDatabase(config, embedding_model=embedding_model, read_only=False)
     try:

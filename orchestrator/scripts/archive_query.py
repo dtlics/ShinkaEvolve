@@ -56,7 +56,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     db_path = payload["db_path"]
     db_config_kwargs = dict(payload.get("db_config", {}))
     db_config_kwargs["db_path"] = db_path
-    embedding_model = payload.get("embedding_model", "text-embedding-3-small")
+    embedding_model = payload.get("embedding_model", "azure-text-embedding-3-small")
     query_type = payload.get("query_type", "summary")
 
     config = DatabaseConfig(**db_config_kwargs)

@@ -100,7 +100,7 @@ def island_health(
                 {
                     "db_path": db_path,
                     "db_config": db_config or {},
-                    "embedding_model": embedding_model or "text-embedding-3-small",
+                    "embedding_model": embedding_model or "azure-text-embedding-3-small",
                     "query_type": "all",
                     "include_embedding": True,
                 }
@@ -135,7 +135,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         {
             "db_path": payload["db_path"],
             "db_config": db_config,
-            "embedding_model": payload.get("embedding_model", "text-embedding-3-small"),
+            "embedding_model": payload.get("embedding_model", "azure-text-embedding-3-small"),
             "query_type": "all",
         }
     )["result"]
@@ -183,7 +183,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         _cfg_kwargs["db_path"] = payload["db_path"]
         _db = ProgramDatabase(
             DatabaseConfig(**_cfg_kwargs),
-            embedding_model=payload.get("embedding_model", "text-embedding-3-small"),
+            embedding_model=payload.get("embedding_model", "azure-text-embedding-3-small"),
             read_only=False,
         )
         try:

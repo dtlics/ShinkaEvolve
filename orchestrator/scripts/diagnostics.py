@@ -80,7 +80,7 @@ def _model_collapse(counts: Dict[str, Any], frac: float = 0.85, min_pulls: int =
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     db_path = payload["db_path"]
     db_config = payload.get("db_config", {})
-    embedding_model = payload.get("embedding_model", "text-embedding-3-small")
+    embedding_model = payload.get("embedding_model", "azure-text-embedding-3-small")
 
     # Read current archive state (best score + per-island health).
     summary = archive_query.main(

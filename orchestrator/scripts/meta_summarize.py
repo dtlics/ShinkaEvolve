@@ -138,7 +138,7 @@ def _gather_recent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not db_path:
         return []
     db_config = payload.get("db_config", {}) or {}
-    embedding_model = payload.get("embedding_model", "text-embedding-3-small")
+    embedding_model = payload.get("embedding_model", "azure-text-embedding-3-small")
     n_recent = int(payload.get("n_recent", 16) or 16)
     # F4 (mutable knob): how much of the context is recent FAILURES vs top performers.
     # Default 0.5 reproduces today's even split; raise toward 0.75 when failures

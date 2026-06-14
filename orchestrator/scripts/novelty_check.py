@@ -69,7 +69,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         {
             "db_path": payload["db_path"],
             "db_config": payload.get("db_config", {}),
-            "embedding_model": payload.get("embedding_model", "text-embedding-3-small"),
+            "embedding_model": payload.get("embedding_model", "azure-text-embedding-3-small"),
             "query_type": "all",
             "include_embedding": True,
             "include_metadata": True,

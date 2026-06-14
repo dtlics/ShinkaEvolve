@@ -255,8 +255,18 @@ def _bootstrap_initial(cfg: Dict[str, Any]) -> float:
                 "query_type": "count",
             }
         )["result"]
-        if count["total"] > 0:
+        # M46: gate on LIVE rows, not total. When total>0 but live==0 every row is
+        # tombstoned (repair struck out the whole population incl. the seed) — fall through
+        # to RE-SEED from init_program_path so the run recovers instead of crash-looping
+        # (sample_parent would otherwise raise "archive is empty"). Auto-reseed (the seed is
+        # known-correct by construction at boot) with a stderr event so it is visible.
+        if int(count.get("live", count.get("total", 0)) or 0) > 0:
             return 0.0
+        if int(count.get("total", 0) or 0) > 0:
+            import sys as _sys
+
+            print("[bootstrap] every archived row is tombstoned (live=0) — re-seeding from "
+                  "init_program_path to recover the run", file=_sys.stderr)
 
     task = cfg["task"]
     init_path = task["init_program_path"]
@@ -529,7 +539,16 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     if repair:
         _sp_payload["select"] = "errored"
         _sp_payload["repair_attempt_cap"] = int(evo.get("repair_attempt_cap", 2) or 2)
-    sp = sample_parent.main(_sp_payload)
+    try:
+        sp = sample_parent.main(_sp_payload)
+    except RuntimeError as _exc:
+        # M46: the live population is empty (every row tombstoned mid-cluster) — sample_parent
+        # can't pick a parent. Re-seed from init_program_path (fold its embed cost) and retry
+        # once; if it STILL fails the run is genuinely unrecoverable, so re-raise.
+        if "archive is empty" not in str(_exc):
+            raise
+        counters["cost"] = counters.get("cost", 0.0) + float(_bootstrap_initial(cfg) or 0.0)
+        sp = sample_parent.main(_sp_payload)
     # A repair generation = repair requested AND the sampler returned an errored parent
     # to fix (empty errored pool → needs_fix False → this behaves as a normal slot).
     _repair_gen = bool(repair and sp.get("needs_fix"))

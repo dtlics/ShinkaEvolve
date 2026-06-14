@@ -2628,6 +2628,50 @@ def test_m27_stagnation_abs_floor_fallback():
     return None
 
 
+def test_m46_count_live_excludes_tombstoned():
+    # M46: archive_query 'count' reports live (non-tombstoned) rows so the bootstrap can detect
+    # an all-tombstoned archive (live==0 while total>0) and re-seed instead of crash-looping.
+    import dataclasses as _dc
+    import tempfile
+    from shinka.database import DatabaseConfig, Program, ProgramDatabase
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import archive_query
+
+    def _mk(pid):
+        kw = {}
+        for f in _dc.fields(Program):
+            if f.default is not _dc.MISSING or f.default_factory is not _dc.MISSING:
+                continue
+            tn = getattr(f.type, "__name__", str(f.type))
+            kw[f.name] = {"str": "", "int": 0, "float": 0.0, "bool": False}.get(tn, None)
+        kw.update(id=pid, code=f"# {pid}\nx = 1\n", combined_score=0.5, correct=True)
+        names = {f.name for f in _dc.fields(Program)}
+        if "generation" in names:
+            kw.setdefault("generation", 0)
+        if "language" in names:
+            kw["language"] = "python"
+        p = Program(**kw)
+        p.metadata = {}
+        return p
+
+    with tempfile.TemporaryDirectory() as td:
+        dbp = os.path.join(td, "p.sqlite")
+        cfg = {"num_islands": 1, "archive_size": 20}
+        db = ProgramDatabase(DatabaseConfig(db_path=dbp, **cfg), embedding_model="", read_only=False)
+        try:
+            for pid in ("a", "b"):
+                db.add(_mk(pid))
+            c0 = archive_query.main({"db_path": dbp, "db_config": cfg, "query_type": "count"})["result"]
+            assert c0["total"] == 2 and c0["live"] == 2, c0
+            db.tombstone_program("a")
+            db.tombstone_program("b")
+        finally:
+            db.close()
+        c1 = archive_query.main({"db_path": dbp, "db_config": cfg, "query_type": "count"})["result"]
+        assert c1["total"] == 2 and c1["live"] == 0, c1  # all tombstoned → bootstrap re-seeds
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
@@ -2651,6 +2695,7 @@ if __name__ == "__main__":
         ("snapshot_restore_state", test_snapshot_restore_state),
         ("rollback_fail_closed_and_collapse", test_rollback_fail_closed_and_collapse),
         ("m27_stagnation_abs_floor_fallback", test_m27_stagnation_abs_floor_fallback),
+        ("m46_count_live_excludes_tombstoned", test_m46_count_live_excludes_tombstoned),
         ("validate_select_llm_all_modes", test_validate_select_llm_all_modes),
         ("dr_refusal_graceful", test_dr_refusal_graceful),
         ("deploy_bundle_rejected_guard", test_deploy_bundle_rejected_guard),

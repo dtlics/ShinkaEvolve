@@ -97,10 +97,18 @@ def _dispatch(db, query_type: str, payload: Dict[str, Any]):
 
     if query_type == "count":
         correct = sum(1 for p in programs if getattr(p, "correct", False))
+        # M46: LIVE (non-tombstoned) rows. The bootstrap must re-seed when EVERY row is
+        # tombstoned (live==0) even though total>0 — otherwise the run can neither sample a
+        # parent (sample_parent raises) nor re-seed, a permanent crash-loop needing DB surgery.
+        live = sum(
+            1 for p in programs
+            if not ((getattr(p, "metadata", None) or {}).get("repair_tombstoned") is True)
+        )
         return {
             "total": len(programs),
             "correct": correct,
             "incorrect": len(programs) - correct,
+            "live": live,
         }
 
     if query_type == "top_n":

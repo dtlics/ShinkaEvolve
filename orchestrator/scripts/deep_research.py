@@ -5,7 +5,8 @@ Do NOT rewrite this. It wraps shinka's ``o3-deep-research`` path (a separate
 Azure resource, ~$5/call). The orchestrator is free to *call* it and *interpret*
 its output, but must not change its body. Per the SKILL.md: call it at problem
 onset (to seed the initial program / island count / prompt) and at stuck-
-stagnation moments (after ≥2 strategy rewrites failed to break a plateau). Be
+stagnation moments (L43 — per SKILL.md: after a meta round AND at least one cheaper move have
+not moved the best score; there is no fixed "N rewrites" threshold). Be
 deliberate — it is the most expensive single action in the system. Before calling,
 the orchestrator runs the SKILL.md "pre-flight self-check": the QUERY must target
 GENERAL SOTA for the task/sub-task, never "reproduce a specific named paper" (that is

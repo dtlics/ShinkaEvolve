@@ -155,15 +155,12 @@ construction* is the evolvable part.
 
 **Non-obvious calls, justified:**
 
-- *The whole 4-stage DR pipeline is immutable, not just the stage-C call.* The
-  drift gate (A), novelty cache (B), and grounding (D) are the cost-control and
-  quality scaffolding around an expensive call. Letting the orchestrator rewrite
-  them risks blowing the budget (`dr_max_calls_per_run`) — exactly the failure
-  doom-Fix-2 closed. The orchestrator's freedom is limited to *whether to call*
-  `deep_research.py` and *how to use its brief*.
-- *DR stage A's drift judge uses a cheap LLM but stays immutable* for the same
-  reason: it gates spend. Its prompt is technically editable, but it lives inside
-  the immutable DR unit; lean-immutable wins.
+- *DR is now a SINGLE Stage-C call* (`deep_research.run_dr_call` → `dr_client`), NOT the old
+  4-stage pipeline (L41: the drift gate A / novelty cache B / grounding D and the
+  `dr_max_calls_per_run` knob were removed in the prune; the dead `DeepResearchModel` /
+  `deep_research_summarizer.py` are gone). Spend is bounded by the run's `budget_usd` + the
+  per-call cost; the orchestrator's freedom is limited to *whether to call* `deep_research.py`
+  and *how to use its brief* — it never rewrites the wrapper.
 
 ---
 

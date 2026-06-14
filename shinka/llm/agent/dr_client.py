@@ -43,10 +43,6 @@ import openai
 from shinka.env import load_shinka_dotenv
 
 from ..constants import PER_REQUEST_TIMEOUT
-from .background_model import (
-    BackgroundOpenAIResponsesModel,
-    DEFAULT_POLL_INTERVAL_SEC,
-)
 
 load_shinka_dotenv()
 
@@ -202,12 +198,13 @@ async def run_dr_call(
     keeps the connection lifetime short, matching the long-running
     inference characteristic of DR.
 
-    Returns ``(text, cost_estimate)``. We don't have per-token DR
-    pricing reliably exposed, so ``cost`` is best-effort and may be
-    zero — the rendered ``meta_briefs.cost`` column reflects whatever
-    the model usage indicates, with ``0.0`` when unknown.
+    Returns ``(text, cost_estimate)``. L41: DR IS priced (pricing.csv prices o3-deep-research
+    at 10/40 per 1M; _usage_cost computes it) — ``cost`` is the usage-derived token cost (0.0
+    only when usage is absent, e.g. a failed job). The caller (deep_research.py) logs it to
+    journal/calls via log_external_call (NOT a meta_briefs.cost column — that is the per-island
+    META round's cost, a different concern).
 
-    On poll timeout or terminal-but-failed status, raises so the
+    On poll timeout (now best-effort CANCELLED, L46) or terminal-but-failed status, raises so the
     caller can surface a placeholder brief instead of crashing.
     """
     import asyncio
@@ -342,32 +339,6 @@ async def run_dr_call(
     return text, cost
 
 
-class DeepResearchModel(BackgroundOpenAIResponsesModel):
-    """``BackgroundOpenAIResponsesModel`` configured for DR cadence.
-
-    Same submit-and-poll mechanics as the main proposer model. The
-    only difference is the poll cadence and timeout: DR jobs can take
-    20-30 minutes; we poll at 5s rather than 2s to keep Azure poll
-    pressure down, and we cap the wall at 30 minutes. If the job
-    overruns, the caller (``DeepResearchSummarizer``) catches
-    ``BackgroundPollTimeout`` and falls back to the cached/placeholder
-    brief — DR cost is sunk at that point and crashing the meta cycle
-    would lose the rest of the run's progress.
-    """
-
-    def __init__(
-        self,
-        model: Any,
-        openai_client: Any,
-        *,
-        poll_interval_sec: float = DR_POLL_INTERVAL_SEC,
-        poll_timeout_sec: float = DR_TIMEOUT,
-        max_queued_wait_sec: float = DR_MAX_QUEUED_WAIT_SEC,
-    ) -> None:
-        super().__init__(
-            model=model,
-            openai_client=openai_client,
-            poll_interval_sec=poll_interval_sec,
-            poll_timeout_sec=poll_timeout_sec,
-            max_queued_wait_sec=max_queued_wait_sec,
-        )
+# L41: the dead DeepResearchModel class was removed — it had ZERO importers, and the active DR
+# path is run_dr_call()/get_dr_async_client() above. Its docstring referenced a nonexistent
+# DeepResearchSummarizer and a wrong 30-min wall (the real DR_TIMEOUT is 60 min).

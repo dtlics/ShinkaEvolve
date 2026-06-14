@@ -110,13 +110,23 @@ def _embed(cfg: Dict[str, Any], code: str) -> Tuple[Optional[List[float]], float
         from shinka.embed.embedding import EmbeddingClient
 
         client = EmbeddingClient(
-            model_name=cfg["evo"].get("embedding_model", "text-embedding-3-small")
+            model_name=cfg["evo"].get("embedding_model", "azure-text-embedding-3-small")
         )
         out = client.get_embedding(code)
         if isinstance(out, tuple):
             return out[0], float(out[1] or 0.0)
         return out, 0.0
-    except Exception:
+    except Exception as exc:
+        # M29: do NOT swallow silently. A failed embedder turns the WHOLE novelty gate off
+        # for this slot and otherwise reads identically to "no novelty events". Surface it on
+        # stderr; the caller increments embed_failures so a blind gate shows in the diagnostics.
+        import sys as _sys
+
+        print(
+            f"[embed] embedding failed ({type(exc).__name__}: {exc}) — novelty gate blind "
+            f"for this slot",
+            file=_sys.stderr,
+        )
         return None, 0.0
 
 
@@ -232,7 +242,7 @@ def _bootstrap_initial(cfg: Dict[str, Any]) -> float:
     db_path = cfg["db_path"]
     db_config = cfg["db_config"]
     evo = cfg["evo"]
-    embedding_model = evo.get("embedding_model", "text-embedding-3-small")
+    embedding_model = evo.get("embedding_model", "azure-text-embedding-3-small")
     # A missing DB file means an empty archive (the first archive_record creates
     # it). Only query the count when the file already exists, since archive_query
     # opens read-only and read-only refuses to create a missing DB.
@@ -481,7 +491,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     db_config = cfg["db_config"]
     evo = cfg["evo"]
     task = cfg["task"]
-    embedding_model = evo.get("embedding_model", "text-embedding-3-small")
+    embedding_model = evo.get("embedding_model", "azure-text-embedding-3-small")
     language = task.get("language", "python")
     # C3 (H6): offset the seed by generation so the global np.random.seed in
     # construct_mutation_prompt / select_llm doesn't pin the SAME patch-type and
@@ -770,6 +780,8 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         )
         _slot_embed_cost = float(_embed_cost or 0.0)
         counters["cost"] = counters.get("cost", 0.0) + _slot_embed_cost
+        if code_embedding is None:  # M29: novelty gate is blind for this slot — make it visible
+            counters["embed_failures"] = counters.get("embed_failures", 0) + 1
 
     # 4. evaluate (IMMUTABLE plumbing)
     ev = _evaluate_candidate(
@@ -804,6 +816,8 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                 cfg, _novelty_embed_text(evo, parent.get("code", ""), mut["candidate_code"])
             )
             counters["cost"] = counters.get("cost", 0.0) + float(_re_embed_cost or 0.0)
+            if code_embedding is None:  # M29: re-embed failed → gate blind for this slot
+                counters["embed_failures"] = counters.get("embed_failures", 0) + 1
     counters["eval_total"] += 1
     if not ev["correct"]:
         counters["eval_failures"] += 1
@@ -872,7 +886,15 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             "island_idx": sp.get("island_idx"),
         })
         if nov.get("accept"):
-            counters["novelty_accepts"] += 1  # genuinely novel — archive normally below
+            # L17: an accept with n_compared==0 means the gate had NOTHING to compare against
+            # (novelty enabled mid-run over an unembedded archive, or every neighbor's embed
+            # failed) — the gate is IDLE, not "perfectly diverse". Count it separately so
+            # novelty_acceptance_rate stays honest (None when there were no REAL comparisons)
+            # instead of reading a phantom 1.0.
+            if int(nov.get("n_compared", 0) or 0) > 0:
+                counters["novelty_accepts"] += 1  # genuinely novel — archive normally below
+            else:
+                counters["novelty_idle_count"] = counters.get("novelty_idle_count", 0) + 1
         else:
             _inc_id = nov.get("most_similar_id")
             _inc_score = nov.get("most_similar_score")
@@ -921,8 +943,17 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                         # from counting it as an errored program.
                         "program_id": _inc_id, "action": "tombstone", "reason": "novelty_evict",
                     })
-                except Exception:
-                    pass
+                    # M34: make the eviction OBSERVABLE — it's the activity that reveals an
+                    # H2-style near-dup flood, and was previously invisible (write-only counter,
+                    # no trace). novelty_kept_better is surfaced into the diag below.
+                    _trace({"step": "framework_decision", "action": "kept_better_evicted",
+                            "incumbent": _inc_id, "max_similarity": nov.get("max_similarity")})
+                except Exception as _exc:
+                    # M34: a FAILED eviction leaves BOTH near-dups live — count + trace it
+                    # (do NOT silently pass), but never crash the window.
+                    counters["novelty_evict_fail_count"] = counters.get("novelty_evict_fail_count", 0) + 1
+                    _trace({"step": "framework_decision", "action": "kept_better_evict_failed",
+                            "incumbent": _inc_id, "error": repr(_exc)})
 
     # 4b. compute reward (MUTABLE — scoring concern, generation half)
     reward = compute_reward_script.main(
@@ -1027,7 +1058,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     )
     db_config = cfg["db_config"]
     evo = cfg["evo"]
-    embedding_model = evo.get("embedding_model", "text-embedding-3-small")
+    embedding_model = evo.get("embedding_model", "azure-text-embedding-3-small")
     window_size = int(cfg.get("iters") or evo.get("window_size", 10))
     num_windows = max(1, int(cfg.get("windows", 1) or 1))  # G4: --windows 0 coerces to 1 (full-keyed diag, not a near-empty dict)
 
@@ -1088,7 +1119,11 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "iter_index": 0, "eval_total": 0, "eval_failures": 0,
             "arm_submitted": {},   # H5: per-arm submitted counts THIS window (rollback arm 4a)
             "novelty_accepts": 0, "novelty_rejects": 0, "fix_count": 0, "cost": 0.0,
-            "rejected_cost": 0.0,  # F13: spend on novelty-rejected (un-evaluated) slots
+            "novelty_kept_better": 0,       # M34: near-dup pairs where the newcomer won + evicted the incumbent
+            "novelty_idle_count": 0,        # L17: novelty accepts with nothing to compare (idle gate)
+            "novelty_evict_fail_count": 0,  # M34: keep-better evictions that FAILED (both near-dups left live)
+            "embed_failures": 0,            # M29: slots where embedding failed (novelty gate blind)
+            "rejected_cost": 0.0,  # N4: spend on novelty-DROPPED slots (EVALUATED near-dups that lost keep-the-better — not "un-evaluated")
             "fix_success": 0,      # WS1: immediate fixes that recovered correctness
             "needs_fix_count": 0,  # M9: sampled incorrect parents routed to repair mode
             "exhausted_retry_slots": [],  # G1/H7: gen ids of un-repairable slots this window
@@ -1174,6 +1209,13 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 "novelty_accepts": counters["novelty_accepts"],
                 "novelty_rejects": counters["novelty_rejects"],
                 "novelty_rejected_cost": counters["rejected_cost"],
+                # M34/L17/M29: novelty observability — kept-better evictions, idle-gate accepts,
+                # failed evictions, and blind-embed slots, so an H2-style flood / a disabled gate
+                # is visible in the control-return diagnostics instead of by db spelunking.
+                "novelty_kept_better": counters.get("novelty_kept_better", 0),
+                "novelty_idle_count": counters.get("novelty_idle_count", 0),
+                "novelty_evict_fail_count": counters.get("novelty_evict_fail_count", 0),
+                "embed_failures": counters.get("embed_failures", 0),
                 "eval_failures": counters["eval_failures"],
                 "eval_total": counters["eval_total"],
                 "fix_count": counters["fix_count"],

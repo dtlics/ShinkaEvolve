@@ -392,6 +392,12 @@ def test_diagnostics_sensor_fields():
         assert out5["apply_exhausted_count"] == 2
         assert out5["timeout_count"] == 1 and out5["wrong_answer_count"] == 3
         assert abs(out5["apply_failure_rate"] - 2 / 7) < 1e-9
+        # H4/H5 additive fields present; M34/L17/M29 novelty observability echoed.
+        assert out5["eval_total"] == 5 and "llm_bandit_window_counts" in out5
+        o6 = diag.main({**base, "novelty_kept_better": 4, "novelty_idle_count": 2,
+                        "embed_failures": 1, "novelty_evict_fail_count": 0})
+        assert o6["novelty_kept_better"] == 4 and o6["novelty_idle_count"] == 2
+        assert o6["embed_failures"] == 1 and o6["novelty_evict_fail_count"] == 0
     finally:
         diag.archive_query.main = orig_aq
         diag.island_policy.island_health = orig_ih

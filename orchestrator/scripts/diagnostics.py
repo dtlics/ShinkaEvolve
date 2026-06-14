@@ -22,7 +22,9 @@ INPUT (stdin JSON): db_path/db_config/embedding_model + the per-window fields th
 OUTPUT (stdout JSON, "ok": true): window_index, iters_completed, best_score_start,
   best_score_end, delta, J_score (INFORMATIONAL only — rollback uses rollback_decision),
   threshold, strategy_fingerprint, novelty_acceptance_rate (NULL when no novelty events),
-  novelty_rejected_cost, evaluation_failure_rate (post-repair), eval_total (H4: 0 ⇒ nothing
+  novelty_rejected_cost, novelty_kept_better (M34: near-dup floods), novelty_idle_count (L17),
+  novelty_evict_fail_count (M34), embed_failures (M29: >0 ⇒ novelty gate was blind),
+  evaluation_failure_rate (post-repair), eval_total (H4: 0 ⇒ nothing
   evaluated), fix_rate, fix_success_rate, needs_fix_rate, llm_bandit_weights,
   llm_bandit_counts (run-cumulative), llm_bandit_window_counts (THIS window — H5, rollback arm 4a),
   island_health [{id, best, diversity, stagnation_count, count}], stagnation_flag,
@@ -193,6 +195,14 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "strategy_fingerprint": payload.get("strategy_fingerprint", {}),
         "novelty_acceptance_rate": novelty_acceptance_rate,
         "novelty_rejected_cost": float(payload.get("novelty_rejected_cost", 0.0) or 0.0),
+        # M34/L17/M29: novelty observability — surface an H2-style near-dup flood
+        # (novelty_kept_better), an idle gate (novelty_idle_count), a failed eviction
+        # (novelty_evict_fail_count), and a BLIND gate (embed_failures > 0 ⇒ embedding
+        # failed, so the novelty gate was off for those slots — distinct from "no events").
+        "novelty_kept_better": int(payload.get("novelty_kept_better", 0) or 0),
+        "novelty_idle_count": int(payload.get("novelty_idle_count", 0) or 0),
+        "novelty_evict_fail_count": int(payload.get("novelty_evict_fail_count", 0) or 0),
+        "embed_failures": int(payload.get("embed_failures", 0) or 0),
         "evaluation_failure_rate": evaluation_failure_rate,
         "eval_total": eval_total,  # H4: distinguishes "evaluated and all passed" from "nothing evaluated"
         "fix_rate": fix_rate,

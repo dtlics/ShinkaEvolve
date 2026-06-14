@@ -250,7 +250,9 @@ evaluator is foundation). Common flaw-signals (read off `steps.jsonl` + the wind
   and evicts its own parent; under `code` you must RAISE `code_embed_sim_threshold`, not lower
   it). With keep-the-better (H5) a flagged near-dup is still EVALUATED and the better of the
   pair kept, so flooding costs evals + plateau drag, not a frozen archive. Also suspect weak
-  mutation diversity. Read the dropped-on-novelty decision; watch `novelty_rejected_cost`.
+  mutation diversity. Read the dropped-on-novelty decision; watch `novelty_kept_better` (the
+  near-dup-flood sensor — H2/M34), `novelty_rejected_cost`, and `embed_failures` (>0 means the
+  embedder failed and the gate was BLIND for those slots, not "diverse" — M29).
 - **Eval timeouts (`timeout_count` rising)** → the synthesized code is too slow → `record_policy`
   persists each candidate's `runtime_sec`/`timed_out`, and `construct_mutation_prompt` injects a
   bounded "Runtime budget" caution into BOTH the fix and new-mutation prompts when a parent or an

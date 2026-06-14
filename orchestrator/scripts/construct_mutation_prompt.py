@@ -17,6 +17,8 @@ INPUT (stdin JSON):
     "parent": {"id","code","combined_score","public_metrics","text_feedback",...},
     "archive_inspirations": [ {same shape} ],
     "top_k_inspirations": [ {same shape} ],
+    "needs_fix": false,              # FIX branch: parent is incorrect; build a repair prompt
+    "ancestor_inspirations": [ {same shape} ],  # FIX branch only: correct ancestors to learn from
     "meta_recommendations": str | null,
     "failure_note": str | null,      # persistent caution; ALWAYS rendered (never dropped)
     "island_brief": str | null,      # per-island direction (H1)
@@ -37,6 +39,8 @@ INPUT (stdin JSON):
 
 OUTPUT (stdout JSON):
   { "ok": true, "patch_sys": str, "patch_msg": str, "patch_type": str }
+  # patch_type is "fix" on the FIX branch (needs_fix=True; full-code repair reply),
+  # else the sampled "diff"/"full"/"cross".
 """
 
 from __future__ import annotations

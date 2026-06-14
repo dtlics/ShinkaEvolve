@@ -242,9 +242,15 @@ evaluator is foundation). Common flaw-signals (read off `steps.jsonl` + the wind
 - **One model already winning after a few draws** → premature collapse → suspect the
   reward (`compute_reward.py`) / selection (`select_llm.py`): a couple of early bad draws
   may have starved an arm, or `cost_aware_coef` over-penalizes a pricier-but-better arm.
-- **Novelty rejecting most candidates** → near-duplicate flooding or too tight a gate →
-  suspect `code_embed_sim_threshold` (large programs cluster 0.96–0.98) or weak mutation
-  diversity. Read the dropped-on-novelty decision; watch `novelty_rejected_cost`.
+- **Novelty rejecting most candidates / a per-island pool stuck at ~1 genotype** →
+  near-duplicate flooding. The gate embeds the parent→candidate DIFF by default
+  (`novelty_embed_mode: diff`), so genuine edits separate to low cosine and the pool grows —
+  first confirm it is `diff`, not the legacy `code` basis (where a small edit on a large
+  program is ~0.994 similar to its parent, so every improvement is mis-flagged as a near-dup
+  and evicts its own parent; under `code` you must RAISE `code_embed_sim_threshold`, not lower
+  it). With keep-the-better (H5) a flagged near-dup is still EVALUATED and the better of the
+  pair kept, so flooding costs evals + plateau drag, not a frozen archive. Also suspect weak
+  mutation diversity. Read the dropped-on-novelty decision; watch `novelty_rejected_cost`.
 - **Eval timeouts (`timeout_count` rising)** → the synthesized code is too slow → `record_policy`
   persists each candidate's `runtime_sec`/`timed_out`, and `construct_mutation_prompt` injects a
   bounded "Runtime budget" caution into BOTH the fix and new-mutation prompts when a parent or an
@@ -650,7 +656,9 @@ Many decisions that *look* like a code rewrite are already `evo.*` knobs. Prefer
 | `mutation_web_search` / `fix_web_search` | false | web search on the mutation / fix calls | ONLY on a grounding run nailing a DR reference |
 | `cost_aware_coef` | 0.25 shipped (engine default 0.0 when `llm_dynamic_selection_kwargs` is unset) | bandit reward-vs-cheapness blend | raise→0.7 if cheapness should dominate; lower→0 if a pricier arm is the only one improving and is being starved |
 | `epsilon` | 0.2 | bandit exploration floor | an arm's share decaying toward 0 while it still occasionally improves → raise to 0.4–0.6 |
-| `code_embed_sim_threshold` | 0.99 | near-duplicate cosine gate; a near-dup is now EVALUATED then the BETTER of the pair is kept (the worse is dropped / tombstoned) — H5 | false-rejects (large programs cluster 0.96–0.98) → raise; note a near-dup now costs an eval; watch `novelty_rejected_cost` |
+| `code_embed_sim_threshold` | 0.99 | near-duplicate cosine gate, over the basis set by `novelty_embed_mode`; a near-dup is now EVALUATED then the BETTER of the pair is kept (worse dropped / tombstoned) — H5 | under the default `diff` basis the 0.99 gate rarely false-rejects; under legacy `code` basis genuine large-program edits cluster ~0.994 and are mis-flagged → switch to `diff` (preferred) or RAISE the threshold (never lower under `code`); watch `novelty_rejected_cost` |
+| `novelty_embed_mode` | diff | WHAT the gate embeds: `diff` = parent→candidate unified diff (genuine edits separate to low cosine; the per-island pool can GROW) vs `code` = legacy whole-program embedding (collapses each island to a single-survivor greedy chain on a large program — H2) | keep `diff`; use `code` only to reproduce legacy behavior or on a resumed archive whose stored embeddings are whole-program |
+| `novelty_tie_epsilon` | 0.0 | keep-the-better tie margin (H2): an equal-scoring DISTINCT near-dup within epsilon is KEPT and the incumbent tombstoned (`>=`), so the lineage traverses score plateaus instead of dropping every tie after a full eval | raise slightly to keep more near-ties for plateau exploration |
 | `stagnation_abs_floor`/`rel_frac` | 0.001 / 0.05 | the "low window" bar | recalibrate to the task's natural per-window climb |
 | `validity_floor` | none (inert) | floors VALID parents' selection score (`sample_parent`) | many correct programs pinned at 0 and selection can't separate them |
 | `reward_validity_floor` | 0.001 | floors a correct candidate's bandit reward so correct-but-worse beats *failed* | an arm with high eval-success is starved because its children rarely beat the parent |

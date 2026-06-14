@@ -119,6 +119,29 @@ CONTRACTS: Dict[str, Dict[str, Any]] = {
         "needs_archive": False,
         "build_payload": _prompt_payload,
         "invariant": None,
+        # L5: also smoke the FIX branch. The normal branch alone lets a rewrite that
+        # drops `if payload.get("needs_fix"):` deploy green (it still returns the same
+        # key set with patch_type "diff"/"full"/"cross") — re-opening H1 or losing
+        # repair prompting entirely. The invariant pins patch_type=="fix" on this path.
+        "extra_payloads": [
+            {"label": "fix_mode",
+             "required_keys": {"patch_sys", "patch_msg", "patch_type"},
+             "build_payload": lambda ctx: {
+                 "parent": {
+                     "id": "p", "correct": False, "combined_score": 0.0,
+                     "code": "# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n",
+                     "metadata": {"stderr_log": "Traceback: boom", "stdout_log": ""},
+                 },
+                 "needs_fix": True, "ancestor_inspirations": [],
+                 "task_sys_msg": "t", "language": "python",
+                 "patch_types": ["diff", "full"], "patch_type_probs": [0.7, 0.3], "seed": 0,
+             },
+             "invariant": lambda out, ctx: (
+                 None if out.get("patch_type") == "fix"
+                 else "fix-mode payload must yield patch_type=='fix' "
+                      "(the needs_fix branch appears to have been dropped — H1 regression)"
+             )},
+        ],
     },
     "novelty_check.py": {
         "required_keys": {"accept"},
@@ -362,6 +385,15 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             _emiss = set(extra["required_keys"]) - set(_eout.keys())
             if _emiss:
                 errors.append(f"{_label} mode missing keys: {sorted(_emiss)}")
+                continue
+            # L5: an extra payload MAY carry its own invariant (the required_keys check
+            # alone can't catch a semantic regression, e.g. a dropped needs_fix branch
+            # still returns the same key set with the wrong patch_type).
+            _einv = extra.get("invariant")
+            if _einv is not None:
+                _emsg = _einv(_eout, ctx)
+                if _emsg:
+                    errors.append(f"{_label} invariant: {_emsg}")
 
     return {
         "valid": len(errors) == 0,

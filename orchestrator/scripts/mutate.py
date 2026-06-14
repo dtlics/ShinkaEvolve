@@ -30,7 +30,8 @@ A ``mock`` mode makes the harness + offline tests run with no API.
 INPUT (stdin JSON):
   {
     "parent_code": str,
-    "patch_sys": str, "patch_msg": str, "patch_type": "diff"|"full"|"cross",
+    "patch_sys": str, "patch_msg": str, "patch_type": "diff"|"full"|"cross"|"fix",
+    #   ("fix" is a full-code repair reply -> routed to the FULL applier, H1)
     "patch_dir": str, "language": "python",
     "model_name": str,                       # azure-* etc.
     "reasoning_effort": "medium" | null,     # for reasoning models
@@ -80,7 +81,11 @@ def _apply(patch_type, patch_str, original, patch_dir, language, verbose) -> Tup
     from shinka.edit.apply_diff import apply_diff_patch
     from shinka.edit.apply_full import apply_full_patch
 
-    func = apply_full_patch if patch_type in ("full", "cross") else apply_diff_patch
+    # H1: "fix" replies are FULL-CODE (FIX_SYS_FORMAT emits a ```{language}``` fence,
+    # identical in shape to a full rewrite), so they must route to the full applier.
+    # Routing "fix" to apply_diff_patch made every repair a paid no-op (its
+    # SEARCH/REPLACE regex never matches a full-code reply) -> applied=False always.
+    func = apply_full_patch if patch_type in ("full", "cross", "fix") else apply_diff_patch
     return func(
         patch_str=patch_str, original_str=original,
         patch_dir=patch_dir, language=language, verbose=verbose,

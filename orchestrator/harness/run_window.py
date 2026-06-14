@@ -120,6 +120,31 @@ def _embed(cfg: Dict[str, Any], code: str) -> Tuple[Optional[List[float]], float
         return None, 0.0
 
 
+def _novelty_embed_text(evo: Dict[str, Any], parent_code: str, candidate_code: str) -> str:
+    """H2: choose WHAT the novelty gate embeds.
+
+    'diff' (default): embed the unified parent->candidate diff, so two genuinely
+    different edits separate to LOW cosine — each is accepted as novel and the
+    per-island pool can GROW past one genotype — while a true re-proposal of the
+    same change shares a diff and is still caught as a near-duplicate. 'code': the
+    legacy whole-program embedding (a small edit on a large program reads ~0.994
+    similar to its parent, so every improvement was flagged a near-dup and evicted
+    its own parent -> the single-survivor greedy chain H2 describes). Falls back to
+    the whole candidate when there is no parent baseline (seed/bootstrap) or the
+    two codes are identical (empty diff)."""
+    mode = str(evo.get("novelty_embed_mode", "diff") or "diff")
+    if mode == "code" or not parent_code:
+        return candidate_code
+    import difflib
+
+    diff = "\n".join(
+        difflib.unified_diff(
+            parent_code.splitlines(), candidate_code.splitlines(), lineterm="", n=3
+        )
+    )
+    return diff or candidate_code
+
+
 def _max_generation(db_path: str, db_config: Dict[str, Any], embedding_model: str) -> int:
     res = archive_query.main(
         {
@@ -730,7 +755,11 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     nov: Dict[str, Any] = {}
     _slot_embed_cost = 0.0
     if evo.get("enable_novelty"):
-        code_embedding, _embed_cost = _embed(cfg, mut["candidate_code"])
+        # H2: embed the parent->candidate DIFF (default) instead of the whole program,
+        # so a genuine improvement is NOT false-flagged as a near-dup of its parent.
+        code_embedding, _embed_cost = _embed(
+            cfg, _novelty_embed_text(evo, parent.get("code", ""), mut["candidate_code"])
+        )
         _slot_embed_cost = float(_embed_cost or 0.0)
         counters["cost"] = counters.get("cost", 0.0) + _slot_embed_cost
 
@@ -761,7 +790,11 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         # Re-embed only if a fix actually changed the code, so the archived
         # embedding matches the stored code (keeps the novelty gate honest).
         if evo.get("enable_novelty") and mut["candidate_code"] != _pre_fix_code:
-            code_embedding, _re_embed_cost = _embed(cfg, mut["candidate_code"])
+            # H2: re-embed the (post-fix) parent->candidate diff, consistent with the
+            # pre-fix embed above, so the stored embedding matches the gate's basis.
+            code_embedding, _re_embed_cost = _embed(
+                cfg, _novelty_embed_text(evo, parent.get("code", ""), mut["candidate_code"])
+            )
             counters["cost"] = counters.get("cost", 0.0) + float(_re_embed_cost or 0.0)
     counters["eval_total"] += 1
     if not ev["correct"]:
@@ -836,8 +869,17 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             _inc_id = nov.get("most_similar_id")
             _inc_score = nov.get("most_similar_score")
             _cand_score = float(ev.get("combined_score", 0.0) or 0.0)
+            # H2: keep an EQUAL-scoring DISTINCT near-dup (relax strict > to >=) so the
+            # search can traverse score plateaus instead of dropping every tie after a full
+            # eval. The incumbent is still tombstoned below, so on a tie the surviving
+            # genotype ROTATES (lineage keeps moving) rather than freezing. novelty_tie_epsilon
+            # (default 0.0 => plain >=) optionally keeps a near-dup within epsilon of the
+            # incumbent. NOTE: growing the per-island pool past ~1 genotype needs the
+            # diff-embedding REPRESENTATION change (the other half of H2) — >= alone restores
+            # plateau traversal, not pool growth.
+            _tie_eps = float(evo.get("novelty_tie_epsilon", 0.0) or 0.0)
             _keep_new = (_inc_id is None or _inc_score is None
-                         or _cand_score > float(_inc_score))
+                         or _cand_score >= float(_inc_score) - _tie_eps)
             if not _keep_new:
                 # newcomer is NOT better than its near-duplicate → DROP it (keep the
                 # incumbent); feed the arm its real spend (cost-only / penalize per lever).

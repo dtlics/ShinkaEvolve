@@ -59,7 +59,11 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     if not cand:
         # No embedding to judge -> accept (matches shinka's "no embedding" skip).
-        return {"accept": True, "max_similarity": 0.0, "most_similar_id": None, "n_compared": 0}
+        # N6: include most_similar_score (None) so this early return honors the same
+        # OUTPUT contract as the main return — a caller that reads it for keep-the-better
+        # gets a consistent shape on every path.
+        return {"accept": True, "max_similarity": 0.0, "most_similar_id": None,
+                "most_similar_score": None, "n_compared": 0}
 
     programs = archive_query.main(
         {

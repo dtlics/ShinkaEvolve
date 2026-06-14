@@ -2448,6 +2448,67 @@ def test_termination_streak():
     return None
 
 
+def test_mutate_fix_routes_to_full_applier():
+    # H1: a patch_type="fix" reply is FULL CODE (FIX_SYS_FORMAT emits a ```{lang}```
+    # fence). It must route to apply_full_patch and apply. Before the H1 fix it routed
+    # to apply_diff_patch, whose SEARCH/REPLACE regex never matches full code, so EVERY
+    # repair returned applied=False (a paid no-op). This is the regression guard.
+    import mutate  # scripts/ is on sys.path
+    parent = "# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n"
+    full_reply = (
+        "<NAME>\nfix_x\n</NAME>\n"
+        "<DESCRIPTION>\nset x to 2\n</DESCRIPTION>\n"
+        "<CODE>\n```python\n# EVOLVE-BLOCK-START\nx = 2\n# EVOLVE-BLOCK-END\n```\n</CODE>\n"
+    )
+    with tempfile.TemporaryDirectory() as td:
+        out = mutate.main({
+            "parent_code": parent, "patch_dir": td, "language": "python",
+            "patch_type": "fix", "mock": True, "mock_patch": full_reply,
+        })
+        assert out["applied"] is True, f"fix reply must apply via the full applier; got {out}"
+        assert out["num_applied"] == 1, f"expected num_applied==1, got {out['num_applied']}"
+        assert "x = 2" in out["candidate_code"]
+        # Routing-specificity guard: the SAME full-code reply under patch_type="diff"
+        # must NOT apply (it routes to the SEARCH/REPLACE diff applier) — proving the
+        # fix is the routing, not the full applier silently accepting any patch_type.
+        out_diff = mutate.main({
+            "parent_code": parent, "patch_dir": td, "language": "python",
+            "patch_type": "diff", "mock": True, "mock_patch": full_reply,
+        })
+        assert out_diff["applied"] is False and out_diff["num_applied"] == 0, (
+            f"a full-code reply under patch_type='diff' must not apply; got {out_diff}")
+    return None
+
+
+def test_h2_diff_embedding_separates_distinct_edits():
+    # H2: under novelty_embed_mode="diff" (default) the novelty gate embeds the
+    # parent->candidate DIFF, so two genuinely DIFFERENT edits to the same parent yield
+    # DISTINCT embed text (and distinct vectors) -> both accepted as novel -> the pool can
+    # grow; a true re-proposal of the same edit shares a diff -> still caught as a near-dup.
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+    parent = "# EVOLVE-BLOCK-START\nx = 1\ny = 1\n# EVOLVE-BLOCK-END\n"
+    cand_a = "# EVOLVE-BLOCK-START\nx = 2\ny = 1\n# EVOLVE-BLOCK-END\n"
+    cand_b = "# EVOLVE-BLOCK-START\nx = 1\ny = 9\n# EVOLVE-BLOCK-END\n"
+    evo_diff = {"novelty_embed_mode": "diff"}
+    evo_code = {"novelty_embed_mode": "code"}
+    da = run_window._novelty_embed_text(evo_diff, parent, cand_a)
+    db = run_window._novelty_embed_text(evo_diff, parent, cand_b)
+    assert da != db, "distinct edits must produce distinct diffs"
+    assert "x = 2" in da and "y = 9" in db
+    # a re-proposal of the SAME edit -> identical diff text (still detectable as a dup)
+    assert run_window._novelty_embed_text(evo_diff, parent, cand_a) == da
+    # code mode -> legacy whole-program text; empty parent (seed) -> fall back to candidate
+    assert run_window._novelty_embed_text(evo_code, parent, cand_a) == cand_a
+    assert run_window._novelty_embed_text(evo_diff, "", cand_a) == cand_a
+    # mock embed maps distinct diffs to distinct vectors so the gate separates them
+    cfg = {"mock": {"enabled": True}, "evo": evo_diff}
+    va, _ = run_window._embed(cfg, da)
+    vb, _ = run_window._embed(cfg, db)
+    assert va != vb, "distinct diffs must embed to distinct vectors"
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
@@ -2475,6 +2536,8 @@ if __name__ == "__main__":
         ("nonfinite_score_guards", test_nonfinite_score_guards),
         ("end_of_run_summary_and_archive", test_end_of_run_summary_and_archive),
         ("immediate_fix", test_immediate_fix),
+        ("mutate_fix_routes_to_full_applier", test_mutate_fix_routes_to_full_applier),
+        ("h2_diff_embedding_separates_distinct_edits", test_h2_diff_embedding_separates_distinct_edits),
         ("meta_summarize_parsing", test_meta_summarize_parsing),
         ("meta_direction_sampling", test_meta_direction_sampling),
         ("call_logging", test_call_logging),

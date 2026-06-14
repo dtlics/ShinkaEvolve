@@ -28,6 +28,7 @@
     "repair_escalation_model": null,
     "embedding_model": "azure-text-embedding-3-small",
     "enable_novelty": true,
+    "novelty_embed_mode": "diff",
     "code_embed_sim_threshold": 0.99,
     "stagnation_abs_floor": 0.001,
     "stagnation_rel_frac": 0.05,

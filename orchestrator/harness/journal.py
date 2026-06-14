@@ -23,13 +23,18 @@ they let the orchestrator zoom from "how's the run overall" → "what did window
 look like" → "every reward-related intervention" → "is island 2 dying."
 
 run.json durability contract (so the hard budget cap can never be silently lost):
-every run.json write is atomic (write a temp file, fsync, then os.replace), and a
-missing-or-corrupt run.json is REPAIRED on read by recomputing total_cost from the
-durable append-only streams (windows.jsonl window_cost + interventions.jsonl cost +
-calls.jsonl cost). The only spend not recoverable that way is a cost added directly
-via add_cost outside any window/intervention/call (e.g. the one boot-time embedding
-cost) — a deliberately accepted small loss. read_run returns {} only when run.json
-is genuinely absent AND no journal streams exist.
+every run.json write is atomic (write a UNIQUE-named temp file, fsync, os.replace with a
+Windows-PermissionError retry, then fsync the parent dir on POSIX — L68/L70), and a
+missing-or-corrupt run.json is REPAIRED by recomputing total_cost from the durable
+append-only streams (windows.jsonl window_cost + interventions.jsonl cost + calls.jsonl
+cost). The repair fires BOTH on read (corrupt-in-place) AND at init_run when run.json is
+ABSENT but the streams exist (deleted-then-restart — H6), so the cap can never restart
+from $0. Append is torn-write-safe: a newline-less torn tail is isolated rather than
+merged, and an unparseable line is skipped with a stderr warning, never silently dropped
+(L72). The only spend not recoverable this way is a cost added directly via add_cost
+outside any window/intervention/call (e.g. the one boot-time embedding) — a deliberately
+accepted small loss. read_run returns {} only when run.json is genuinely absent AND no
+journal streams exist.
 
 MUTABILITY: harness plumbing. Not a strategy file; do not rewrite.
 """
@@ -64,8 +69,21 @@ def _run_path(results_dir: str) -> str:
 
 def _append_jsonl(path: str, obj: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    # L72: if a prior append was TORN (a power-loss/kill mid-write left a newline-less
+    # tail), prefix a newline so the torn record stays isolated on its own (droppable)
+    # line instead of MERGING with this record into one unparseable line that both
+    # _read_jsonl and the cost recompute would silently drop (losing a window/cost row).
+    prefix = ""
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > 0:
+            with open(path, "rb") as rf:
+                rf.seek(-1, os.SEEK_END)
+                if rf.read(1) != b"\n":
+                    prefix = "\n"
+    except Exception:
+        prefix = ""
     with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(obj) + "\n")
+        f.write(prefix + json.dumps(obj) + "\n")
         f.flush()
         os.fsync(f.fileno())
 
@@ -74,6 +92,7 @@ def _read_jsonl(path: str) -> List[Dict[str, Any]]:
     if not os.path.exists(path):
         return []
     out = []
+    dropped = 0
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -81,7 +100,16 @@ def _read_jsonl(path: str) -> List[Dict[str, Any]]:
                 try:
                     out.append(json.loads(line))
                 except json.JSONDecodeError:
+                    dropped += 1  # L72: a torn/merged line — surface it, don't hide it
                     continue
+    if dropped:
+        import sys as _sys
+
+        print(
+            f"[journal] skipped {dropped} unparseable line(s) in "
+            f"{os.path.basename(path)} (torn write?) — totals recomputed from the rest",
+            file=_sys.stderr,
+        )
     return out
 
 
@@ -90,12 +118,34 @@ def _write_json_atomic(path: str, obj: Dict[str, Any]) -> None:
     over the target. A crash mid-write leaves either the old file or the new one
     intact — never a truncated run.json that would zero the cost ledger."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = f"{path}.tmp"
+    # L70: per-write UNIQUE temp name so two writers to the same target can never clobber
+    # each other's temp file mid-rename (a fixed `{path}.tmp` collides).
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, default=str)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, path)
+    # L70: on Windows os.replace can raise PermissionError against a concurrent reader —
+    # retry briefly before giving up.
+    for _attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            break
+        except PermissionError:
+            time.sleep(0.05)
+    else:
+        os.replace(tmp, path)  # final attempt; let it raise if the target is truly locked
+    # L68: fsync the PARENT DIRECTORY so a power-loss AFTER the rename can't lose it
+    # (POSIX only — Windows has no O_DIRECTORY; best-effort, never raises).
+    try:
+        if os.name == "posix":
+            dfd = os.open(os.path.dirname(path) or ".", os.O_DIRECTORY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
+    except Exception:
+        pass
 
 
 def _has_journal_streams(results_dir: str) -> bool:
@@ -152,9 +202,28 @@ def _reconstruct_run(results_dir: str, prior: Optional[Dict[str, Any]]) -> Dict[
 
 # --- writers ---------------------------------------------------------------
 def init_run(results_dir: str, meta: Dict[str, Any]) -> None:
-    """Create run.json on first window if absent (idempotent)."""
+    """Create run.json on first window if absent (idempotent).
+
+    H6: if run.json is ABSENT but the durable streams already exist (run.json was
+    deleted / sync-quarantined mid-run, then a restart or --resume), do NOT write a
+    fresh ZEROED ledger — recompute total_cost from the streams via _reconstruct_run so
+    the budget hard-cap can never silently restart from $0. Only a genuine fresh boot
+    (no streams) writes the zeroed ledger below."""
     _ensure(results_dir)
     if os.path.exists(_run_path(results_dir)):
+        return
+    if _has_journal_streams(results_dir):
+        _reconstruct_run(
+            results_dir,
+            {
+                "run_id": meta.get("run_id"),
+                "goal": meta.get("goal"),
+                "task": meta.get("task"),
+                "started_at": time.time(),
+                "budget_usd": meta.get("budget_usd"),
+                "config_digest": meta.get("config_digest"),
+            },
+        )
         return
     run = {
         "run_id": meta.get("run_id"),

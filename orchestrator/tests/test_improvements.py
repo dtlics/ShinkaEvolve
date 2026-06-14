@@ -2538,12 +2538,53 @@ def test_h13_pre_clean_neutralizes_stale_results():
     return None
 
 
+def test_journal_ledger_durability_deleted_then_restart():
+    # H6: run.json DELETED mid-run (sync/AV quarantine) while the streams survive. The next
+    # boot calls init_run BEFORE any read_run; it must recompute total_cost from the streams,
+    # NOT write a fresh $0 ledger (which would let the run re-spend the whole budget).
+    import journal
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "r", "goal": "g", "budget_usd": 10.0})
+        journal.append_window(td, {"window_index": 0, "J_score": 0.1, "best_score_end": 1.5,
+                                   "total_programs": 5, "window_cost": 0.8, "island_health": []})
+        journal.append_intervention(td, {"type": "dr", "cost": 0.7})
+        assert abs(journal.total_cost(td) - 1.5) < 1e-9, journal.total_cost(td)
+        os.remove(journal._run_path(td))  # streams remain
+        journal.init_run(td, {"run_id": "r", "goal": "g", "budget_usd": 10.0})  # restart
+        assert abs(journal.total_cost(td) - 1.5) < 1e-9, "ledger must recompute, not zero"
+        assert journal.read_run(td).get("recovered_from_corruption") is True
+    return None
+
+
+def test_journal_append_torn_tail_isolated():
+    # L72: a torn (newline-less) tail line must not MERGE with the next append into one
+    # unparseable line that drops both. The next append isolates the torn line; the good
+    # rows stay readable.
+    import journal
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "r", "budget_usd": 10.0})
+        wpath = os.path.join(journal.journal_dir(td), "windows.jsonl")
+        journal.append_window(td, {"window_index": 0, "window_cost": 0.5, "best_score_end": 1.0,
+                                   "total_programs": 1, "island_health": []})
+        with open(wpath, "a", encoding="utf-8") as f:
+            f.write('{"window_index": 1, "window_cost": 0.5')  # TORN: no trailing newline
+        journal.append_window(td, {"window_index": 2, "window_cost": 0.5, "best_score_end": 2.0,
+                                   "total_programs": 2, "island_health": []})
+        idxs = sorted(r.get("window_index") for r in journal.read_windows(td)
+                      if r.get("window_index") is not None)
+        assert 0 in idxs and 2 in idxs, f"good rows must survive a torn neighbor: {idxs}"
+        assert 1 not in idxs, "the torn row must be dropped, not merged into row 2"
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
         ("record_policy", test_record_policy),
         ("journal_roundtrip", test_journal_roundtrip),
         ("journal_ledger_durability", test_journal_ledger_durability),
+        ("journal_ledger_durability_deleted_then_restart", test_journal_ledger_durability_deleted_then_restart),
+        ("journal_append_torn_tail_isolated", test_journal_append_torn_tail_isolated),
         ("concern_bundle", test_concern_bundle),
         ("cadence_policy", test_cadence_policy),
         ("work_score_readers", test_work_score_readers),

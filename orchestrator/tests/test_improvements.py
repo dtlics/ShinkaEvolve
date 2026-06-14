@@ -759,6 +759,24 @@ def test_rollback_fail_closed_and_collapse():
     r = rb.decide(prior, collapsed)
     assert r["regressed"] is True and any("collapse" in x for x in r["reasons"])
     assert rb.decide(prior, dict(prior))["regressed"] is False  # balanced arms → no collapse
+
+    # H4: a ZERO-EVALUATION measure window (every slot apply-exhausted) reports
+    # evaluation_failure_rate 0.0 PRESENT but apply_failure_rate 1.0 → must fail closed.
+    zero_eval = {"delta": 0.0, "best_score_end": 0.0, "evaluation_failure_rate": 0.0,
+                 "eval_total": 0, "apply_failure_rate": 1.0}
+    assert rb.decide({}, zero_eval)["regressed"] is True, "zero-eval window must fail closed"
+    # a window with SOME evals (apply_failure_rate < 1.0) is NOT caught by the H4 guard
+    assert rb.decide(flat, {**flat, "apply_failure_rate": 0.3, "eval_total": 7})["regressed"] is False
+
+    # H5: a per-window collapse must fire arm 4a even when the run-CUMULATIVE counts are
+    # balanced (the cumulative total can't move the share mid-run; per-window can).
+    prior2 = {**flat, "llm_bandit_counts": {"a": {"submitted": 500}, "b": {"submitted": 500}},
+              "llm_bandit_window_counts": {"a": {"submitted": 5}, "b": {"submitted": 5}}}
+    coll2 = {**flat, "llm_bandit_counts": {"a": {"submitted": 509}, "b": {"submitted": 501}},
+             "llm_bandit_window_counts": {"a": {"submitted": 9}, "b": {"submitted": 1}}}
+    r2 = rb.decide(prior2, coll2)
+    assert r2["regressed"] is True and any("collapse" in x for x in r2["reasons"]), (
+        "per-window collapse must fire even with balanced cumulative counts")
     return None
 
 
@@ -2577,6 +2595,24 @@ def test_journal_append_torn_tail_isolated():
     return None
 
 
+def test_m27_stagnation_abs_floor_fallback():
+    # M27: with tau AND stagnation_abs_floor both unset, the detector uses its 1e-3 fallback.
+    # The callers (run_window/diagnostics) now pass tau=None (not 0.0), so the fallback is no
+    # longer shadowed for a hand-authored config that omits stagnation_abs_floor.
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import stagnation_detector as sd
+    base = {"best_score_start": 0.0, "best_score_end": 0.0005, "window_size": 5,
+            "stagnation_abs_floor": None, "stagnation_rel_frac": 0.05,
+            "prior_low_streak": 0, "consecutive_required": 2}
+    out = sd.main({**base, "tau": None})
+    assert abs(out["threshold"] - 1e-3) < 1e-9, out  # 1e-3 fallback engaged
+    # control: the OLD behavior — an injected tau=0.0 shadows the fallback (threshold 0.0),
+    # which is exactly why the callers must pass None now.
+    out0 = sd.main({**base, "tau": 0.0})
+    assert out0["threshold"] == 0.0, out0
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
@@ -2599,6 +2635,7 @@ if __name__ == "__main__":
         ("fix_prompt_reads_only_metadata_channels", test_fix_prompt_reads_only_metadata_channels),
         ("snapshot_restore_state", test_snapshot_restore_state),
         ("rollback_fail_closed_and_collapse", test_rollback_fail_closed_and_collapse),
+        ("m27_stagnation_abs_floor_fallback", test_m27_stagnation_abs_floor_fallback),
         ("validate_select_llm_all_modes", test_validate_select_llm_all_modes),
         ("dr_refusal_graceful", test_dr_refusal_graceful),
         ("deploy_bundle_rejected_guard", test_deploy_bundle_rejected_guard),

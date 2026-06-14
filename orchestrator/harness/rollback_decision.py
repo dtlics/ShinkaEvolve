@@ -25,17 +25,22 @@ A rewrite is a REGRESSION (→ roll back) if ANY of:
   3. Score regression — the prior window was making real progress
      (prior Δ > prior threshold) AND the measure window's Δ is < ``score_ratio`` ×
      prior Δ AND search health did not improve to compensate.
-  4. Bandit collapse — selection collapsed onto ONE arm (measure top-arm weight ≥
-     ``bandit_collapse_frac`` AND that arm ROSE ≥ ``bandit_collapse_rise`` vs prior).
-     Fires INDEPENDENTLY of Δ — the reward/bandit-regression class the old basket was
-     blind to in the flat early phase, i.e. the exact outer-loop trigger (H4).
+  4. Bandit collapse — selection collapsed onto ONE arm THIS measure window. PRIMARY arm
+     4a is COUNTS-share: the top arm's submitted-share (from ``llm_bandit_window_counts``,
+     this window's counts — H5) ≥ ``bandit_collapse_count_frac`` AND rose vs prior, with
+     ≥ ``bandit_collapse_min_pulls`` total pulls. Fires INDEPENDENTLY of Δ — the
+     reward/bandit-regression class the old basket was blind to (H5). Arm 4b (weights-share)
+     is LEGACY/near-unreachable (a single arm's weight caps at 1−epsilon).
 
 Otherwise accept. Thresholds are kwargs so a future tuning pass can adjust them.
 
 INPUT (stdin JSON):
   { "prior": <window diag>, "measure": <window diag>,
     "eval_drop": 0.25, "nov_drop": 0.25, "min_eval_success": 0.5, "score_ratio": 0.5,
-    "abs_eval_floor": 0.05, "bandit_collapse_frac": 0.85, "bandit_collapse_rise": 0.25 }
+    "abs_eval_floor": 0.05,
+    "bandit_collapse_count_frac": 0.85, "bandit_collapse_min_pulls": 8,  # PRIMARY counts-share arm (4a)
+    "bandit_collapse_frac": 0.85, "bandit_collapse_rise": 0.25,          # LEGACY weights arm (4b, near-unreachable)
+    "measure_crashed": false }                                          # caller-forced fail-closed
 
 OUTPUT (stdout JSON):
   { "ok": true, "regressed": bool, "accept": bool, "reasons": [str], "signals": {..} }
@@ -100,12 +105,22 @@ def decide(
         and "evaluation_failure_rate" not in measure
     )
     _core_nan = any(_is_nan(measure.get(k)) for k in ("delta", "evaluation_failure_rate", "best_score_end"))
-    if measure_crashed or (not measure) or _core_absent or _core_nan:
+    # H4: a ZERO-EVALUATION measure window (every slot apply-exhausted — exactly what a
+    # patch-format-breaking construct_mutation_prompt rewrite, or an Azure outage, produces)
+    # completes with evaluation_failure_rate=0.0 PRESENT (the 0/0 branch) + delta 0, so the
+    # absent/NaN guards above do NOT catch it and the gate would ACCEPT the poisoned rewrite
+    # with zero evidence. apply_failure_rate==1.0 is the structural "nothing was evaluated"
+    # signal; a VALID flat window has apply_failure_rate<1.0 (some slots evaluated) so it is
+    # NOT caught (preserves the K14 valid-flat-window contract).
+    _no_evals = float(measure.get("apply_failure_rate", 0.0) or 0.0) >= 1.0
+    if measure_crashed or (not measure) or _core_absent or _core_nan or _no_evals:
         return {
             "regressed": True,
             "accept": False,
-            "reasons": ["measure window produced no usable data — fail closed"],
-            "signals": {"measure_crashed": bool(measure_crashed)},
+            "reasons": ["measure window produced no usable data (crash / empty / NaN / zero "
+                        "evaluations — all slots apply-exhausted) — fail closed"],
+            "signals": {"measure_crashed": bool(measure_crashed),
+                        "apply_failure_rate": float(measure.get("apply_failure_rate", 0.0) or 0.0)},
         }
 
     p_eval, m_eval = _eval_success(prior), _eval_success(measure)
@@ -161,7 +176,14 @@ def decide(
             out[arm] = float(c.get("submitted", c.get("completed", 0)) or 0) if isinstance(c, dict) else float(c or 0)
         return out
 
-    pc, mc = _submitted(prior.get("llm_bandit_counts")), _submitted(measure.get("llm_bandit_counts"))
+    # H5: read THIS window's submitted counts (llm_bandit_window_counts), falling back to
+    # the run-CUMULATIVE llm_bandit_counts only when absent. The cumulative pkl counts can
+    # never move the top-share past the threshold mid-run (a 10-pull collapsed window barely
+    # shifts an N-pull lifetime total), so a mid-run select_llm/compute_reward rewrite that
+    # collapses selection was previously auto-accepted. The per-window source makes arm 4a
+    # actually reachable; the fallback keeps older priors / tests non-crashing.
+    pc = _submitted(prior.get("llm_bandit_window_counts") or prior.get("llm_bandit_counts"))
+    mc = _submitted(measure.get("llm_bandit_window_counts") or measure.get("llm_bandit_counts"))
     m_total = sum(mc.values())
     if mc and len(mc) >= 2 and m_total >= bandit_collapse_min_pulls:
         top = max(mc, key=lambda k: mc[k])

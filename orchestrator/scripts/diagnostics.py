@@ -98,7 +98,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "best_score_start": best_start,
             "best_score_end": best_end,
             "window_size": window_size,
-            "tau": payload.get("tau", 0.0),  # deprecated abs_floor alias
+            "tau": payload.get("tau"),  # M27: default None (NOT 0.0) so the detector's 1e-3 abs_floor fallback engages when stagnation_abs_floor is omitted; literal 0.0 would shadow it
             "stagnation_abs_floor": payload.get("stagnation_abs_floor"),
             "stagnation_rel_frac": payload.get("stagnation_rel_frac"),
             "prior_low_streak": payload.get("prior_low_streak", 0),
@@ -185,11 +185,15 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "novelty_acceptance_rate": novelty_acceptance_rate,
         "novelty_rejected_cost": float(payload.get("novelty_rejected_cost", 0.0) or 0.0),
         "evaluation_failure_rate": evaluation_failure_rate,
+        "eval_total": eval_total,  # H4: distinguishes "evaluated and all passed" from "nothing evaluated"
         "fix_rate": fix_rate,
         "fix_success_rate": fix_success_rate,
         "needs_fix_rate": needs_fix_rate,
         "llm_bandit_weights": payload.get("llm_bandit_weights", {}),
         "llm_bandit_counts": payload.get("llm_bandit_counts", {}),
+        # H5: THIS window's submitted counts, the source rollback arm 4a reads (the cumulative
+        # llm_bandit_counts above stays for the steady-state model_collapse sensor).
+        "llm_bandit_window_counts": payload.get("llm_bandit_window_counts", {}),
         "island_health": island_health,
         "stagnation_flag": stag["stagnation_flag"],
         "low_streak": stag["low_streak"],

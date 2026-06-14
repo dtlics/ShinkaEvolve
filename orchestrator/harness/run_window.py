@@ -675,6 +675,14 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     # update below) keys on arm_id, so it learns per (model,effort); the actual call
     # uses the clean model_name + that arm's effort (default when the arm has no @).
     model_name, reasoning_effort = _parse_arm(arm_id, evo.get("reasoning_effort"))
+    # H5: count THIS window's per-arm submissions — the per-window collapse signal rollback
+    # arm 4a reads (the cumulative bandit pkl counts can never move the share mid-run). Keyed
+    # on arm_id (the bandit identity), once per candidate, BEFORE the apply-exhausted
+    # early-return (mirrors update_submitted). The repair-escalation override below changes
+    # model_name but NOT arm_id, so the count stays attributed to the bandit-selected arm.
+    if arm_id is not None:
+        counters.setdefault("arm_submitted", {})
+        counters["arm_submitted"][arm_id] = counters["arm_submitted"].get(arm_id, 0) + 1
     # P5-T4: escalation hook (present-but-off, default None). On a repair generation's
     # LAST attempt before the tombstone fires (the parent's repair_attempts would reach
     # the cap this round), optionally route the repair to a stronger model.
@@ -1034,7 +1042,11 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 "num_islands": db_config.get("num_islands"),
                 "window_size": window_size,
                 "llm_models": evo.get("llm_models"),
-                "tau": evo.get("tau"),
+                # M27: record the REAL stagnation knobs actually in force (not just the
+                # deprecated `tau` alias) so the journal shows the bar that was used.
+                "stagnation_abs_floor": evo.get("stagnation_abs_floor"),
+                "stagnation_rel_frac": evo.get("stagnation_rel_frac"),
+                "consecutive_required": evo.get("consecutive_required"),
             },
         },
     )
@@ -1071,6 +1083,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         next_gen = _max_generation(db_path, db_config, embedding_model) + 1
         counters = {
             "iter_index": 0, "eval_total": 0, "eval_failures": 0,
+            "arm_submitted": {},   # H5: per-arm submitted counts THIS window (rollback arm 4a)
             "novelty_accepts": 0, "novelty_rejects": 0, "fix_count": 0, "cost": 0.0,
             "rejected_cost": 0.0,  # F13: spend on novelty-rejected (un-evaluated) slots
             "fix_success": 0,      # WS1: immediate fixes that recovered correctness
@@ -1149,7 +1162,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 "window_index": widx, "iters_completed": iters_run,
                 "best_score_start": best_start, "window_size": window_size,
                 "strategy_fingerprint": strategy_fingerprint,
-                "tau": evo.get("tau", 0.0),  # deprecated abs_floor alias
+                "tau": evo.get("tau"),  # M27: default None so the detector's 1e-3 abs_floor fallback engages when unset
                 "stagnation_abs_floor": evo.get("stagnation_abs_floor"),
                 "stagnation_rel_frac": evo.get("stagnation_rel_frac"),
                 "prior_low_streak": prior_streak,
@@ -1165,6 +1178,11 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 "needs_fix_count": counters.get("needs_fix_count", 0),
                 "llm_bandit_weights": bandit_weights,
                 "llm_bandit_counts": bandit_counts,
+                # H5: THIS window's per-arm submitted counts (rollback arm 4a's real source;
+                # the cumulative llm_bandit_counts above stays for steady-state model_collapse).
+                "llm_bandit_window_counts": {
+                    a: {"submitted": c} for a, c in counters.get("arm_submitted", {}).items()
+                },
                 "exhausted_retry_slots": counters.get("exhausted_retry_slots", []),
                 "exhausted_retry_count": counters.get("exhausted_retry_count", 0),
                 "apply_exhausted": counters.get("apply_exhausted", 0),

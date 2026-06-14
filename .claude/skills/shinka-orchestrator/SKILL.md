@@ -690,7 +690,13 @@ The rollback basket has tuning knobs passed to `rollback_decision.decide()` (NOT
 `abs_eval_floor` (0.05), `bandit_collapse_count_frac` (0.85) / `bandit_collapse_min_pulls`
 (8) for the primary counts-share collapse arm (the weights-fraction arm is legacy /
 near-unreachable because a single arm's weight caps at `1−epsilon`), `measure_crashed`
-(fail-closed), and `min_eval_success`/`eval_drop`/`nov_drop`/`score_ratio`.
+(fail-closed), and `min_eval_success`/`eval_drop`/`nov_drop`/`score_ratio`. Two things the
+gate now does on its own: (H4) it AUTO-fails-closed when the measure window evaluated ZERO
+candidates — every slot apply-exhausted, `apply_failure_rate` 1.0 (e.g. a patch-format-breaking
+prompt rewrite) — so you no longer hand-pass `measure_crashed` for that case; and (H5) the
+counts-share arm reads THIS window's submitted counts (`llm_bandit_window_counts`), so a
+mid-run selection collapse is actually detectable (the run-cumulative total could never move
+the share mid-run).
 
 ### Scalability — deferred
 

@@ -1,8 +1,13 @@
 """cadence_policy.py — decide WHEN the inner loop returns control to you.
 
-MUTABILITY: MUTABLE STRATEGY (cell A). The orchestrator MAY rewrite this when the
-journal shows it is being woken too often (churning, not letting strategies prove
-themselves) or too rarely (slow to react to stagnation). It embeds NO LLM call.
+MUTABILITY: FOUNDATION — NOT orchestrator-rewritable (S1 ruling, 2026-06-13). The wake-decay
+schedule and run termination are part of the contract: an orchestrator must not be able to
+change how often it wakes or when its own run ends (it could inadvertently keep itself
+asleep/awake or extend its own run). It is therefore REMOVED from strategy_store.MUTABLE_TARGETS,
+so the rewrite cycle (snapshot/deploy) refuses it. The cadence/termination KNOBS
+(`cadence.early_phase_windows` / `base_low` / `low_threshold` / `max_windows_per_call` /
+`termination_streak`) remain tunable but BOOT-ONLY (set in run.json before the run, never edited
+mid-run). It embeds NO LLM call.
 
 In `--until-decision` mode the harness runs windows autonomously and, after each
 window, asks this policy whether to hand control back. The cadence is TWO-STAGE:

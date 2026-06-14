@@ -2632,6 +2632,18 @@ def test_m27_stagnation_abs_floor_fallback():
     return None
 
 
+def test_s1_cadence_policy_is_foundation():
+    # S1: cadence_policy.py is FOUNDATION (the wake-decay schedule + run termination are not
+    # orchestrator-rewritable) — removed from MUTABLE_TARGETS, so snapshot()/deploy() refuse it.
+    import pytest
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import strategy_store as ss
+    assert "cadence_policy.py" not in ss.MUTABLE_TARGETS, ss.MUTABLE_TARGETS
+    with pytest.raises(PermissionError):
+        ss.snapshot("cadence_policy.py")
+    return None
+
+
 def test_m21_index_failclosed_and_n14_record_outcome():
     # M21: a present-but-corrupt index fails LOUD (not silently [], which would disarm the
     # rejected-hash guard); writes are atomic. N14: record_outcome on an unmatched hash RAISES
@@ -2939,6 +2951,7 @@ if __name__ == "__main__":
         ("h9_parent_pin_targets_program", test_h9_parent_pin_targets_program),
         ("h10_island_policy_decoupled_gates", test_h10_island_policy_decoupled_gates),
         ("m1_recent_meta_output_rehydrates", test_m1_recent_meta_output_rehydrates),
+        ("s1_cadence_policy_is_foundation", test_s1_cadence_policy_is_foundation),
         ("m21_index_failclosed_and_n14_record_outcome", test_m21_index_failclosed_and_n14_record_outcome),
         ("m48_eval_foundation_smoke", test_m48_eval_foundation_smoke),
         ("dr_parse_and_env_robustness", test_dr_parse_and_env_robustness),

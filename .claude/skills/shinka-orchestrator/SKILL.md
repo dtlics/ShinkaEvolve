@@ -311,6 +311,11 @@ evaluator is foundation). Common flaw-signals (read off `steps.jsonl` + the wind
 - The sqlite schema and the JSON stdin/stdout contract (`scripts/_common.py`).
 - `scripts/evaluate.py`, `archive_record.py`, `archive_query.py`, `diagnostics.py` (your
   sensor), `repair_record.py`, `journal.py`, `harness/*`.
+- `scripts/cadence_policy.py` + the termination logic (S1): the wake-decay schedule and when
+  the run ends are FOUNDATION — you must not be able to change how often you wake or extend
+  your own run. The knobs (`cadence.early_phase_windows` / `base_low` / `low_threshold` /
+  `max_windows_per_call` / `termination_streak`) are tunable but BOOT-ONLY (set in run.json
+  before the run, never edited mid-run).
 - The user's task `evaluate.py` and `initial.<ext>` — provided inputs.
 - `deep_research.py` — a paid external service wrapper.
 
@@ -603,7 +608,7 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
 | `record_policy.py` | derived signals → metadata | **Yes** | No |
 | `stagnation_detector.py` | the low-window trigger | **Yes** | No |
 | `island_policy.py` | fork/migrate/retire decision | **Yes** | No |
-| `cadence_policy.py` | WHEN control returns (early-phase per-window floor, then the work-score taper; not the budget) | **Yes** | No |
+| `cadence_policy.py` | WHEN control returns (early-phase per-window floor, then the work-score taper; not the budget) | No (FOUNDATION — S1; knobs are boot-only) | No |
 | `island_brief.py` | record a per-island direction (auto-called by the meta round) | **Yes** | No |
 | `spawn_island.py` | seed a new island from a grounded program | No (foundation) | No |
 | `construct_mutation_prompt.py` | build the mutation/fix prompt | **Yes** | No |
@@ -662,7 +667,10 @@ work-score taper is uncapped (bounded by budget / termination / stagnation).
 ### Config levers — flip a knob before you rewrite code
 
 Many decisions that *look* like a code rewrite are already `evo.*` knobs. Prefer a knob
-(cheap, instant, no protocol) over rewriting a policy.
+(cheap, instant, no protocol) over rewriting a policy. EXCEPTION (S1): the `cadence.*` rows
+below (`early_phase_windows` / `base_low` / `low_threshold` / `max_windows_per_call` /
+`termination_streak`) are BOOT-ONLY — set them in run.json before the run; do NOT change the
+wake/termination cadence mid-run (cadence_policy.py is FOUNDATION).
 
 | Knob | Default | What it does | When to flip |
 |---|---|---|---|
@@ -729,7 +737,8 @@ novelty or serial eval).
 
 ## What never to do
 
-- Never modify a `scripts/` file directly without the rewrite cycle.
+- Never modify a `scripts/` file directly without the rewrite cycle — and never rewrite
+  `cadence_policy.py` AT ALL (S1: it is FOUNDATION; the wake/termination knobs are boot-only config).
 - Never edit FOUNDATION files (schema, contract, evaluate, archive_record/query,
   diagnostics, repair_record, journal, harness, deep_research, the task's evaluate/init).
   Defer foundation ideas to the ending document.

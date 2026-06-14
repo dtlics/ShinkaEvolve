@@ -432,7 +432,9 @@ MUTABLE_TARGETS = (
     "record_policy.py",
     "stagnation_detector.py",
     "island_policy.py",
-    "cadence_policy.py",
+    # S1: cadence_policy.py is FOUNDATION (the wake-decay schedule + run termination are not
+    # orchestrator-rewritable); it is intentionally NOT in MUTABLE_TARGETS, so snapshot()/deploy()
+    # refuse it. Its knobs (early_phase_windows/base_low/termination_streak/…) are boot-only config.
     "construct_mutation_prompt.py",
     "mutate.py",
     "meta_summarize.py",

@@ -195,5 +195,5 @@ git push -u origin <branch>        # origin = dtlics/ShinkaEvolve.git
 - Do not install the shinka skills into `~/.claude/skills/` (global). They live at `.claude/skills/` in this repo and track this branch.
 - Do not edit `dr_client.py` to share env vars with the main endpoint — they're separate resources by design.
 - Do not re-add non-Azure providers or the old `shinka_run` / agentic-proposer code — this fork is Azure-only and orchestrator-driven.
-- Do not touch the FOUNDATION mid-run (sqlite schema, the scripts' JSON contract, `evaluate.py`, the user's `evaluate.py`/`initial.*`). Defer foundation ideas to the end-of-run **ending document**.
+- Do not touch the FOUNDATION mid-run (sqlite schema, the scripts' JSON contract, `evaluate.py`, the user's `evaluate.py`/`initial.*`, and — S1 — `cadence_policy.py` + the termination logic: the wake-decay schedule and when the run ends are NOT orchestrator-rewritable; their knobs are boot-only config). Defer foundation ideas to the end-of-run **ending document**.
 - Do not read a prior run's archive (`orchestrator/run_archive/`) while running a new job — those are for the user's later reference only, not run inputs.

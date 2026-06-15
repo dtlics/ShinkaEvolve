@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import sys
@@ -989,10 +990,22 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                             "incumbent": _inc_id, "error": repr(_exc)})
 
     # 4b. compute reward (MUTABLE — scoring concern, generation half)
+    # M26: on a REPAIR gen the parent is the ERRORED program (score ≈ 0), so crediting
+    # repaired_score - 0 makes a routine bug-fix look like a huge gain and BLOWS OUT the bandit's
+    # obs_max — after which every normal small delta normalizes to ~0. Use the nearest CORRECT
+    # ancestor's score (the last-good version before the error) as the pre-error baseline, so the
+    # credited delta is the repair's REAL improvement over that, not over a broken ~0 parent.
+    _reward_parent_score = parent.get("combined_score", 0.0)
+    if _repair_gen:
+        for _a in reversed(ancestors or []):  # ancestry is oldest-first → nearest is last
+            _asc = _a.get("combined_score")
+            if _a.get("correct") and isinstance(_asc, (int, float)) and math.isfinite(float(_asc)):
+                _reward_parent_score = float(_asc)
+                break
     reward = compute_reward_script.main(
         {
             "candidate": ev,
-            "parent": {"combined_score": parent.get("combined_score", 0.0)},
+            "parent": {"combined_score": _reward_parent_score},
             "mode": evo.get("reward_mode", "absolute"),
             "reward_validity_floor": evo.get("reward_validity_floor", 0.001),
         }

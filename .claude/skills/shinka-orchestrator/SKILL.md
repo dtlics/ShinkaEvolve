@@ -417,6 +417,18 @@ lock-out less likely — but watch for it anyway. "Is it the model, or our frame
 the canonical judgment only the framework-audit role makes. `model_collapse` is surfaced
 for you to act on; the framework never auto-corrects it in steady-state.
 
+**Reward baseline is sign-aware and repair-aware (M23/M26).** `compute_reward` builds the
+absolute reward against `max(parent_score, 0)` — the bandit shifts by `max(baseline, 0)` and
+asymmetric-clamps, so on a NEGATIVE-score task a correct-but-low candidate would otherwise
+collapse to the same `r=0` as a failure; the sign-aware baseline keeps it strictly above the
+floor (positive-score tasks are byte-identical). And on a REPAIR gen the credited baseline is
+the nearest CORRECT ancestor's score (the last-good version), NOT the errored parent's ≈0 —
+so a routine bug-fix doesn't look like a full-score gain and blow out the bandit's `obs_max`
+(which would then normalize every normal delta to ≈0). The bandit GEOMETRY itself
+(`exploration_coef` / `cost_aware_coef` / `exponential_base`) is FOUNDATION-adjacent — tune it
+via the levers + a calibration measure window; do NOT silently rewrite the geometry (M43 — a
+geometry change belongs in the end-of-run ending document, not a mid-run code rewrite).
+
 ## Deep research (the DR check on control-return)
 
 DR is web-grounded *discovery* (find SOTA), not *instantiation* (write the code). It is

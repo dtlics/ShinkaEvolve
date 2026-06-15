@@ -2632,6 +2632,56 @@ def test_m27_stagnation_abs_floor_fallback():
     return None
 
 
+def test_m23_sign_aware_reward_baseline():
+    # M23: with a NEGATIVE parent score, a correct candidate must still produce a strictly
+    # positive bandit signal (reward - max(parent,0) >= floor), so it can't collapse to the same
+    # r=0 as a failure under the bandit's max(baseline,0) shift + asymmetric clamp.
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import compute_reward
+    floor = 0.01
+
+    def _signal(out):  # what the AsymmetricUCB actually learns on: max(reward - max(baseline,0), 0)
+        if out["reward"] is None:
+            r_raw = 0.0  # _impute_worst_reward() for asymmetric scaling
+        else:
+            r_raw = out["reward"]
+        return max(r_raw - max(out["baseline"], 0.0), 0.0)
+
+    # negative parent, correct-but-low candidate
+    correct_neg = compute_reward.main({"candidate": {"combined_score": -4.9, "correct": True},
+                                       "parent": {"combined_score": -5.0}, "mode": "absolute",
+                                       "reward_validity_floor": floor})
+    fail_neg = compute_reward.main({"candidate": {"combined_score": None, "correct": False},
+                                    "parent": {"combined_score": -5.0}, "mode": "absolute",
+                                    "reward_validity_floor": floor})
+    assert _signal(correct_neg) >= floor - 1e-12, correct_neg          # strictly above the floor
+    assert _signal(correct_neg) > _signal(fail_neg) + 1e-9, (correct_neg, fail_neg)  # > failure
+    # positive parent unchanged (parity): reward - baseline == floor for a below-parent candidate
+    pos = compute_reward.main({"candidate": {"combined_score": 0.2, "correct": True},
+                               "parent": {"combined_score": 0.5}, "mode": "absolute",
+                               "reward_validity_floor": floor})
+    assert abs((pos["reward"] - pos["baseline"]) - floor) < 1e-9 and pos["baseline"] == 0.5
+    return None
+
+
+def test_m26_repair_baseline_avoids_obs_max_blowout():
+    # M26 (principle): feeding a repair the PRE-ERROR ancestor score (not the errored parent's
+    # ~0) keeps the credited bandit signal small, so one repair success can't blow out obs_max
+    # (after which every normal small delta would normalize to ~0). run_window picks the nearest
+    # correct ancestor as that baseline on a repair gen.
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import compute_reward
+    repaired = {"combined_score": 0.80, "correct": True}
+    wrong = compute_reward.main({"candidate": repaired, "parent": {"combined_score": 0.0},
+                                 "mode": "absolute", "reward_validity_floor": 0.001})
+    right = compute_reward.main({"candidate": repaired, "parent": {"combined_score": 0.78},
+                                 "mode": "absolute", "reward_validity_floor": 0.001})
+    sig_wrong = wrong["reward"] - max(wrong["baseline"], 0.0)   # errored parent → ≈ full score
+    sig_right = right["reward"] - max(right["baseline"], 0.0)   # last-good ancestor → real gain
+    assert sig_wrong > 0.5 and sig_right < 0.1, (sig_wrong, sig_right)
+    return None
+
+
 def test_m10_cross_island_keys_child_to_parent_island():
     # M10: in cross-island mode the parent can be drawn from a different island than the selected
     # one; the returned island_idx must be the PARENT's island (the child inherits it — islands.py
@@ -2677,8 +2727,10 @@ def test_islands_m18_migration_active_and_m16_retire():
     import tempfile
     from shinka.database import Program, ProgramDatabase, DatabaseConfig
     with tempfile.TemporaryDirectory() as td:
+        # migration OFF during setup so db.add doesn't auto-migrate and scramble the islands we
+        # place by hand; we enable it just before the manual perform_migration call.
         cfg = DatabaseConfig(db_path=os.path.join(td, "p.sqlite"), num_islands=2,
-                             migration_rate=1.0, migration_interval=1, island_elitism=True)
+                             migration_rate=0.0, migration_interval=1, island_elitism=True)
         db = ProgramDatabase(cfg, embedding_model="", read_only=False)
         try:
             def _add(pid, island, score, gen=1):
@@ -2692,11 +2744,17 @@ def test_islands_m18_migration_active_and_m16_retire():
                 db.add(Program(**kw))
                 db.cursor.execute("UPDATE programs SET island_idx=? WHERE id=?", (island, pid))
                 db.conn.commit()
-            # island 0: elite + 2 migratable; spawned island 2: one member; island 1 empty.
+            # island 0: elite + 2 migratable; spawned island 2: one member; island 1 EMPTY (so the
+            # only valid destination for island 0's migrants is the spawned island 2 — proves M18).
             _add("a0", 0, 0.9); _add("a1", 0, 0.5); _add("a2", 0, 0.4)
             _add("s0", 2, 0.6)
+            # drop any auto-seeded island copies so island 1 is genuinely empty (only our 4 rows).
+            db.cursor.execute("DELETE FROM programs WHERE id NOT IN ('a0','a1','a2','s0')")
+            db.cursor.execute("DELETE FROM archive WHERE program_id NOT IN ('a0','a1','a2','s0')")
+            db.conn.commit()
             db.cursor.execute("SELECT COUNT(*) FROM programs WHERE island_idx=2")
             before = db.cursor.fetchone()[0]
+            db.config.migration_rate = 1.0  # enable for the manual call (shared config object)
             db.island_manager.perform_migration(current_generation=1)
             db.cursor.execute("SELECT COUNT(*) FROM programs WHERE island_idx=2")
             after = db.cursor.fetchone()[0]
@@ -3253,6 +3311,8 @@ if __name__ == "__main__":
         ("islands_m15_spawn_once_and_m28_diversity_kind", test_islands_m15_spawn_once_and_m28_diversity_kind),
         ("islands_m18_migration_active_and_m16_retire", test_islands_m18_migration_active_and_m16_retire),
         ("m10_cross_island_keys_child_to_parent_island", test_m10_cross_island_keys_child_to_parent_island),
+        ("m23_sign_aware_reward_baseline", test_m23_sign_aware_reward_baseline),
+        ("m26_repair_baseline_avoids_obs_max_blowout", test_m26_repair_baseline_avoids_obs_max_blowout),
         ("s2_accept_warmup_folds_approved", test_s2_accept_warmup_folds_approved),
         ("m21_index_failclosed_and_n14_record_outcome", test_m21_index_failclosed_and_n14_record_outcome),
         ("m48_eval_foundation_smoke", test_m48_eval_foundation_smoke),

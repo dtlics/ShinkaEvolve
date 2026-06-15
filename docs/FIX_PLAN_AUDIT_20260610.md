@@ -297,6 +297,18 @@ The run owner ruled on the four gating forks:
 > islands have no genetic interaction — documented in SKILL.md. Tests added:
 > islands_m15_spawn_once_and_m28_diversity_kind, islands_m18_migration_active_and_m16_retire,
 > m10_cross_island_keys_child_to_parent_island. **Islands cluster COMPLETE** (M15/M16/M18/M28/M10/M42).
+>
+> **STATUS 2026-06-14 — Wave 5h (bandit reward baseline) LANDED + GREEN (95 passed).** **M23**
+> `compute_reward` builds the absolute reward against a SIGN-AWARE baseline `max(parent_score, 0)`
+> (matching the bandit's `max(baseline, 0)` shift + asymmetric clamp), so on a negative-score task
+> a correct-but-low candidate keeps a strictly-positive signal (>= floor) instead of collapsing to
+> the failure's `r=0`; positive-score tasks are byte-identical. **M26** on a REPAIR gen run_window
+> feeds the nearest CORRECT ancestor's score (the last-good version) as the reward baseline, not
+> the errored parent's ≈0 — so a routine bug-fix doesn't look like a full-score gain and blow out
+> the bandit's `obs_max`. **M43** (geometry = foundation-adjacent) documented as ending-doc only —
+> no mid-run geometry rewrite; tune via levers + a calibration window. Tests added:
+> m23_sign_aware_reward_baseline, m26_repair_baseline_avoids_obs_max_blowout. **Bandit cluster
+> COMPLETE** (M23/M24/M25/M26; M43 deferred to ending doc per ruling).
 
 1. **Islands:** M15 (spawn fires ≤once per stagnation episode), M18 (a spawned idx≥`num_islands` participates in migration), M28 (`diversity_kind` discriminator present), M10 (cross-island child's island == parent's), M16 retire executor protects island 0 + global-best.
 2. **Bandit:** M23/M26 (neg-parent floored arm ≠ failed arm; one repair success doesn't flip the posterior), M24 (escalated repair credits no arm; spend still in the ledger), M25 (atomic pkl + reset signal on a corrupt load).

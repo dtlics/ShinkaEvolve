@@ -66,7 +66,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # not invisible.) NEGATIVE FINITE scores pass through to the floor logic — the reward
     # math is relative, so negative-score tasks are fully supported.
     if not correct or not _score_finite:
-        return {"reward": None, "baseline": parent_score, "mode": mode}
+        # M23: return the sign-aware baseline too (the bandit max()es it with 0 anyway, so this is
+        # behavior-identical — but keeps the two branches consistent).
+        return {"reward": None, "baseline": max(parent_score, 0.0), "mode": mode}
     score = float(_raw)
 
     # HYBRID (H3 / O6 reward scale): floor the correct candidate's reward CONTRIBUTION
@@ -76,15 +78,23 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # The penalty SHAPE is the mutable lever `reward_validity_floor` (default 0.001).
     # The parent-selection SCORE scale has its own separate `validity_floor`
     # (sample_parent) — two distinct levers per open question O6.
-    # K10: strict separation assumes parent_score >= the bandit baseline (true today —
-    # set_baseline_score is never called and scores are >= 0 on cnot).
+    #
+    # M23: SIGN-AWARE baseline. The bandit resolves the effective baseline as
+    # max(passed_baseline, self._baseline=0) and then asymmetric-clamps r = max(reward -
+    # baseline, 0). With a NEGATIVE parent_score the old `reward = parent_score + max(delta,
+    # floor)` gave the bandit r = (parent_score + max(delta,floor)) - 0 = parent_score +
+    # max(delta,floor), which clamps to 0 for a sufficiently negative parent — i.e. a
+    # correct-but-low candidate becomes INDISTINGUISHABLE from a failure (also r=0). Build the
+    # reward against b = max(parent_score, 0) so the bandit's r = reward - b = max(delta, floor)
+    # >= floor > 0 for ANY parent sign. For parent_score >= 0 this is byte-identical to before.
     floor = float(payload.get("reward_validity_floor", 0.001) or 0.0)
+    baseline = max(parent_score, 0.0)
     delta = score - parent_score
     if mode == "relative":
         # baseline 0 so the bandit sees the (floored) delta directly.
         return {"reward": max(delta, floor), "baseline": 0.0, "mode": mode}
-    # absolute (default): bandit learns reward - baseline; floor that gap.
-    return {"reward": parent_score + max(delta, floor), "baseline": parent_score, "mode": mode}
+    # absolute (default): bandit learns reward - baseline; floor that gap, sign-aware baseline.
+    return {"reward": baseline + max(delta, floor), "baseline": baseline, "mode": mode}
 
 
 if __name__ == "__main__":

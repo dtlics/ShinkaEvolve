@@ -2811,10 +2811,18 @@ class ProgramDatabase:
             done["migrated"] = bool(self.island_manager.perform_migration(int(current_generation)))
         if actions.get("spawn"):
             done["spawned"] = bool(self.island_manager.spawn_new_island())
-        # retire: island_policy's default never returns a retire index. A future
-        # rewrite that does should route through the NON-destructive eviction used by
-        # spawn_island_from_program; we do not execute an ad-hoc retire here (it would
-        # risk orphaning lineage). The decision is still surfaced upstream for logging.
+        # M16: retire executor. island_policy's DEFAULT never returns a retire index (shinka
+        # spawns rather than retires), but a policy REWRITE may now decide one — and it executes
+        # via the NON-destructive CombinedIslandManager.retire_island (rows preserved +
+        # tombstoned, island_idx NULLed) which PROTECTS island 0 + the global-best island, so a
+        # retire can never orphan the seed lineage or drop the best program. A protected/absent
+        # target is a safe 0 no-op.
+        _retire = actions.get("retire_island")
+        if _retire is not None:
+            try:
+                done["retired"] = int(self.island_manager.retire_island(int(_retire)))
+            except (TypeError, ValueError):
+                done["retired"] = None  # non-integer retire index → ignore, never crash
         return done
 
     def close(self):

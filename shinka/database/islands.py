@@ -249,14 +249,28 @@ class ElitistMigrationStrategy(IslandMigrationStrategy):
         if num_islands < 2 or migration_rate <= 0:
             return False  # No migration needed
 
+        # M18: migrate over the ACTIVE island indices actually present in the archive, NOT
+        # range(num_islands). spawn_new_island allocates indices >= the configured num_islands
+        # (and does NOT bump self.config.num_islands), so a dynamically spawned island was
+        # invisible to range(num_islands) — it could neither send nor receive migrants and stayed
+        # genetically isolated for the rest of the run. Keying on the real island_idx set fixes
+        # that AND naturally skips an evicted index (NULLed island_idx leaves the set).
+        self.cursor.execute(
+            "SELECT DISTINCT island_idx FROM programs "
+            "WHERE island_idx IS NOT NULL ORDER BY island_idx"
+        )
+        active_islands = [r["island_idx"] for r in self.cursor.fetchall()]
+        if len(active_islands) < 2:
+            return False  # fewer than two populated islands → nothing to exchange
+
         logger.info(f"Performing island migration at generation {current_generation}")
 
         migrations_summary = defaultdict(lambda: defaultdict(list))
         # Track all programs selected for migration
         all_migrated_programs = set()
 
-        # For each island, select migrants to move
-        for source_idx in range(num_islands):
+        # For each ACTIVE island, select migrants to move
+        for source_idx in active_islands:
             # Count programs in this island
             self.cursor.execute(
                 "SELECT COUNT(*) FROM programs WHERE island_idx = ?",
@@ -270,8 +284,8 @@ class ElitistMigrationStrategy(IslandMigrationStrategy):
             # Number of programs to migrate
             num_migrants = max(1, int(island_size * migration_rate))
 
-            # Select destination islands (all except source)
-            dest_islands = [i for i in range(num_islands) if i != source_idx]
+            # Select destination islands (all active except source) — M18: active set, not range
+            dest_islands = [i for i in active_islands if i != source_idx]
             if not dest_islands:
                 continue
 
@@ -1036,6 +1050,26 @@ class CombinedIslandManager:
             "(de-archived + island freed; rows preserved)"
         )
         return len(ids)
+
+    def retire_island(self, idx: int) -> int:
+        """M16: explicitly retire island ``idx`` on a policy decision, via the same
+        NON-DESTRUCTIVE eviction used at the spawn cap (rows preserved + tombstoned, island_idx
+        NULLed). PROTECTS island 0 (the seed lineage) and the global-best island so a retire can
+        never orphan the seed or drop the best program. Returns the number of programs retired
+        (0 — a safe no-op — if the target is protected, absent, or empty)."""
+        protected = {0}
+        gbi = self._global_best_island()
+        if gbi is not None:
+            protected.add(gbi)
+        if idx in protected:
+            logger.warning(
+                f"retire_island: {idx} is protected (island 0 / global-best) — skipping"
+            )
+            return 0
+        if idx not in self.get_initialized_islands():
+            logger.warning(f"retire_island: {idx} is not an active island — skipping")
+            return 0
+        return int(self._evict_island(idx))
 
     def allocate_island_index_for_spawn(self) -> int:
         """Index for a new on-demand island, honoring config.max_islands. Under the

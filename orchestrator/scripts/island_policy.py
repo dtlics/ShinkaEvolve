@@ -122,6 +122,13 @@ def island_health(
                 "best": isl.get("best"),
                 # real spread when embeddings exist; else fall back to the count.
                 "diversity": spread if spread is not None else isl.get("count"),
+                # M28: disambiguate the `diversity` UNITS so a reader never compares a cosine
+                # spread (≈0..2, real embedding diversity) against a raw member count. The typed
+                # `cosine_spread` is None when <2 members carry an embedding (the fallback case),
+                # and `diversity_kind` says which basis `diversity` actually used this window.
+                "diversity_kind": "cosine_spread" if spread is not None else "member_count",
+                "cosine_spread": spread,
+                "member_count": isl.get("count"),
                 "stagnation_count": _gens_since_island_best(members, current_generation),
                 "count": isl.get("count"),  # additive: population size kept separately
             }
@@ -174,6 +181,26 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     _policy_migrate_enabled = bool(payload.get("policy_migrate_enabled", migration_rate > 0.0))
     _policy_migrate_interval = int(payload.get("policy_migrate_interval", migration_interval))
     spawn = _policy_spawn_enabled and gens_since_best >= _policy_spawn_stag
+
+    # M15: spawn-ONCE-per-stagnation-episode. The raw rule (gens_since_best >= threshold) stays
+    # TRUE every window while the island is stuck, so without a durable marker the policy would
+    # spawn a NEW island EVERY window it stays stagnant — flooding the population. The harness
+    # carries `last_policy_spawn_generation` across windows (in the window diag) and passes it
+    # back here; this is the PRIMARY guard (archive-derived best_generation alone can't say
+    # "already spawned THIS episode"). Suppress a repeat spawn while the marker is at/after the
+    # current best generation (we already spawned since the last improvement), unless an optional
+    # cooldown of generations has elapsed since that spawn. A new improvement (best_generation
+    # advancing past the marker) re-arms spawning automatically.
+    _last_spawn_gen = payload.get("last_policy_spawn_generation")
+    _spawn_cooldown = int(payload.get("policy_spawn_cooldown", 0) or 0)
+    _spawn_suppressed = False
+    if spawn and _last_spawn_gen is not None:
+        _last_spawn_gen = int(_last_spawn_gen)
+        if _last_spawn_gen >= best_generation and (
+            _spawn_cooldown <= 0 or (current_generation - _last_spawn_gen) < _spawn_cooldown
+        ):
+            spawn = False
+            _spawn_suppressed = True
     migrate = (
         _policy_migrate_enabled
         and num_islands >= 2
@@ -206,9 +233,22 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         finally:
             _db.close()
 
+    # M15: advance the durable marker ONLY when a spawn actually EXECUTED this window; otherwise
+    # carry the prior marker forward (suppressed / decision-only windows must not advance it, or
+    # the cooldown would never elapse). The harness stamps this back into the window diag.
+    _spawned = bool((executed or {}).get("spawned"))
+    if _spawned:
+        _new_spawn_marker = current_generation
+    elif _last_spawn_gen is not None:
+        _new_spawn_marker = int(_last_spawn_gen)
+    else:
+        _new_spawn_marker = None
+
     return {
         "actions": {"spawn": bool(spawn), "migrate": bool(migrate), "retire_island": None},
         "executed": executed,
+        "last_policy_spawn_generation": _new_spawn_marker,
+        "spawn_suppressed_this_episode": _spawn_suppressed,
         "reasons": {
             "enable_dynamic_islands": enable_dynamic,
             "stagnation_threshold": stagnation_threshold,

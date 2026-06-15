@@ -282,6 +282,21 @@ The run owner ruled on the four gating forks:
 > **STILL TODO (strategy store):** M22 (warn-and-stamp `revertible:False` — verify/land), L61/M36
 > (archive reads `strategy_history` from `index_path()`), L67/L81 (no fair-trial reset on revert +
 > trace-step version stamping).
+>
+> **STATUS 2026-06-14 — Wave 5g (islands foundation) LANDED + GREEN (93 passed).** **M15** spawn
+> fires ≤once per stagnation episode — `island_policy` reads a durable `last_policy_spawn_generation`
+> marker (the harness carries it across windows in the diag), suppressing repeat spawns until best
+> improves or `policy_spawn_cooldown` elapses. **M28** `island_health` emits `diversity_kind` +
+> typed `cosine_spread`/`member_count` so a spread is never compared against a raw count. **M18**
+> `ElitistMigrationStrategy.perform_migration` iterates the ACTIVE island_idx set (not
+> `range(num_islands)`), so a dynamically spawned island can finally send/receive migrants. **M16**
+> a non-destructive `retire_island` executor (protects island 0 + the global-best island) wired
+> into `apply_island_actions` — a policy rewrite may now decide a `retire_island`. **M10**
+> cross-island mode keys the child to its PARENT's island (`island_idx`) with `sampled_island_idx`
+> for provenance, so the brief + novelty gate match the child's actual island. **M42** (doc) default
+> islands have no genetic interaction — documented in SKILL.md. Tests added:
+> islands_m15_spawn_once_and_m28_diversity_kind, islands_m18_migration_active_and_m16_retire,
+> m10_cross_island_keys_child_to_parent_island. **Islands cluster COMPLETE** (M15/M16/M18/M28/M10/M42).
 
 1. **Islands:** M15 (spawn fires ≤once per stagnation episode), M18 (a spawned idx≥`num_islands` participates in migration), M28 (`diversity_kind` discriminator present), M10 (cross-island child's island == parent's), M16 retire executor protects island 0 + global-best.
 2. **Bandit:** M23/M26 (neg-parent floored arm ≠ failed arm; one repair success doesn't flip the posterior), M24 (escalated repair credits no arm; spend still in the ledger), M25 (atomic pkl + reset signal on a corrupt load).

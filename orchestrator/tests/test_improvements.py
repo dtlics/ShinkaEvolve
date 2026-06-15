@@ -2632,6 +2632,135 @@ def test_m27_stagnation_abs_floor_fallback():
     return None
 
 
+def test_m10_cross_island_keys_child_to_parent_island():
+    # M10: in cross-island mode the parent can be drawn from a different island than the selected
+    # one; the returned island_idx must be the PARENT's island (the child inherits it — islands.py
+    # assign_island), with the originally-selected island surfaced as sampled_island_idx.
+    import dataclasses
+    import tempfile
+    from shinka.database import Program, ProgramDatabase, DatabaseConfig
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import sample_parent
+    with tempfile.TemporaryDirectory() as td:
+        dbp = os.path.join(td, "p.sqlite")
+        db = ProgramDatabase(DatabaseConfig(db_path=dbp, num_islands=2), embedding_model="", read_only=False)
+        try:
+            for pid, score in (("p1", 0.5), ("p2", 0.6)):
+                kw = {}
+                for f in dataclasses.fields(Program):
+                    if f.default is not dataclasses.MISSING or f.default_factory is not dataclasses.MISSING:
+                        continue
+                    tn = getattr(f.type, "__name__", str(f.type))
+                    kw[f.name] = {"str": "", "int": 0, "float": 0.0, "bool": False}.get(tn, None)
+                kw.update(id=pid, code=f"# {pid}\n", correct=True, combined_score=score, generation=1)
+                db.add(Program(**kw))
+                db.cursor.execute("UPDATE programs SET island_idx=1 WHERE id=?", (pid,))
+                db.conn.commit()
+        finally:
+            db.close()
+        # cross-island: select island 0, but every correct parent is on island 1.
+        res = sample_parent.main({
+            "db_path": dbp,
+            "db_config": {"num_islands": 2, "enforce_island_separation": False},
+            "embedding_model": "", "island_idx": 0, "seed": 1,
+        })
+        assert res["island_idx"] == 1, res            # M10: keyed to the parent's actual island
+        assert res["sampled_island_idx"] == 0, res    # provenance: originally-selected island
+    return None
+
+
+def test_islands_m18_migration_active_and_m16_retire():
+    # M18: a dynamically spawned island (index >= num_islands) PARTICIPATES in migration (was
+    # invisible to range(num_islands)). M16: a policy-decided retire executes via the
+    # non-destructive eviction, protecting island 0 + the global-best island.
+    import dataclasses
+    import tempfile
+    from shinka.database import Program, ProgramDatabase, DatabaseConfig
+    with tempfile.TemporaryDirectory() as td:
+        cfg = DatabaseConfig(db_path=os.path.join(td, "p.sqlite"), num_islands=2,
+                             migration_rate=1.0, migration_interval=1, island_elitism=True)
+        db = ProgramDatabase(cfg, embedding_model="", read_only=False)
+        try:
+            def _add(pid, island, score, gen=1):
+                kw = {}
+                for f in dataclasses.fields(Program):
+                    if f.default is not dataclasses.MISSING or f.default_factory is not dataclasses.MISSING:
+                        continue
+                    tn = getattr(f.type, "__name__", str(f.type))
+                    kw[f.name] = {"str": "", "int": 0, "float": 0.0, "bool": False}.get(tn, None)
+                kw.update(id=pid, code=f"# {pid}\n", correct=True, combined_score=score, generation=gen)
+                db.add(Program(**kw))
+                db.cursor.execute("UPDATE programs SET island_idx=? WHERE id=?", (island, pid))
+                db.conn.commit()
+            # island 0: elite + 2 migratable; spawned island 2: one member; island 1 empty.
+            _add("a0", 0, 0.9); _add("a1", 0, 0.5); _add("a2", 0, 0.4)
+            _add("s0", 2, 0.6)
+            db.cursor.execute("SELECT COUNT(*) FROM programs WHERE island_idx=2")
+            before = db.cursor.fetchone()[0]
+            db.island_manager.perform_migration(current_generation=1)
+            db.cursor.execute("SELECT COUNT(*) FROM programs WHERE island_idx=2")
+            after = db.cursor.fetchone()[0]
+            assert after > before, f"M18: spawned island 2 did not receive migrants ({before}->{after})"
+
+            # M16: retire island 2 (non-protected). Global best (a0=0.9) is in island 0 → protected.
+            n = db.island_manager.retire_island(2)
+            assert n >= 1
+            db.cursor.execute("SELECT COUNT(*) FROM programs WHERE island_idx=2")
+            assert db.cursor.fetchone()[0] == 0, "M16: island 2 not freed"
+            db.cursor.execute("SELECT COUNT(*) FROM programs WHERE island_idx IS NULL")
+            assert db.cursor.fetchone()[0] >= 1, "M16: retired rows were deleted, not preserved"
+            # protection: retiring island 0 is a safe no-op (seed lineage), via both entry points.
+            assert db.island_manager.retire_island(0) == 0
+            assert db.apply_island_actions({"retire_island": 0}, current_generation=2)["retired"] == 0
+        finally:
+            db.close()
+    return None
+
+
+def test_islands_m15_spawn_once_and_m28_diversity_kind():
+    # M28: island_health emits a diversity_kind discriminator (+ typed cosine_spread/member_count)
+    # so a cosine spread is never compared against a raw count. M15: island_policy spawns at most
+    # once per stagnation episode (a durable marker suppresses repeat spawns until best improves).
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import island_policy as ip
+    orig = ip.archive_query.main
+    try:
+        # --- M28 cosine_spread basis (≥2 embeddings)
+        ip.archive_query.main = lambda payload: {"result": [
+            {"island_idx": 0, "generation": 1, "correct": True, "combined_score": 0.5, "embedding": [1.0, 0.0]},
+            {"island_idx": 0, "generation": 2, "correct": True, "combined_score": 0.6, "embedding": [0.0, 1.0]},
+        ]}
+        rows = ip.island_health([{"island_idx": 0, "best": 0.6, "count": 2}],
+                                db_path="x", db_config={}, embedding_model="m")
+        assert rows[0]["diversity_kind"] == "cosine_spread"
+        assert rows[0]["cosine_spread"] is not None and rows[0]["member_count"] == 2
+        # --- M28 member_count fallback (<2 embeddings)
+        ip.archive_query.main = lambda payload: {"result": [
+            {"island_idx": 0, "generation": 1, "correct": True, "combined_score": 0.5}]}
+        rows2 = ip.island_health([{"island_idx": 0, "best": 0.5, "count": 1}],
+                                 db_path="x", db_config={}, embedding_model="m")
+        assert rows2[0]["diversity_kind"] == "member_count" and rows2[0]["cosine_spread"] is None
+
+        # --- M15 spawn-once: stagnant island (best at gen 1, current gen 60, threshold 10)
+        ip.archive_query.main = lambda payload: {"result": [
+            {"island_idx": 0, "generation": 1, "correct": True, "combined_score": 1.0},
+            {"island_idx": 0, "generation": 60, "correct": True, "combined_score": 0.5}]}
+        base = {"db_path": "x", "db_config": {"num_islands": 2},
+                "policy_spawn_enabled": True, "policy_spawn_stagnation": 10}
+        assert ip.main(dict(base))["actions"]["spawn"] is True  # no marker → spawn armed
+        r2 = ip.main({**base, "last_policy_spawn_generation": 5})  # marker ≥ best_generation(1)
+        assert r2["actions"]["spawn"] is False and r2["spawn_suppressed_this_episode"] is True
+        # --- M15 re-arm: a NEW best (gen 50) past the marker (5) re-enables spawning
+        ip.archive_query.main = lambda payload: {"result": [
+            {"island_idx": 0, "generation": 50, "correct": True, "combined_score": 2.0},
+            {"island_idx": 0, "generation": 60, "correct": True, "combined_score": 1.0}]}
+        r3 = ip.main({**base, "last_policy_spawn_generation": 5})
+        assert r3["actions"]["spawn"] is True and r3["spawn_suppressed_this_episode"] is False
+    finally:
+        ip.archive_query.main = orig
+    return None
+
+
 def test_revert_completeness_cluster():
     # Strategy-store full-rewind safety net: M19 (single deploy blocked by a bundle-rejected
     # hash), L63 (all-or-nothing bundle restore), L66 (restore removes snapshot-absent state
@@ -3121,6 +3250,9 @@ if __name__ == "__main__":
         ("s1_cadence_policy_is_foundation", test_s1_cadence_policy_is_foundation),
         ("l80_cleanup_warmup_honest", test_l80_cleanup_warmup_honest),
         ("revert_completeness_cluster", test_revert_completeness_cluster),
+        ("islands_m15_spawn_once_and_m28_diversity_kind", test_islands_m15_spawn_once_and_m28_diversity_kind),
+        ("islands_m18_migration_active_and_m16_retire", test_islands_m18_migration_active_and_m16_retire),
+        ("m10_cross_island_keys_child_to_parent_island", test_m10_cross_island_keys_child_to_parent_island),
         ("s2_accept_warmup_folds_approved", test_s2_accept_warmup_folds_approved),
         ("m21_index_failclosed_and_n14_record_outcome", test_m21_index_failclosed_and_n14_record_outcome),
         ("m48_eval_foundation_smoke", test_m48_eval_foundation_smoke),

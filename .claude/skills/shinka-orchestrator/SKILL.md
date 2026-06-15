@@ -197,7 +197,7 @@ Diagnostics shape (printed to stdout + appended to `journal/windows.jsonl`):
   repair_mode_on, repair_fail_count, repair_tombstoned_count,
   fix_rate, fix_success_rate, needs_fix_rate,
   llm_bandit_weights, llm_bandit_counts,
-  island_health:[{id,best,diversity,stagnation_count,count}],
+  island_health:[{id,best,diversity,diversity_kind,cosine_spread,member_count,stagnation_count,count}],
   stagnation_flag, low_streak, termination_streak, exhausted_retry_slots, exhausted_retry_count,
   trigger_metric, total_programs, correct_programs,
   window_cost, total_cost, budget_remaining, budget_hit, windows_run, return_reason }
@@ -638,7 +638,7 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
 | `compute_reward.py` | reward signal for selection | **Yes** | No |
 | `record_policy.py` | derived signals → metadata | **Yes** | No |
 | `stagnation_detector.py` | the low-window trigger | **Yes** | No |
-| `island_policy.py` | fork/migrate/retire decision | **Yes** | No |
+| `island_policy.py` | fork/migrate/retire decision (spawn fires ≤once per stagnation episode via the durable `last_policy_spawn_generation` marker — M15; a rewrite MAY now decide a `retire_island`, executed non-destructively + protecting island 0 + the global best — M16) | **Yes** | No |
 | `cadence_policy.py` | WHEN control returns (early-phase per-window floor, then the work-score taper; not the budget) | No (FOUNDATION — S1; knobs are boot-only) | No |
 | `island_brief.py` | record a per-island direction (auto-called by the meta round) | **Yes** | No |
 | `spawn_island.py` | seed a new island from a grounded program | No (foundation) | No |
@@ -725,11 +725,11 @@ wake/termination cadence mid-run (cadence_policy.py is FOUNDATION).
 | `reward_on_reject` | cost_only | a novelty-rejected slot bills the arm's COST only (neutral) vs `penalize` | a duplicate-prone arm should be penalized for waste |
 | `force_explore` / `llm_subset` | false / null | ignore the collapsed bandit (uniform) / restrict to a subset | re-open a starved/locked-out arm (the framework-audit check) |
 | `use_text_feedback` | true | feed the evaluator's failure reason into the fix/repair/meta prompts | false on a spoil-risk task — a COMPLETE suppression (gates the fix, sampled-ancestor, AND meta error-text channels — H9) |
-| `island_policy_driven` | false | drive spawn/migrate via mutable `island_policy.py` at window boundaries | repairing population structure. H10: the policy reads its OWN gates — set `policy_migrate_enabled` / `policy_migrate_interval` / `policy_spawn_enabled` / `policy_spawn_stagnation` and keep the db_config auto-triggers OFF (`enable_dynamic_islands:false`, `migration_rate:0`) to avoid double-execution; the executor result + any crash are surfaced on stderr (M17). `retire` has no executor yet (M16). |
+| `island_policy_driven` / `policy_spawn_cooldown` | false / 0 | drive spawn/migrate/retire via mutable `island_policy.py` at window boundaries | repairing population structure. H10: the policy reads its OWN gates — set `policy_migrate_enabled` / `policy_migrate_interval` / `policy_spawn_enabled` / `policy_spawn_stagnation` and keep the db_config auto-triggers OFF (`enable_dynamic_islands:false`, `migration_rate:0`) to avoid double-execution; the executor result + any crash are surfaced on stderr (M17). M15: a spawn fires at most ONCE per stagnation episode (the harness carries `last_policy_spawn_generation`; a new best re-arms it; `policy_spawn_cooldown` > 0 lets it re-fire after N gens). M16: `retire` now HAS a non-destructive executor (protects island 0 + global best) — a rewrite may set `retire_island`. |
 | `brief_compose_mode` | replace | how a per-island brief combines with the global `meta_directions`: `replace` (default) = the brief STANDS IN for the global direction; `augment` = the brief LAYERS on top | NOTE (H8): under the default `replace`, once an island has a brief (window 1+) the global `meta_directions` is computed then DISCARDED per-gen — set `augment` to keep BOTH. The DR-grounding recipe relies on `replace` so its pinned direction steers the run (target it via the H9 parent/island pin, not the global direction). |
 | `island_selection_strategy` / `enforce_island_separation` (db_config) | uniform / true | island selection pressure (`uniform`=`equal` are aliases; `proportional`=by population count; `weighted`=by island best-fitness) / same-island vs cross-island inspirations | concentrate sampling on the LARGEST island → `proportional`; on the best-fitness island → `weighted`. ⚠️ BOTH REINFORCE the leader — NEITHER rescues a starved/small island (no live strategy does; small-island rescue needs `archive_floor_per_island` ↑ or a `_select_island` rewrite). cross-pollination → separation `false`. (These are `db_config` knobs, not `evo.*`.) |
 | `archive_floor_per_island` | 3 (db_config) | per-island archive floor — a dominant island can't evict another island below this many members (H2) | islands collapsing to one lineage → raise; a single-family task → 0 (pure global fitness) |
-| `migration_rate` / `migration_interval` | 0 / 10 (db_config) | island elite migration; **0 = OFF by default**. Execution IS wired (every archive add runs deferred migration), so flipping it on is a live config change — NOT a code rewrite | turn it on at BOOT (run.json `db_config`) OR mid-run (edit `db_config` at a control-return; the next relaunched cluster reads it — schema-safe) → `migration_rate` ≈ 0.05 |
+| `migration_rate` / `migration_interval` | 0 / 10 (db_config) | island elite migration; **0 = OFF by default**. Execution IS wired (every archive add runs deferred migration), so flipping it on is a live config change — NOT a code rewrite. M18: migration now iterates the ACTIVE island_idx set, so a dynamically SPAWNED island participates (it was invisible to the old `range(num_islands)`) | turn it on at BOOT (run.json `db_config`) OR mid-run (edit `db_config` at a control-return; the next relaunched cluster reads it — schema-safe) → `migration_rate` ≈ 0.05 |
 | `termination_streak` | 5 (cadence) | consecutive stagnant+intervened control-returns that auto-terminate the run | raise to give a stuck search more intervention attempts before stopping |
 | `meta_failures_first_frac` | 0.5 | how much of the meta context is recent failures vs top performers | failure-dominated window where the failure_note comes back vague → 0.75 |
 | `extra_guidance` | none | free text appended to the next window's mutation system prompt | nudge the search without a code rewrite |
@@ -742,8 +742,13 @@ inspirations (else just the direction text) — so the brief changes WHICH code 
 sees, not only the prompt text; `brief_compose_mode` (replace) makes that direction stand
 in for the global one. Genetic separation is protected by `archive_floor_per_island`
 (default 3 — a dominant island can't evict a young one below its floor) and, if enabled,
-`migration_rate`. Hand-authoring a brief via `island_brief.py` is the override, not the
-default path. (A cap-hit incomplete model response always returns its billed partial text,
+`migration_rate`. **M42 — by default islands have NO genetic interaction**: `migration_rate`
+is 0 and `enforce_island_separation` is true, so islands diverge only by DIRECTION (briefs),
+never by exchanging genes; if you want cross-island gene flow you must enable migration
+(`migration_rate` ≈ 0.05) or cross-island inspirations (`enforce_island_separation:false`).
+Cross-island inspirations key the child to its PARENT's island (M10: `island_idx` = parent's,
+`sampled_island_idx` = the originally-selected island for provenance). Hand-authoring a brief
+via `island_brief.py` is the override, not the default path. (A cap-hit incomplete model response always returns its billed partial text,
 and an unpriced billed response logs a warning and is billed $0 — neither is a tunable knob.)
 
 The rollback basket has tuning knobs passed to `rollback_decision.decide()` (NOT `evo.*`):

@@ -212,6 +212,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 "parent_id": parent.id,
                 "island_idx": getattr(parent, "island_idx", None),
+                "sampled_island_idx": getattr(parent, "island_idx", None),  # M10: repair stays on the parent's island
                 "archive_inspiration_ids": [],
                 "top_k_inspiration_ids": [],
                 "needs_fix": True,
@@ -247,6 +248,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "parent_id": parent.id,
             "island_idx": getattr(parent, "island_idx", None),
+            "sampled_island_idx": getattr(parent, "island_idx", None),  # M10: child on the parent's island
             "archive_inspiration_ids": [],
             "top_k_inspiration_ids": [],
             "needs_fix": bool(needs_fix),
@@ -305,6 +307,18 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Sample a parent by the weighted probabilities — or use the H9 pin when given.
     parent = _pinned if _pinned is not None else rng.choices(pool, weights=probs, k=1)[0]
 
+    # M10: the CHILD belongs to its PARENT's island (that is where the new genotype lives in the
+    # population structure), which can DIFFER from the abstractly-selected island_idx when
+    # enforce_island_separation=False (cross-island: the parent is drawn from ALL islands) or when
+    # an empty selected island fell back to the full archive. Re-key island_idx to the parent's
+    # island so the meta brief loaded below AND the downstream novelty/record keying all match the
+    # child's ACTUAL island; keep the originally-sampled island as provenance. Same-island mode
+    # already has parent.island_idx == island_idx, so this is a no-op there (parity preserved).
+    sampled_island_idx = island_idx
+    _parent_island = getattr(parent, "island_idx", None)
+    if _parent_island is not None:
+        island_idx = _parent_island
+
     # Inspirations (H1): DIRECTION-ORIENTED when this island has a STRUCTURED meta brief —
     # sample ONE of its directions and use the programs ASSIGNED to it as the exemplars
     # (else just the direction text). Pre-brief, fall through to the score-ranked default
@@ -336,7 +350,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "parent_id": parent.id,
-        "island_idx": island_idx,
+        "island_idx": island_idx,                  # M10: the child's ACTUAL island (parent's)
+        "sampled_island_idx": sampled_island_idx,  # M10: the originally-selected island (provenance)
         "archive_inspiration_ids": archive_insp,
         "top_k_inspiration_ids": top_k,
         "sampled_direction": sampled_direction,  # H1: per-gen direction text for the prompt

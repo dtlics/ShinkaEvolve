@@ -1205,6 +1205,9 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         # thresholds). Default off => today's behavior. Use with the db_config
         # auto-triggers off (enable_dynamic_islands=false + migration_rate=0, the
         # defaults) to avoid double-execution. Never let it break the window.
+        # M15: carry the spawn-once marker across windows so island_policy suppresses a repeat
+        # spawn while an island stays stagnant (default None on the first window / a fresh run).
+        _spawn_marker = _prev_win[-1].get("last_policy_spawn_generation") if _prev_win else None
         if evo.get("island_policy_driven"):
             import sys as _sys
             try:
@@ -1212,13 +1215,19 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     "db_path": db_path, "db_config": db_config,
                     "embedding_model": embedding_model,
                     "current_generation": (next_gen + iters_run - 1) if iters_run else next_gen,
+                    # M15: pass the durable marker + the configured cooldown so the policy is the
+                    # primary spawn-once guard; capture the (advanced/carried) value back below.
+                    "last_policy_spawn_generation": _spawn_marker,
+                    "policy_spawn_cooldown": evo.get("policy_spawn_cooldown", 0),
                     "apply": True,
                 })
+                _spawn_marker = (_ip_res or {}).get("last_policy_spawn_generation", _spawn_marker)
                 # M17: SURFACE what actually ran (the result was discarded), so the agent can
                 # tell "policy decided nothing" from "policy crashed". stderr (not log_step,
                 # which only writes the trace stream; not _trace, out of scope here).
                 print(f"[island_policy] window {widx}: actions={(_ip_res or {}).get('actions')} "
-                      f"executed={(_ip_res or {}).get('executed')}", file=_sys.stderr)
+                      f"executed={(_ip_res or {}).get('executed')} "
+                      f"spawn_marker={_spawn_marker}", file=_sys.stderr)
             except Exception:
                 # M17: log the traceback instead of a silent pass; never break the window.
                 import traceback as _tb
@@ -1297,6 +1306,9 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         )
         diag["window_cost"] = counters["cost"]
         diag["budget_hit"] = budget_hit
+        # M15: persist the spawn-once marker into the durable window record so the NEXT window's
+        # island_policy call sees "already spawned this episode" and suppresses a repeat spawn.
+        diag["last_policy_spawn_generation"] = _spawn_marker
         journal.append_window(cfg["results_dir"], diag)  # folds window_cost into the ledger
 
         # P3-T2: AUTOMATIC per-window meta round — run by the HARNESS, not the agent. One

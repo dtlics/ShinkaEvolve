@@ -613,7 +613,20 @@ def archive_run(
         src = os.path.join(results_dir, rel)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(dest, os.path.basename(rel)))
-    sidx = os.path.join(results_dir, "strategy_history", "index.json")
+    # M36: the strategy history lives at strategy_store.history_dir() (the orchestrator tree, or
+    # SHINKA_ORCH_HISTORY_DIR), NOT under results_dir — the old `results_dir/strategy_history`
+    # path never existed, so the archive silently omitted the deploy/outcome audit trail. Read
+    # the index from the REAL location.
+    try:
+        import sys as _sys
+
+        if os.path.dirname(__file__) not in _sys.path:
+            _sys.path.insert(0, os.path.dirname(__file__))
+        import strategy_store as _ss  # harness sibling
+
+        sidx = str(_ss.index_path())
+    except Exception:
+        sidx = os.path.join(results_dir, "strategy_history", "index.json")  # fallback
     if os.path.exists(sidx):
         os.makedirs(os.path.join(dest, "strategy_history"), exist_ok=True)
         shutil.copy2(sidx, os.path.join(dest, "strategy_history", "index.json"))

@@ -221,3 +221,7 @@ cython_debug/
 # Archived completed runs (local reference only — P8-T1); do not read prior
 # archives while running a new job.
 orchestrator/run_archive/
+
+# Per-strategy + per-state snapshots and the deploy/outcome index (M36): repo-level,
+# written by strategy_store at history_dir() — local run state, never committed.
+orchestrator/strategy_history/

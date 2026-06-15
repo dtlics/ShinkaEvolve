@@ -309,6 +309,20 @@ The run owner ruled on the four gating forks:
 > no mid-run geometry rewrite; tune via levers + a calibration window. Tests added:
 > m23_sign_aware_reward_baseline, m26_repair_baseline_avoids_obs_max_blowout. **Bandit cluster
 > COMPLETE** (M23/M24/M25/M26; M43 deferred to ending doc per ruling).
+>
+> **STATUS 2026-06-14 — Wave 5i (strategy-store + archive completeness) LANDED + GREEN (97 passed).**
+> **M22** `deploy`/`deploy_bundle` without `results_dir` now WARN + stamp `revertible:False` on the
+> index entry (and return it) — honest that a code-only deploy can't be fully state-rewound, without
+> hard-requiring results_dir (which would break smoke/bundle tests). **M36** `journal.archive_run`
+> reads `strategy_history/index.json` from `strategy_store.index_path()` (the real `history_dir()` /
+> `SHINKA_ORCH_HISTORY_DIR` location), not the never-existing `results_dir/strategy_history` — the
+> archive's deploy/outcome audit trail was silently empty before; CLAUDE.md:155-156 corrected +
+> `.gitignore` now ignores `orchestrator/strategy_history/`. SKILL.md rewrite-cycle teaches "always
+> pass results_dir / M22". Tests added: m22_deploy_without_results_dir_stamps_not_revertible,
+> m36_archive_reads_strategy_history_from_index_path.
+> **STILL TODO:** L67/L81 (no fair-trial reset on revert + trace-step version stamping); meta L19/L23
+> (per-island recency floor); M2 (per-candidate cost stream); M45 (rollback noise); doc tail (M37/M39,
+> L41/L43/L88, L-series); Wave 5 lows/nits.
 
 1. **Islands:** M15 (spawn fires ≤once per stagnation episode), M18 (a spawned idx≥`num_islands` participates in migration), M28 (`diversity_kind` discriminator present), M10 (cross-island child's island == parent's), M16 retire executor protects island 0 + global-best.
 2. **Bandit:** M23/M26 (neg-parent floored arm ≠ failed arm; one repair success doesn't flip the posterior), M24 (escalated repair credits no arm; spend still in the ledger), M25 (atomic pkl + reset signal on a corrupt load).

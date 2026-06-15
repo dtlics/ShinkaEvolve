@@ -152,9 +152,12 @@ fires (`--resume` only recovers after the fact). See SKILL.md "How you launch th
 The cluster returns control on stagnation or at the work-score taper boundary; you read
 the diagnostics, optionally rewrite a mutable strategy file via the snapshot → reason →
 deploy → measure-awake → revert cycle, and continue until a termination criterion is met.
-Per-run artifacts (the archive `programs.sqlite`, `journal/`, per-strategy + per-state
-snapshots in `orchestrator/strategy_history/`) live under the run's `results_dir`
-(gitignored); a finished run is archived to `orchestrator/run_archive/` (also gitignored).
+Per-run artifacts (the archive `programs.sqlite`, `journal/`) live under the run's
+`results_dir` (gitignored); the per-strategy + per-state snapshots + the deploy/outcome
+`index.json` live at the repo-level `orchestrator/strategy_history/` (also gitignored — its
+location is `strategy_store.history_dir()`, overridable via `SHINKA_ORCH_HISTORY_DIR`, NOT
+under `results_dir`). A finished run is archived to `orchestrator/run_archive/` (also
+gitignored), and the archive pulls `strategy_history/index.json` from that real location (M36).
 The old `shinka_run` CLI was removed in the Azure-only prune.
 
 ### Active user task

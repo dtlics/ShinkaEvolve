@@ -204,6 +204,20 @@ def deploy(
         if results_dir
         else None
     )
+    # M22: a deploy with NO results_dir takes no STATE snapshot (archive/bandit/ledger), so it is
+    # only CODE-revertible — a measure-window regression could not be fully rewound. Rather than
+    # hard-require results_dir (which breaks smoke_test + bundle unit tests that deploy without a
+    # run), WARN and stamp revertible:False so the audit trail is honest about what a later
+    # rollback can actually restore.
+    revertible = state_snap_id is not None
+    if not revertible:
+        import sys as _sys
+
+        _sys.stderr.write(
+            f"[strategy_store] WARNING: deploy of {target!r} has no results_dir → no state "
+            f"snapshot; this deploy is CODE-revertible only (not a full code+state rewind). "
+            f"Pass results_dir to make it fully revertible.\n"
+        )
     dst = scripts_dir() / target
     shutil.copy2(candidate_path, dst)
     new_hash = snapshot(target, reason=reason)
@@ -215,6 +229,7 @@ def deploy(
             "prior_hash": prior_hash,
             "new_hash": new_hash,
             "state_snap_id": state_snap_id,
+            "revertible": revertible,  # M22: full code+state rewind possible?
             "reason": reason,
             "window_index": window_index,
             "prior_J": prior_J,
@@ -223,7 +238,8 @@ def deploy(
             "timestamp": _now(),
         }
     )
-    return {"prior_hash": prior_hash, "new_hash": new_hash, "state_snap_id": state_snap_id}
+    return {"prior_hash": prior_hash, "new_hash": new_hash, "state_snap_id": state_snap_id,
+            "revertible": revertible}
 
 
 def rollback(target: str, prior_hash: str, reason: str = "J regression") -> Dict[str, Any]:
@@ -567,6 +583,16 @@ def deploy_bundle(
         if results_dir
         else None
     )
+    # M22: parity with deploy() — a bundle with no results_dir is code-revertible only.
+    revertible = state_snap_id is not None
+    if not revertible:
+        import sys as _sys
+
+        _sys.stderr.write(
+            f"[strategy_store] WARNING: bundle deploy {[c['target'] for c in changes]} has no "
+            f"results_dir → no state snapshot; CODE-revertible only. Pass results_dir for a full "
+            f"code+state rewind.\n"
+        )
     new_hashes: Dict[str, str] = {}
     _applied: List[str] = []
     try:
@@ -594,6 +620,7 @@ def deploy_bundle(
             "prior_hashes": prior_hashes,
             "new_hashes": new_hashes,
             "state_snap_id": state_snap_id,
+            "revertible": revertible,  # M22
             "reason": reason,
             "window_index": window_index,
             "prior_J": prior_J,
@@ -602,7 +629,8 @@ def deploy_bundle(
             "timestamp": _now(),
         }
     )
-    return {"prior_hashes": prior_hashes, "new_hashes": new_hashes, "state_snap_id": state_snap_id}
+    return {"prior_hashes": prior_hashes, "new_hashes": new_hashes,
+            "state_snap_id": state_snap_id, "revertible": revertible}
 
 
 def rollback_bundle(prior_hashes: Dict[str, str], reason: str = "J regression") -> Dict[str, Any]:

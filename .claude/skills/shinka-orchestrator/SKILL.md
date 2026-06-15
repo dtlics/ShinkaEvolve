@@ -520,13 +520,16 @@ rewrite from poisoning the run. Helpers: `harness/strategy_store.py`,
    target's modes — e.g. `select_llm`'s select + weights + update — so a rewrite that
    breaks the bandit-counts snapshot is caught before deploy.) Mechanical error → fix,
    retry ≤2; structural → abandon.
-4. **Snapshot + deploy.** Pass `results_dir=` so `deploy` first calls `snapshot_state`,
+4. **Snapshot + deploy.** ALWAYS pass `results_dir=` so `deploy` first calls `snapshot_state`,
    which snapshots the framework files AND the run state (archive DB + bandit + ledger) so
-   the rewrite is recoverable (snapshot only when no window subprocess is live). Single
-   file: `strategy_store.deploy(candidate, target, reason, window_index, prior_J,
-   concern=, results_dir=)`. A whole concern: `validate_bundle` then
-   `deploy_bundle([...], reason, window_index, prior_J, concern=, results_dir=)`. The
-   harness stamps the full `strategy_fingerprint` into every window; log the rewrite with
+   the rewrite is recoverable (snapshot only when no window subprocess is live — M20 flags a
+   snapshot taken during a live window). **M22: a deploy WITHOUT `results_dir` is stamped
+   `revertible:False`** (code-only, no state snapshot) and warns — so never omit it for a real
+   mid-run rewrite, or a regression can't be fully rewound. Single file:
+   `strategy_store.deploy(candidate, target, reason, window_index, prior_J, concern=,
+   results_dir=)`. A whole concern: `validate_bundle` then `deploy_bundle([...], reason,
+   window_index, prior_J, concern=, results_dir=)`. The harness stamps the full
+   `strategy_fingerprint` into every window; log the rewrite with
    `journal.append_intervention(...)`.
 5. **Measure, STAYING AWAKE.** Run exactly ONE measure window with tracing on so its step
    logs exist: `run_window.py --config <run>/run.json --windows 1 --trace-steps`. Read its

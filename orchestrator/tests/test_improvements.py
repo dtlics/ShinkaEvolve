@@ -2922,6 +2922,60 @@ def test_revert_completeness_cluster():
     return None
 
 
+def test_m22_deploy_without_results_dir_stamps_not_revertible():
+    # M22: a deploy with no results_dir takes no STATE snapshot → it is code-revertible only.
+    # Warn + stamp revertible:False (don't hard-require results_dir, which breaks smoke/bundle).
+    import importlib
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        sc, hi = os.path.join(td, "scripts"), os.path.join(td, "hist")
+        os.makedirs(sc)
+        os.environ["SHINKA_ORCH_SCRIPTS_DIR"] = sc
+        os.environ["SHINKA_ORCH_HISTORY_DIR"] = hi
+        try:
+            import strategy_store as ss
+            importlib.reload(ss)
+            open(os.path.join(sc, "compute_reward.py"), "w", encoding="utf-8").write("def main(p):\n    return 1\n")
+            cand = os.path.join(td, "c.py"); open(cand, "w", encoding="utf-8").write("def main(p):\n    return 2\n")
+            res = ss.deploy(cand, "compute_reward.py", reason="no-rd", window_index=1)  # no results_dir
+            assert res["revertible"] is False and res["state_snap_id"] is None, res
+            entry = [e for e in ss.read_index() if e.get("new_hash") == res["new_hash"]][-1]
+            assert entry["revertible"] is False
+        finally:
+            os.environ.pop("SHINKA_ORCH_SCRIPTS_DIR", None)
+            os.environ.pop("SHINKA_ORCH_HISTORY_DIR", None)
+            importlib.reload(ss)
+    return None
+
+
+def test_m36_archive_reads_strategy_history_from_index_path():
+    # M36: archive_run copies strategy_history/index.json from strategy_store's REAL location
+    # (history_dir() / SHINKA_ORCH_HISTORY_DIR), not the never-existing results_dir/strategy_history.
+    import tempfile
+    import json as _json
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import journal
+    with tempfile.TemporaryDirectory() as td:
+        rd = os.path.join(td, "run")
+        os.makedirs(os.path.join(rd, "journal"))
+        _json.dump({"run_id": "r1", "total_cost": 0.0},
+                   open(os.path.join(rd, "journal", "run.json"), "w", encoding="utf-8"))
+        hist = os.path.join(td, "hist")
+        os.makedirs(hist)
+        _json.dump([{"target": "x.py", "status": "accepted"}],
+                   open(os.path.join(hist, "index.json"), "w", encoding="utf-8"))
+        os.environ["SHINKA_ORCH_HISTORY_DIR"] = hist
+        try:
+            dest = journal.archive_run(rd, dest_root=os.path.join(td, "arch"), run_id="r1", finished_at=1)
+            copied = os.path.join(dest, "strategy_history", "index.json")
+            assert os.path.exists(copied), "M36: archive omitted strategy_history/index.json"
+            data = _json.loads(open(copied, encoding="utf-8").read())
+            assert data and data[0]["target"] == "x.py"
+        finally:
+            os.environ.pop("SHINKA_ORCH_HISTORY_DIR", None)
+    return None
+
+
 def test_l80_cleanup_warmup_honest():
     # L80: cleanup_warmup returns the REAL result — False for a missing dir, True only when the
     # dir is actually gone (not a false True if rmtree silently failed).
@@ -3307,6 +3361,8 @@ if __name__ == "__main__":
         ("m1_recent_meta_output_rehydrates", test_m1_recent_meta_output_rehydrates),
         ("s1_cadence_policy_is_foundation", test_s1_cadence_policy_is_foundation),
         ("l80_cleanup_warmup_honest", test_l80_cleanup_warmup_honest),
+        ("m22_deploy_without_results_dir_stamps_not_revertible", test_m22_deploy_without_results_dir_stamps_not_revertible),
+        ("m36_archive_reads_strategy_history_from_index_path", test_m36_archive_reads_strategy_history_from_index_path),
         ("revert_completeness_cluster", test_revert_completeness_cluster),
         ("islands_m15_spawn_once_and_m28_diversity_kind", test_islands_m15_spawn_once_and_m28_diversity_kind),
         ("islands_m18_migration_active_and_m16_retire", test_islands_m18_migration_active_and_m16_retire),

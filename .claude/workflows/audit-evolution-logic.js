@@ -31,7 +31,7 @@ shinka/ (framework the scripts lean on): core/{config,sampler,wrap_eval}.py
   database/{dbase,islands,island_sampler,parents,inspirations,complexity,display}.py
   llm/{client,llm,query,kwargs,constants,prioritization}.py llm/agent/{dr_client,background_model}.py
   llm/providers/{model_resolver,openai,pricing,result}.py embed/{client,embedding} embed/providers/pricing.py
-  prompts/{prompts_base,prompts_diff,prompts_full,prompts_cross,prompts_fix,prompts_meta,prompts_novelty,prompts_deep_research,prompts_init}.py
+  prompts/{prompts_base,prompts_diff,prompts_full,prompts_cross,prompts_fix,prompts_novelty,prompts_deep_research,prompts_init}.py
   edit/{apply_diff,apply_full,summary}.py utils/{eval_stop,load_df,languages,general}.py
 repo docs: CLAUDE.md taxonomy.md (HISTORICAL) README.md configs/README.md
   .claude/skills/{shinka-setup,shinka-convert,shinka-inspect}/SKILL.md
@@ -196,7 +196,7 @@ KEY CHECKS: (a) Does it genuinely keep the BETTER-scoring of the two near-duplic
   {
     key: 'meta-round',
     title: 'Automatic per-window meta round (per-island directions)',
-    files: 'orchestrator/scripts/meta_summarize.py, orchestrator/scripts/island_brief.py, orchestrator/harness/run_window.py (meta block), shinka/prompts/prompts_meta.py',
+    files: 'orchestrator/scripts/meta_summarize.py, orchestrator/scripts/island_brief.py, orchestrator/harness/run_window.py (meta block)',
     docs: '.claude/skills/shinka-orchestrator/SKILL.md "The automatic meta round", levers auto_meta / meta_model / meta_failures_first_frac / brief_compose_mode',
     spec: `INTENDED: Every window the harness calls meta_summarize ONCE → global directions + a failure_note + ONE differentiated direction PER LIVE ISLAND, auto-recorded as per-island briefs (via island_brief.py) so islands differentiate BY DEFAULT. The user also intends that meta ASSIGNS directions that already correspond to working code to the existing entries (vs net-new creative directions). Meta is budget-gated and wrapped so a meta failure NEVER aborts the window; its cost folds into the ledger and is NOT double-counted.
 KEY CHECKS: (a) Does meta actually emit one DISTINCT direction per live island (count + differentiation), and does run_window persist each into the correct island's brief? (b) Does meta receive the live island list + the current archive as context? (c) Does the "assign already-working directions to existing program entries" behavior EXIST in code, or is it only the user's intent (a design-gap)? (d) Is a failure_note produced and surfaced? (e) Does auto_meta:false suppress BOTH the global directions AND the per-island briefs (islands keep their last brief)? (f) Is a meta exception truly swallowed (window continues)? (g) Is meta cost logged once (self-log) and not also appended as an intervention?`,

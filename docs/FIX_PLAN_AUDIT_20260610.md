@@ -321,8 +321,17 @@ The run owner ruled on the four gating forks:
 > pass results_dir / M22". Tests added: m22_deploy_without_results_dir_stamps_not_revertible,
 > m36_archive_reads_strategy_history_from_index_path.
 > **STILL TODO:** L67/L81 (no fair-trial reset on revert + trace-step version stamping); meta L19/L23
-> (per-island recency floor); M2 (per-candidate cost stream); M45 (rollback noise); doc tail (M37/M39,
-> L41/L43/L88, L-series); Wave 5 lows/nits.
+> (per-island recency floor); M2 (per-candidate cost stream); M45 (rollback noise); doc tail
+> (L41/L43/L88, L-series); Wave 5 lows/nits.
+>
+> **STATUS 2026-06-14 — Wave 5j (doc tail + dead-code) LANDED + GREEN (97 passed).** **M39**
+> SKILL.md rewrite-cycle step 5 now teaches surviving idle-reclaim during the multi-minute measure
+> window (background + heartbeat, `--resume` on kill). **M37** verified largely already-current
+> (the workflow's termination rule, no-latency-routing negative check, and P9-T0-table-removed note
+> are all up to date) — the one remaining stale anchor was the dead `prompts_meta.py` reference.
+> **L20** deleted dead `shinka/prompts/prompts_meta.py` (META_STEP1/2/3 — the orchestrator's
+> `meta_summarize.py` builds its own prompts and never imported them) + removed its
+> `shinka/prompts/__init__.py` re-exports + the two `audit-evolution-logic.js` pointers.
 
 1. **Islands:** M15 (spawn fires ≤once per stagnation episode), M18 (a spawned idx≥`num_islands` participates in migration), M28 (`diversity_kind` discriminator present), M10 (cross-island child's island == parent's), M16 retire executor protects island 0 + global-best.
 2. **Bandit:** M23/M26 (neg-parent floored arm ≠ failed arm; one repair success doesn't flip the posterior), M24 (escalated repair credits no arm; spend still in the ledger), M25 (atomic pkl + reset signal on a corrupt load).

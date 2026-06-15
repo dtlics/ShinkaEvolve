@@ -534,7 +534,14 @@ rewrite from poisoning the run. Helpers: `harness/strategy_store.py`,
 5. **Measure, STAYING AWAKE.** Run exactly ONE measure window with tracing on so its step
    logs exist: `run_window.py --config <run>/run.json --windows 1 --trace-steps`. Read its
    `steps.jsonl` — do not go to wait-mode yet. (If the effect needs more than one window,
-   mark it to check next round — rare.)
+   mark it to check next round — rare.) **M39 — a measure window can run for many minutes
+   (one full window of eval subprocesses), so survive idle-reclaim the same way the main
+   cluster does:** launch it in the BACKGROUND (it returns control by EXITING) and hold the
+   short self-wake **heartbeat** (see "How you launch the inner loop") so the sandbox can't
+   idle-reap the launcher→run_window→eval group while you wait; on a kill, `--resume` recovers
+   and you re-measure. `run_window` self-caffeinates against host idle-sleep, but the heartbeat
+   is what beats sandbox idle-reclaim of a backgrounded measure window — do NOT block the
+   session waiting on it synchronously.
 6. **Accept or revert.** Call `rollback_decision.decide(prior_window_diag,
    measure_window_diag)` (pass `measure_crashed=true` if the measure subprocess crashed /
    exited non-zero / produced unparseable output). It flags a regression if the rewrite

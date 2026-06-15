@@ -22,14 +22,9 @@ from .prompts_fix import (
     format_error_output_section,
 )
 from .prompts_init import INIT_SYSTEM_MSG, INIT_USER_MSG
-from .prompts_meta import (
-    META_STEP1_SYSTEM_MSG,
-    META_STEP1_USER_MSG,
-    META_STEP2_SYSTEM_MSG,
-    META_STEP2_USER_MSG,
-    META_STEP3_SYSTEM_MSG,
-    META_STEP3_USER_MSG,
-)
+# L20: prompts_meta.py (META_STEP1/2/3) was DEAD — the orchestrator's meta round
+# (orchestrator/scripts/meta_summarize.py) builds its own prompts and never imported these;
+# the file + its re-exports are removed.
 from .prompts_novelty import NOVELTY_SYSTEM_MSG, NOVELTY_USER_MSG
 from .prompts_deep_research import (
     DR_STAGE_C_SYS_MSG,
@@ -55,12 +50,6 @@ __all__ = [
     "format_error_output_section",
     "INIT_SYSTEM_MSG",
     "INIT_USER_MSG",
-    "META_STEP1_SYSTEM_MSG",
-    "META_STEP1_USER_MSG",
-    "META_STEP2_SYSTEM_MSG",
-    "META_STEP2_USER_MSG",
-    "META_STEP3_SYSTEM_MSG",
-    "META_STEP3_USER_MSG",
     "NOVELTY_SYSTEM_MSG",
     "NOVELTY_USER_MSG",
     # Deep-research (DR) prompt — the single web-grounded research call

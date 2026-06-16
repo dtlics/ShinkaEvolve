@@ -174,10 +174,6 @@ def _gather_recent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 def _build_user_msg(payload: Dict[str, Any], recents: List[Dict[str, Any]]) -> str:
     best = payload.get("best_program") or {}
     prior = payload.get("prior_recommendations")
-    # H9/M6: when the run disables text feedback (spoil-risk task), the meta round must NOT
-    # bake the evaluator's error text into directions either. Keep gen/score/patch — those
-    # are not evaluator *text*. Default True (feedback on).
-    _utf = bool(payload.get("use_text_feedback", True))
     parts = [f"# Goal\n{payload.get('goal', '(none)')}"]
     if best:
         parts.append(
@@ -188,7 +184,7 @@ def _build_user_msg(payload: Dict[str, Any], recents: List[Dict[str, Any]]) -> s
         # M7: a format_exc() traceback's FIRST line is the generic banner; the real
         # exception is the LAST line. Synthesized reasons (timeouts, domain failures) put
         # the reason on the first line, so only swap to the last when it's the banner.
-        e = (p.get("error_traceback") or "") if _utf else ""
+        e = p.get("error_traceback") or ""
         if not e:
             return ""
         ls = [ln for ln in e.strip().splitlines() if ln.strip()]

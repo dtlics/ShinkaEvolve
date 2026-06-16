@@ -2,8 +2,10 @@ from .prompts_base import (
     construct_eval_history_msg,
     construct_individual_program_msg,
     perf_str,
+    objective_section,
     format_text_feedback_section,
     BASE_SYSTEM_MSG,
+    EXPERT_CREATIVE_PREAMBLE,
 )
 from .prompts_diff import DIFF_SYS_FORMAT, DIFF_ITER_MSG
 from .prompts_full import (
@@ -35,8 +37,10 @@ __all__ = [
     "construct_eval_history_msg",
     "construct_individual_program_msg",
     "perf_str",
+    "objective_section",
     "format_text_feedback_section",
     "BASE_SYSTEM_MSG",
+    "EXPERT_CREATIVE_PREAMBLE",
     "DIFF_SYS_FORMAT",
     "DIFF_ITER_MSG",
     "FULL_SYS_FORMAT_DEFAULT",

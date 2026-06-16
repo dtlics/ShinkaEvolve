@@ -27,7 +27,8 @@ INPUT (stdin JSON):
     "patch_types": ["diff","full","cross"],
     "patch_type_probs": [0.6,0.3,0.1],
     "language": "python",
-    "use_text_feedback": true,   # default true (repair feedback ON); false on a spoil-risk task
+    "forced_patch_type": str | null, # D4: the patch MODE run_window sampled (diff/full/cross); null = sampler samples internally
+    "objective_brief": str | null,   # Point 4.3: orchestrator-authored objective/score-shape gloss (what we optimize + constraints)
     "inspiration_sort_order": "ascending",
     "extra_guidance": str | null,   # appended to the system prompt (rewrite lever)
     "eval_budget_sec": float | null,    # C2: per-eval time budget (task.eval_time secs) for the runtime caution
@@ -74,24 +75,6 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     if seed is not None:
         np.random.seed(int(seed))
 
-    # No-spoil (H9): when use_text_feedback is False, STRIP every evaluator-derived text
-    # channel from the parent + ALL inspiration/ancestor programs BEFORE building Program
-    # objects — so this prompt builder is a hard gate even if a caller forgets to thread
-    # the flag (the exact omission that caused H9). The PromptSampler flag below is then
-    # belt-and-suspenders, and meta is gated separately at its own assembly site.
-    if not bool(payload.get("use_text_feedback", True)):
-        _EVAL_TEXT_KEYS = ("text_feedback", "error", "error_traceback", "stdout_log", "stderr_log")
-
-        def _strip_eval_text(d: Any) -> None:
-            if isinstance(d, dict):
-                for _k in _EVAL_TEXT_KEYS:
-                    d.pop(_k, None)
-
-        _strip_eval_text(payload.get("parent"))
-        for _lst in ("archive_inspirations", "top_k_inspirations", "ancestor_inspirations"):
-            for _d in (payload.get(_lst) or []):
-                _strip_eval_text(_d)
-
     parent = _to_program(payload["parent"])
     archive_insp = [_to_program(d) for d in payload.get("archive_inspirations", [])]
     top_k_insp = [_to_program(d) for d in payload.get("top_k_inspirations", [])]
@@ -101,7 +84,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         language=payload.get("language", "python"),
         patch_types=payload.get("patch_types"),
         patch_type_probs=payload.get("patch_type_probs"),
-        use_text_feedback=bool(payload.get("use_text_feedback", True)),
+        use_text_feedback=True,  # Point 5: spoil apparatus removed — evaluator feedback always fed
         inspiration_sort_order=payload.get("inspiration_sort_order", "ascending"),
     )
 
@@ -114,6 +97,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         patch_sys, patch_msg, patch_type = sampler.sample_fix(
             incorrect_program=parent, ancestor_inspirations=ancestors,
             failure_note=payload.get("failure_note"),
+            objective_brief=payload.get("objective_brief"),
         )
     else:
         # brief_compose_mode (MUTABLE lever): "replace" (default) lets a per-island
@@ -136,6 +120,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             meta_recommendations=_meta_recs,
             island_brief=_island_brief,
             failure_note=payload.get("failure_note"),
+            objective_brief=payload.get("objective_brief"),
+            forced_patch_type=payload.get("forced_patch_type"),
         )
 
     # Rewrite lever: orchestrator-supplied guidance is appended to the system
@@ -149,8 +135,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # surface a BOUNDED caution so the LLM keeps its synthesis within budget. This does NOT
     # penalize a slow-but-correct candidate (still archived/scored/rewarded normally); it only
     # makes the budget visible so a genuinely-better-but-too-slow synthesis isn't lost to a
-    # timeout. runtime_sec/timed_out are numeric (NOT in _EVAL_TEXT_KEYS), so this survives
-    # use_text_feedback:false and never echoes a raw traceback. Applies to BOTH branches.
+    # timeout. runtime_sec/timed_out are numeric/boolean (not evaluator text), so this never
+    # echoes a raw traceback. Applies to BOTH branches.
     _budget = payload.get("eval_budget_sec")
     _slow_frac = float(payload.get("slow_caution_frac", 0.8) or 0.8)
 

@@ -1,5 +1,5 @@
 DIFF_SYS_FORMAT = """
-You MUST repond using a edit name, description and the exact SEARCH/REPLACE diff format shown below to indicate changes:
+You MUST respond using an edit name, description and the exact SEARCH/REPLACE diff format shown below to indicate changes:
 
 <NAME>
 A shortened name summarizing the edit you are proposing. Lowercase, no spaces, underscores allowed.

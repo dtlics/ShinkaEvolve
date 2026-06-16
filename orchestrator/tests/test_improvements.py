@@ -651,9 +651,9 @@ def test_boot_guard():
 
 
 def test_fix_prompt_reads_only_metadata_channels():
-    """P6-T3 contract: the fix prompt's error section comes ONLY from the parent's
-    stdout_log/stderr_log metadata — so run_window blanking those channels when
-    use_text_feedback=false is a COMPLETE spoil mitigation."""
+    """Contract: the fix prompt's error section comes ONLY from the parent's
+    stdout_log/stderr_log metadata channels — marker present when populated, absent when
+    blank. (Point 5 removed the spoil gate; evaluator feedback is always fed.)"""
     sys.path.insert(0, str(_ORCH / "scripts"))
     import construct_mutation_prompt as cmp
 
@@ -673,7 +673,7 @@ def test_fix_prompt_reads_only_metadata_channels():
 def test_c2_runtime_budget_caution():
     """C2: record_policy persists runtime_sec/timed_out; construct_mutation_prompt surfaces a
     BOUNDED runtime-budget caution (both branches) when a parent/inspiration is slow or timed
-    out vs the per-eval budget — numeric only, so it survives use_text_feedback=false."""
+    out vs the per-eval budget — numeric/boolean only (never evaluator text)."""
     sys.path.insert(0, str(_ORCH / "scripts"))
     import record_policy as rp
     import construct_mutation_prompt as cmp
@@ -702,8 +702,6 @@ def test_c2_runtime_budget_caution():
     assert "# Runtime budget" not in _newmut(slow)                          # no budget → no caution
     assert "# Runtime budget" in _newmut(slow, eval_budget_sec=100.0)       # 90 >= 0.8*100
     assert "TIMED OUT" in _newmut(tout, eval_budget_sec=100.0)              # timed out
-    # numeric → the caution survives use_text_feedback=false
-    assert "# Runtime budget" in _newmut(slow, eval_budget_sec=100.0, use_text_feedback=False)
     # a slow INSPIRATION (not just the parent) also triggers it
     assert "# Runtime budget" in cmp.main({
         "parent": fast, "archive_inspirations": [slow], "top_k_inspirations": [],
@@ -2287,39 +2285,30 @@ def test_restore_state_ledger_recompute_on_corrupt():
     return None
 
 
-def test_no_spoil_blanks_ancestor_inspiration():
-    """H9: use_text_feedback=False must strip an ANCESTOR inspiration's evaluator
-    text_feedback from the fix prompt (the leak the audit found)."""
+def test_feedback_always_fed_no_spoil_apparatus():
+    """Point 5: the spoil apparatus is REMOVED — evaluator text feedback is ALWAYS fed to the
+    fix prompt and the meta round; there is no use_text_feedback gate left (leak-proofing is now
+    the evaluator's job at task setup). Positive inversion of the deleted no-spoil tests; also
+    confirms a stray use_text_feedback key in a payload is simply ignored."""
     sys.path.insert(0, str(_ORCH / "scripts"))
     import construct_mutation_prompt as cmp
-
-    def _fix(utf):
-        parent = {"id": "p", "code": "x=1\n", "combined_score": 0.0,
-                  "metadata": {"stdout_log": "", "stderr_log": ""}}
-        anc = {"id": "a", "code": "y=2\n", "combined_score": 0.9,
-               "text_feedback": "HELDOUT=0.99", "correct": True}
-        out = cmp.main({"parent": parent, "needs_fix": True, "ancestor_inspirations": [anc],
-                        "language": "python", "patch_types": ["diff"], "patch_type_probs": [1.0],
-                        "task_sys_msg": "t", "seed": 0, "use_text_feedback": utf})
-        return (out.get("patch_sys", "") or "") + "\n" + (out.get("patch_msg", "") or "")
-
-    assert "HELDOUT=0.99" in _fix(True)        # feedback ON → ancestor text present
-    assert "HELDOUT=0.99" not in _fix(False)   # feedback OFF → stripped (H9)
-    return None
-
-
-def test_no_spoil_meta_blanks_error_text():
-    """M6: use_text_feedback=False keeps the evaluator's error_traceback OUT of the meta
-    round's prompt (it otherwise rides into per-island directions)."""
-    sys.path.insert(0, str(_ORCH / "scripts"))
     import meta_summarize as ms
 
+    parent = {"id": "p", "code": "x=1\n", "combined_score": 0.0,
+              "metadata": {"stdout_log": "", "stderr_log": ""}}
+    anc = {"id": "a", "code": "y=2\n", "combined_score": 0.0,
+           "text_feedback": "ANCESTOR_NOTE", "correct": False}
+    # a stray use_text_feedback:false must NOT suppress anything anymore
+    out = cmp.main({"parent": parent, "needs_fix": True, "ancestor_inspirations": [anc],
+                    "language": "python", "patch_types": ["diff"], "patch_type_probs": [1.0],
+                    "task_sys_msg": "t", "seed": 0, "use_text_feedback": False})
+    fix_prompt = (out.get("patch_sys", "") or "") + "\n" + (out.get("patch_msg", "") or "")
+    assert "ANCESTOR_NOTE" in fix_prompt
+
     recents = [{"generation": 1, "correct": False, "combined_score": 0.0,
-                "error_traceback": "boom HELDOUT=0.77", "metadata": {}}]
-    on = ms._build_user_msg({"goal": "g", "use_text_feedback": True}, recents)
-    off = ms._build_user_msg({"goal": "g", "use_text_feedback": False}, recents)
-    assert "HELDOUT=0.77" in on
-    assert "HELDOUT=0.77" not in off
+                "error_traceback": "boom DETAIL", "metadata": {}}]
+    meta_msg = ms._build_user_msg({"goal": "g", "use_text_feedback": False}, recents)
+    assert "DETAIL" in meta_msg
     return None
 
 
@@ -3415,8 +3404,7 @@ if __name__ == "__main__":
         ("dr_refusal_folds_cost_to_ledger", test_dr_refusal_folds_cost_to_ledger),
         ("restore_state_rewinds_code", test_restore_state_rewinds_code),
         ("restore_state_ledger_recompute_on_corrupt", test_restore_state_ledger_recompute_on_corrupt),
-        ("no_spoil_blanks_ancestor_inspiration", test_no_spoil_blanks_ancestor_inspiration),
-        ("no_spoil_meta_blanks_error_text", test_no_spoil_meta_blanks_error_text),
+        ("feedback_always_fed_no_spoil_apparatus", test_feedback_always_fed_no_spoil_apparatus),
         ("meta_islands_rich_schema", test_meta_islands_rich_schema),
         ("sample_parent_direction_oriented", test_sample_parent_direction_oriented),
         ("novelty_keep_better_contract", test_novelty_keep_better_contract),

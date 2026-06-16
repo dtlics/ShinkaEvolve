@@ -56,7 +56,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # timed-out) candidate is VISIBLE to downstream prompt builders. construct_mutation_prompt
     # uses these (vs task.eval_time) to surface a bounded runtime-budget caution to the LLM so
     # future candidates finish within the budget. These are NUMERIC/boolean (not evaluator text),
-    # so they survive use_text_feedback:false and never echo a traceback.
+    # so they are always recorded and never echo a traceback.
     _runtime = ev.get("runtime_sec")
 
     metadata: Dict[str, Any] = {

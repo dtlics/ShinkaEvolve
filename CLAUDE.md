@@ -11,7 +11,8 @@ Personal working repo for evolutionary code optimization with [ShinkaEvolve](htt
 When asked to run, optimize, evolve, or improve a program in this repo, **you wear two
 hats** for the evolutionary system in [`orchestrator/`](orchestrator/): the **ORCHESTRATOR**
 (the operational, in-the-flow jobs the run can't proceed without — author the goal, write
-DR queries, triage briefs, spawn/ground islands) and the **OUTER-LOOP / FRAMEWORK-AUDIT**
+DR queries, triage discovery output per idea into the three paths — novel → ground in a new
+island, similar-to-existing → combine (never a kill), useless → ignore — spawn/ground islands) and the **OUTER-LOOP / FRAMEWORK-AUDIT**
 role (judge whether the deterministic framework code itself is flawed and rewrite the
 mutable strategy code; this runs on a tapering cadence — per-window for the first
 `cadence.early_phase_windows` windows (frequent early, the framework least proven), sparse once the
@@ -23,18 +24,34 @@ operating playbook — before acting. In short:
   control-return) → record a work score → termination → end-of-run archive. The cluster
   (`run_window.py --until-decision`) returns control by EXITING; you are woken, read the
   diagnostics, and act. You are not in the path of every mutation.
-- **Boot is your first critical-path job — and it must not spoil the metric.** You author
-  the `task_sys_msg` (goal + hard constraints + the score *shape* + an abstract runtime
-  caution — never the held-out numbers). The harness **refuses to start** while
-  `task_sys_msg` is missing/empty or still the `__UNSET_AUTHOR_AT_BOOT__` sentinel the
-  starter ships. Run the spoiling-risk self-check first: the evaluator's error text rides
-  back into the fix/repair prompt (the harness backfills it into `stdout_log`/`stderr_log`,
-  gated by `use_text_feedback`, default on) — if that could leak the held-out metric, STOP
-  and ask the human; the complete mitigation is `use_text_feedback:false`. See SKILL.md "Boot".
+- **Boot is your first critical-path job.** You author the `task_sys_msg` (goal + hard
+  constraints + the score *shape* + an abstract runtime caution) and, optionally,
+  `task.objective_brief` — a qualitative "what we optimize + hard constraints + native
+  operations" gloss rendered next to the live metric numbers in every mutation/fix prompt.
+  The harness **refuses to start** while `task_sys_msg` is missing/empty or still the
+  `__UNSET_AUTHOR_AT_BOOT__` sentinel the starter ships — that guard only ensures a goal was
+  authored. **Leak-proofing is the EVALUATOR's job, set at task SETUP — never an inner-loop
+  concern:** put every held-out / gate-defining number under the evaluator's `private`
+  metrics dict (only `public` metrics reach the prompt via `perf_str`, and `text_feedback`
+  describes a failure without handing over a target), so any candidate that passes and
+  improves the metric is by construction a good candidate. Full evaluator text feedback is
+  ALWAYS fed to the inner loop because it speeds convergence. See SKILL.md "Boot"; the
+  shinka-setup / shinka-convert skills carry the leak-proof-evaluator design.
 - **Inner-loop LLM calls go to Azure, never to you.** Mutations/fixes/meta are made by
-  `orchestrator/scripts/*` calling Azure in background-poll mode. Never simulate a mutation
-  in your own context — that breaks the 100× cost asymmetry. Your tokens are for
-  control-return reasoning + writing the DR query.
+  `orchestrator/scripts/*` calling Azure in background-poll mode. Never run the per-window
+  mutation/fix loop in your own context — that breaks the 100× cost asymmetry. **EXCEPTION
+  (rare, high-value, agent-decision events — NOT the per-window loop):** you MAY use your
+  own Claude power to (a) run a multi-agent archive analysis (`subagents/archive-analyst.md`)
+  in place of an Azure DR call for the DISCOVERY role, and (b) HAND-AUTHOR a grounding prompt
+  (or author the grounding program yourself via `subagents/grounding-engineer.md`) when the
+  inner-loop Azure model refuses a verified structural pivot. Your tokens are for
+  control-return reasoning, the DR query, and those two rare exceptions.
+- **Never manually kill a slow external Azure LLM call.** The bg-poll wall is 3600s
+  (foundation, `_azure.py`); cost is recorded only on a TERMINAL status, so a mid-flight kill
+  leaks unlogged-but-BILLED spend. Let it ride the wall — decide for yourself, with the knobs
+  you own (reasoning effort, prompt scope), how to handle a pathologically slow call; never
+  end it with a kill. (This is the Azure mutate/meta/DR CALL — NOT the sanctioned
+  `run_window`/measure-window kill + `--resume` recovery, which stays allowed.)
 - **The automatic meta round is per-window, not yours.** Deterministic code calls it each
   window (default `azure-gpt-5.5` medium) → per-island directions auto-recorded as briefs,
   so islands differentiate BY DEFAULT. You don't hand-author briefs.
@@ -44,14 +61,22 @@ operating playbook — before acting. In short:
   on no/NaN measure data; a revert is a full rewind of code + archive DB + bandit but NEVER
   rewinds the cost ledger (spend stays counted). You must NOT touch the **foundation**
   (sqlite schema, the JSON contract, the evaluator, the user's `evaluate.py`/`initial.*`).
-  Defer foundation ideas to the end-of-run **ending document**.
-- **Do not stop until a termination criterion is met:** budget exhausted; user says stop;
-  OR five consecutive control-returns that were each STAGNANT and each had an intervention
-  (a framework rewrite, a DR, OR a deliberate config-lever flip — the AUTOMATIC per-window meta
-  round does NOT count) that still could not break the stagnation. This is now
-  harness-computed + auto-finalized (`return_reason="stagnation_intervention_exhausted"`,
-  via `journal.termination_streak` over your canonical `control_return` rows); there is no
-  "≥1 DR" requirement — a DR just counts as one intervention class. Keep launching the next cluster.
+  Defer foundation ideas to the end-of-run **ending document**. (Hand-authoring a grounding
+  program and injecting it via the normal program path — `evaluate.py` + `archive_record.py`
+  + `spawn_island.py` — is NOT a foundation edit; editing the user's `initial.py` to inject
+  it WOULD be.)
+- **Do not stop until a termination criterion is met. There are EXACTLY THREE, no others:**
+  (1) **budget exhausted** [harness-decided, auto-finalized]; (2) **five consecutive
+  control-returns each STAGNANT and each with an intervention** (a framework rewrite, a DR or
+  a Claude-native discovery pass, a hand-authored grounding, OR a deliberate config-lever flip
+  — the AUTOMATIC per-window meta round does NOT count) that still could not break the
+  stagnation [harness-decided + auto-finalized as `return_reason="stagnation_intervention_exhausted"`
+  via `journal.termination_streak` over your canonical `control_return` rows]; (3) **a LITERAL,
+  real user stop message typed in the live conversation.** You finalize `stopped_by_user` BY
+  HAND only for (3), and only when you can quote the actual user turn — NEVER from an
+  inferred/remembered/assumed/"it feels done" signal (confabulating a user stop is the single
+  worst failure here). If stuck with no real stop and neither harness criterion met, keep
+  launching the next cluster, or ASK the user and wait for a real reply.
 - **The budget is hard-capped in code and the ledger is crash-durable.** Set `budget_usd`;
   the harness sums every LLM cost (mutation/meta/DR/embeddings) + your logged interventions
   and hard-stops at the cap (`budget_exhausted`); a per-call ~$10 max-output-token cap
@@ -106,7 +131,7 @@ Both endpoints' base_url is built by appending `/openai/v1` to the bare resource
 
 ### DR resource deployment
 
-- `o3-deep-research` deployment (Foundry project `dtlics2000-4351`, **westus**), underlying model version `2025-06-26`. Used by `orchestrator/scripts/deep_research.py` (Stage-C DR prompt) via the dedicated `dr_client`. Override the deployment name in that script if you rename it. **The web-search tool spec `{"type":"web_search_preview"}` is CORRECT for the Responses-API path** (it takes NO connection id — that's the Agents API); per Microsoft docs + verified live calls, do NOT swap it to `{"type":"web_search"}` (reported to regress o3-deep-research). **CONFIRMED failure mode (2026-06-10, exact-payload replay): `error.code='too_many_requests'`** — the deployment's quota (250K TPM / 250 RPM at the time) cannot sustain a REAL deep-research job: a single job internally issues many large reasoning+search calls for 30–60 min, so **light probes succeed while heavy jobs die mid-research** (observed at 8, 33, and 50 min), and the burned tokens ARE billed. Remedy: RAISE the deployment's TPM/RPM (Edit deployment / Request quota); secondarily scope the query tighter and/or lower `max_tool_calls`; NEVER loop-retry a heavy failed DR. Run `python scripts/test_dr.py` to print the live `error.code`/`message`/`incomplete_details.reason` in isolation (note it is a deliberately LIGHT probe — its success proves the endpoint, not job-scale headroom; it uses `max_output_tokens=30000` so it returns text rather than capping out empty). A submitted-then-failed DR call is BILLED by Azure even though `usage` is empty — the framework floors its logged cost at `search_surcharge_usd` (≥$0.30) so the ledger reflects the spend.
+- `o3-deep-research` deployment (Foundry project `dtlics2000-4351`, **westus**), underlying model version `2025-06-26`. Used by `orchestrator/scripts/deep_research.py` (Stage-C DR prompt) via the dedicated `dr_client`. Override the deployment name in that script if you rename it. **The web-search tool spec `{"type":"web_search_preview"}` is CORRECT for the Responses-API path** (it takes NO connection id — that's the Agents API); per Microsoft docs + verified live calls, do NOT swap it to `{"type":"web_search"}` (reported to regress o3-deep-research). The deployment quota is **30,000,000 TPM / 30,000 RPM** (raised 2026-06-16), ample for a full deep-research job. Run `python scripts/test_dr.py` to probe the endpoint in isolation. DR's job is web-grounded DISCOVERY (find SOTA techniques with citations). You also have a Claude-native alternative for the DISCOVERY role — spawn `subagents/archive-analyst.md` (a multi-agent read over your own archive + literature) — which you can prefer when you want to judge what your archive has NOT tried, or fall back to if a DR call ever keeps failing.
 
 ### Reasoning-effort gotcha
 
@@ -200,3 +225,6 @@ git push -u origin <branch>        # origin = dtlics/ShinkaEvolve.git
 - Do not re-add non-Azure providers or the old `shinka_run` / agentic-proposer code — this fork is Azure-only and orchestrator-driven.
 - Do not touch the FOUNDATION mid-run (sqlite schema, the scripts' JSON contract, `evaluate.py`, the user's `evaluate.py`/`initial.*`, and — S1 — `cadence_policy.py` + the termination logic: the wake-decay schedule and when the run ends are NOT orchestrator-rewritable; their knobs are boot-only config). Defer foundation ideas to the end-of-run **ending document**.
 - Do not read a prior run's archive (`orchestrator/run_archive/`) while running a new job — those are for the user's later reference only, not run inputs.
+- Do not manually kill a slow backgrounded Azure mutate/meta/DR call — cost books only on a terminal status, so a kill leaks unlogged billed spend; let it ride the 3600s wall (the `run_window` kill + `--resume` recovery is different and allowed). On a refused verified structural pivot, switch to `subagents/grounding-engineer.md` rather than firing more Azure mutate calls.
+- Do not finalize a run as `stopped_by_user` (or any terminal status) on your own initiative: `budget_exhausted` and `stagnation_intervention_exhausted` are finalized BY THE HARNESS, and `stopped_by_user` is valid ONLY when the user literally typed a stop message in the live conversation. Never infer/remember/assume a user stop; "it feels done" is not a stop.
+- Do not re-introduce any "no-spoil" machinery (a `use_text_feedback` gate, evaluator-text stripping, a boot spoiling self-check): leak-proofing is the evaluator's job at task setup (held-out numbers under `private` metrics). Evaluator text feedback is always fed to the inner loop.

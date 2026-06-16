@@ -11,11 +11,14 @@ DEFAULT_TASK_SYS_MSG = (
 
 
 def default_patch_types() -> list[str]:
-    return ["diff", "full", "cross"]
+    # D4: "fix" is a first-class sampled MODE (5%, taken from diff). run_window samples the
+    # mode FIRST; a "fix" draw routes to an INCORRECT parent + the repair path, the others to
+    # a CORRECT parent. The sampler never draws "fix" itself (it routes via sample_fix).
+    return ["diff", "full", "cross", "fix"]
 
 
 def default_patch_type_probs() -> list[float]:
-    return [0.6, 0.3, 0.1]
+    return [0.55, 0.3, 0.1, 0.05]
 
 
 def default_llm_models() -> list[str]:

@@ -175,7 +175,7 @@ Here are the performance metrics of the program:
 
 # Task
 
-Rewrite the program to improve its performance on the specified metrics.
+Rewrite the program to improve its performance on the specified metrics. Where promising, draw on your own expert knowledge of the subject to introduce a genuinely new idea rather than only incremental tuning.
 Provide the complete new program code.
 
 IMPORTANT: Make sure your rewritten program maintains the same inputs and outputs as the original program, but with improved internal implementation.

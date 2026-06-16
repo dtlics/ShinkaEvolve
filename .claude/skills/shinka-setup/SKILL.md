@@ -36,7 +36,7 @@ Invoke this skill when the user:
 4. Write `evaluate.py`:
    - Python `initial.py`: call `run_shinka_eval` with `experiment_fn_name`, `get_experiment_kwargs`, `aggregate_metrics_fn`, `num_runs`, and optional `validate_fn`.
    - Non-Python `initial.<ext>`: run candidate program directly (usually via `subprocess`) and write `metrics.json` + `correct.json`.
-5. Ensure candidate output schema matches evaluator expectations (tuple/dict for Python module eval, or file/CLI contract for non-Python).
+5. Ensure candidate output schema matches evaluator expectations (tuple/dict for Python module eval, or file/CLI contract for non-Python). **Make the evaluator leak-proof:** put held-out / gate-defining numbers under a `private` metrics dict — only `public` metrics reach the inner loop (`perf_str` renders only `public`), and `text_feedback` describes failures without revealing a target. Then any candidate that passes and improves the metric is a good candidate, and the inner loop is always fed the evaluator's feedback.
 6. Validate draft `evaluate.py` before handoff:
    - Run a smoke test:
      - `python evaluate.py --program_path initial.<ext> --results_dir /tmp/shinka_eval_smoke`
@@ -55,7 +55,10 @@ Invoke this skill when the user:
    `python orchestrator/harness/run_window.py --config <run>/run.json --until-decision`.
    The starter ships `task_sys_msg` as the sentinel `__UNSET_AUTHOR_AT_BOOT__` — the
    harness REFUSES to start until the orchestrator authors a real goal (the goal + hard
-   constraints, WITHOUT spoiling the held-out metric). Running this task means BEING the
+   constraints). Leak-proofing is the EVALUATOR's job: held-out / gate-defining numbers go
+   under a `private` metrics dict (only `public` metrics reach the inner loop), and
+   `text_feedback` describes a failure without revealing a target — so any candidate that
+   passes and improves the metric is by construction good. Running this task means BEING the
    orchestrator/outer-loop under that run loop (warmup → wake-per-taper cluster →
    automatic per-window meta → framework-audit + DR checks → end-of-run archive).
 

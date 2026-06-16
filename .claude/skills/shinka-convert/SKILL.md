@@ -78,7 +78,9 @@ Do not edit the original source tree unless the user explicitly requests in-plac
      `task.init_program_path` / `task.language` to match the candidate file.
    - Set `budget_usd`, the Azure `evo.llm_models`, and a precise `task_sys_msg`. The
      starter ships `task_sys_msg` as the sentinel `__UNSET_AUTHOR_AT_BOOT__` — the harness
-     REFUSES to start until the orchestrator authors a real goal (no-spoil); running the
+     REFUSES to start until the orchestrator authors a real goal (leak-proofing is the
+     evaluator's job — held-out numbers under `private` metrics, only `public` surfaced to the
+     inner loop); running the
      task means BEING the orchestrator/outer-loop under the new run loop.
 8. Smoke test before handoff.
    - Run `python evaluate.py --program_path <initial file> --results_dir /tmp/shinka_convert_smoke`

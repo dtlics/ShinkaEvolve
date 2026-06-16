@@ -63,7 +63,9 @@ KMS, computed once over the full benchmark and cached in
 the baseline → score = 0 by construction. Goubault de Brugière & Martiel
 (arXiv:2303.07302) reported `4n+8` on grids, suggesting score ≈ 0.85 is
 attainable. (Note: this paper reference lives only in this README; shinka
-never feeds the README to the LLM, so it does not spoil the search.)
+never feeds the README to the LLM. Leak-proofing is the evaluator's job — the held-out
+`depths_per_L` stays under the evaluator's `private` metrics and the paper target is never
+surfaced to the inner loop; correctness is enforced by `evaluate.py`'s authoritative checks.)
 
 ## Benchmark
 

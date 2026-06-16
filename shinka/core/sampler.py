@@ -5,8 +5,10 @@ from shinka.database.inspirations import InspirationContextBuilder
 from shinka.prompts import (
     construct_eval_history_msg,
     perf_str,
+    objective_section,
     format_text_feedback_section,
     BASE_SYSTEM_MSG,
+    EXPERT_CREATIVE_PREAMBLE,
     DIFF_SYS_FORMAT,
     DIFF_ITER_MSG,
     FULL_ITER_MSG,
@@ -32,7 +34,7 @@ class PromptSampler:
         language: str = "python",
         patch_types: Optional[List[str]] = None,
         patch_type_probs: Optional[List[float]] = None,
-        use_text_feedback: bool = False,
+        use_text_feedback: bool = True,
         inspiration_sort_order: Literal[
             "ascending", "chronological", "none"
         ] = "ascending",
@@ -82,6 +84,8 @@ class PromptSampler:
         meta_recommendations: Optional[str] = None,
         island_brief: Optional[str] = None,
         failure_note: Optional[str] = None,
+        objective_brief: Optional[str] = None,
+        forced_patch_type: Optional[str] = None,
     ) -> Tuple[str, str, str]:
         if self.task_sys_msg is None:
             sys_msg = BASE_SYSTEM_MSG
@@ -96,59 +100,53 @@ class PromptSampler:
         if island_brief:
             meta_recommendations = island_brief
 
-        # Build the candidate type list: the ``cross`` arm is suppressed when there
-        # are no inspirations to cross-pollinate with.
+        # ``cross`` is suppressed when there are no inspirations to cross-pollinate with.
         skip_cross = (
             len(archive_inspirations) == 0 and len(top_k_inspirations) == 0
         )
-        valid_types: List[str] = []
-        valid_probs: List[float] = []
-        for t, p in zip(self.patch_types, self.patch_type_probs):
-            if t == "cross" and skip_cross:
-                continue
-            valid_types.append(t)
-            valid_probs.append(p)
-        if len(valid_types) < len(self.patch_types):
-            prob_sum = sum(valid_probs)
-            if prob_sum > 0:
-                valid_probs = [p / prob_sum for p in valid_probs]
-            else:
-                if len(valid_types) > 0:
-                    valid_probs = [1.0 / len(valid_types)] * len(valid_types)
-                else:
-                    # No valid types left — fall back to the full list
-                    # (rare; happens only if every type is suppressed at
-                    # once, which the config validator should prevent).
-                    valid_types = list(self.patch_types)
-                    valid_probs = list(self.patch_type_probs)
-            patch_type = np.random.choice(valid_types, p=valid_probs)
+        if forced_patch_type is not None:
+            # D4: run_window samples the patch MODE first (diff/full/cross/fix; fix is routed
+            # via sample_fix and never reaches here) and forces the chosen mode so the parent
+            # can be conditioned on it. Honor cross-suppression.
+            patch_type = forced_patch_type
+            if patch_type == "cross" and skip_cross:
+                patch_type = "full"
         else:
-            patch_type = np.random.choice(
-                self.patch_types,
-                p=self.patch_type_probs,
-            )
+            # Legacy internal sampling (used only when no mode is forced — e.g. the mock/test
+            # path). 'fix' is never sampled here; 'cross' is suppressed with no inspirations.
+            pairs = [
+                (t, p) for t, p in zip(self.patch_types, self.patch_type_probs)
+                if t != "fix" and not (t == "cross" and skip_cross)
+            ]
+            if not pairs:
+                pairs = [("full", 1.0)]
+            _types = [t for t, _ in pairs]
+            _w = [p for _, p in pairs]
+            _s = sum(_w)
+            _probs = [p / _s for p in _w] if _s > 0 else [1.0 / len(_types)] * len(_types)
+            patch_type = np.random.choice(_types, p=_probs)
 
-        # Add meta-recommendations BEFORE format instructions (if provided).
-        # ``cross`` manages its own focus material (cross-pollination context)
-        # and doesn't want a generic rec slot competing with it.
+        # Point 4.1/4.4: exactly ONE of these goes in the SYSTEM turn of a non-cross gen — a
+        # DIRECTIVE direction header when a direction was sampled (treat it as the goal, not an
+        # optional suggestion), else the expert/creative preamble so a no-direction gen still
+        # invents from expert knowledge even though task_sys_msg replaced BASE_SYSTEM_MSG.
+        # ``cross`` manages its own focus material and gets neither.
         skip_meta_rec_for = {"cross"}
-        if meta_recommendations not in [None, "none"] and patch_type not in skip_meta_rec_for:
-            sys_msg += "\n\n# Potential Recommendations"
+        _has_direction = meta_recommendations not in [None, "none"]
+        if _has_direction and patch_type not in skip_meta_rec_for:
+            _verb = "edit" if patch_type == "diff" else "rewrite"
+            sys_msg += "\n\n# Direction for this attempt"
             sys_msg += (
-                "\nThe following are potential recommendations for the "
-                "next program generation:\n"
+                f"\nBase your {_verb} on the direction below. It is the intended approach "
+                "for this generation — treat it as the goal of your change, not an optional "
+                "suggestion:\n"
             )
             sys_msg += f"\n{meta_recommendations}"
             logger.info(
-                f"Added meta recommendation to system prompt: "
-                f"{meta_recommendations[:80]}..."
+                f"Added direction to system prompt: {meta_recommendations[:80]}..."
             )
-        else:
-            logger.debug(
-                f"No meta recommendation added: "
-                f"meta_recommendations={bool(meta_recommendations)}, "
-                f"patch_type={patch_type}"
-            )
+        elif (not _has_direction) and patch_type in {"diff", "full"}:
+            sys_msg += EXPERT_CREATIVE_PREAMBLE
 
         # The persistent failure caution rides into EVERY generation — rendered
         # independently of patch_type and of any per-gen direction/island_brief, so
@@ -194,31 +192,31 @@ class PromptSampler:
                 parent.text_feedback
             )
 
+        # Point 4.3: prepend the orchestrator-authored objective gloss to the raw numbers.
+        # objective_brief None => "" => byte-identical to the legacy metric slot.
+        metric_block = objective_section(objective_brief) + perf_str(
+            parent.combined_score, parent.public_metrics
+        )
+
         if patch_type == "diff":
             iter_msg = DIFF_ITER_MSG.format(
                 language=self.language,
                 code_content=parent.code,
-                performance_metrics=perf_str(
-                    parent.combined_score, parent.public_metrics
-                ),
+                performance_metrics=metric_block,
                 text_feedback_section=text_feedback_section,
             )
         elif patch_type == "full":
             iter_msg = FULL_ITER_MSG.format(
                 language=self.language,
                 code_content=parent.code,
-                performance_metrics=perf_str(
-                    parent.combined_score, parent.public_metrics
-                ),
+                performance_metrics=metric_block,
                 text_feedback_section=text_feedback_section,
             )
         elif patch_type == "cross":
             iter_msg = CROSS_ITER_MSG.format(
                 language=self.language,
                 code_content=parent.code,
-                performance_metrics=perf_str(
-                    parent.combined_score, parent.public_metrics
-                ),
+                performance_metrics=metric_block,
                 text_feedback_section=text_feedback_section,
             )
             iter_msg += "\n\n" + get_cross_component(
@@ -242,6 +240,7 @@ class PromptSampler:
         incorrect_program: Program,
         ancestor_inspirations: Optional[List[Program]] = None,
         failure_note: Optional[str] = None,
+        objective_brief: Optional[str] = None,
     ) -> Tuple[str, str, str]:
         """
         Generate prompts for fixing an incorrect program.
@@ -266,6 +265,11 @@ class PromptSampler:
             sys_msg = self.task_sys_msg
 
         sys_msg += FIX_SYS_FORMAT.format(language=self.language)
+
+        # Point 4.3: keep a repair on-task by rendering the objective gloss in the fix SYSTEM
+        # message (FIX_ITER_MSG has no metric slot). None => no change.
+        if objective_brief and str(objective_brief).strip():
+            sys_msg += "\n\n" + objective_section(objective_brief).rstrip()
 
         # M4: the persistent failure caution rides into fix-mode prompts too, so a
         # repair does not reintroduce a known failure class.

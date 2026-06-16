@@ -347,6 +347,24 @@ def _sample_meta_direction(meta_directions: Optional[List[Any]], rng: random.Ran
     return rng.choices(texts, weights=weights, k=1)[0]
 
 
+def _sample_patch_mode(patch_types, patch_type_probs, seed, exclude_fix=False) -> str:
+    """D4: sample ONE patch MODE (diff/full/cross/fix) by weight, seeded. The mode is drawn
+    BEFORE the parent so a "fix" draw can be paired with an INCORRECT parent and the others
+    with a CORRECT parent. exclude_fix drops "fix" and renormalizes — the fallback used when a
+    "fix" draw finds no errored parent in the pool."""
+    types = list(patch_types or ["diff", "full", "cross", "fix"])
+    probs = list(patch_type_probs or [0.55, 0.3, 0.1, 0.05])
+    pairs = [(t, float(p)) for t, p in zip(types, probs) if not (exclude_fix and t == "fix")]
+    if not pairs:
+        return "diff"
+    rng = random.Random(seed)
+    _types = [t for t, _ in pairs]
+    _w = [max(p, 0.0) for _, p in pairs]
+    if sum(_w) <= 0:
+        return rng.choice(_types)
+    return rng.choices(_types, weights=_w, k=1)[0]
+
+
 def _compose_meta_for_gen(evo: Dict[str, Any], generation: int) -> Optional[str]:
     """WS2/WS3: build THIS gen's meta DIRECTION only. With ``evo.meta_directions``
     (the weighted list from meta_summarize), sample ONE direction by weight. Falls
@@ -363,7 +381,10 @@ def _compose_meta_for_gen(evo: Dict[str, Any], generation: int) -> Optional[str]
         rng = random.Random((int(seed) + int(generation)) if seed is not None else None)
         chosen = _sample_meta_direction(meta_directions, rng)
         if chosen:
-            return "Direction to pursue in THIS attempt: " + chosen
+            # Point 4.1-B: the sampler's "# Direction for this attempt" header now carries the
+            # directive framing, so the raw direction text rides without the inline prefix
+            # (matching the island-brief channel, which arrives raw).
+            return chosen
         return None
     return evo.get("meta_recommendations")  # legacy global blob fallback
 
@@ -417,10 +438,6 @@ def _attempt_immediate_fixes(
     # matches the inter-candidate railguard in _one_window.
     prior_total = journal.total_cost(cfg["results_dir"])
     fix_cost = 0.0
-    # P6-T3: when use_text_feedback is False, suppress BOTH the evaluator's stdout and
-    # stderr/error text from the fix prompt (sample_fix reads ONLY these two channels),
-    # making disabling feedback a COMPLETE spoil mitigation. Default True (feedback on).
-    _utf = bool((cfg.get("evo") or {}).get("use_text_feedback", True))
     fix_used = 0
     while (not ev.get("correct")) and fix_used < int(fix_budget):
         if budget is not None and (prior_total + counters.get("cost", 0.0)) >= float(budget):
@@ -436,9 +453,9 @@ def _attempt_immediate_fixes(
             "combined_score": ev.get("combined_score", 0.0) or 0.0,
             "generation": generation,
             "metadata": {
-                "stdout_log": (ev.get("stdout_log", "") or "") if _utf else "",
+                "stdout_log": ev.get("stdout_log", "") or "",
                 "stderr_log": (ev.get("error_traceback") or ev.get("text_feedback")
-                               or ev.get("stderr_log") or "") if _utf else "",
+                               or ev.get("stderr_log") or ""),
             },
         }
         fix_prompt = construct_mutation_prompt.main(
@@ -448,11 +465,8 @@ def _attempt_immediate_fixes(
                 # the correct ancestor to learn from (the sampled parent), if any.
                 "ancestor_inspirations": [learn_from] if learn_from else [],
                 "task_sys_msg": task.get("task_sys_msg"),
+                "objective_brief": task.get("objective_brief"),  # Point 4.3
                 "language": language,
-                # H9: thread the no-spoil flag so the fix prompt also suppresses the
-                # ANCESTOR's evaluator text (not just the just-failed candidate's
-                # stdout/stderr) — this construct call previously omitted it (the leak).
-                "use_text_feedback": _utf,
                 # M4: the persistent failure caution rides into fix-mode too.
                 "failure_note": evo.get("meta_failure_note"),
                 # C3 (H6): offset by generation so fix prompts don't pin one patch type.
@@ -537,15 +551,12 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         "seed": gseed,
         "validity_floor": evo.get("validity_floor"),
     }
-    # H9: COMBINE / grounding-run targeting — pin the parent (and thereby its island) so a DR
-    # technique lands on the closest existing program. Set evo.grounding_parent_id (preferred)
-    # or evo.grounding_island_idx on the one-window grounding override; both are unset on the
-    # normal path (no behavior change). A stale/invalid pin falls back in sample_parent.
-    if evo.get("grounding_parent_id"):
-        _sp_payload["parent_id"] = evo.get("grounding_parent_id")
-    if evo.get("grounding_island_idx") is not None:
-        _sp_payload["island_idx"] = evo.get("grounding_island_idx")
-    if repair:
+    # D4: sample the patch MODE first (diff/full/cross + the 5% fix mode). A "fix" draw — or
+    # the errfrac repair latch — pairs with an INCORRECT parent (select="errored" + the repair
+    # path); the other modes pair with a CORRECT parent and the chosen mode is forced downstream.
+    _mode = _sample_patch_mode(evo.get("patch_types"), evo.get("patch_type_probs"), gseed)
+    _want_fix = bool(repair) or (_mode == "fix")
+    if _want_fix:
         _sp_payload["select"] = "errored"
         _sp_payload["repair_attempt_cap"] = int(evo.get("repair_attempt_cap", 2) or 2)
     try:
@@ -558,9 +569,23 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             raise
         counters["cost"] = counters.get("cost", 0.0) + float(_bootstrap_initial(cfg) or 0.0)
         sp = sample_parent.main(_sp_payload)
-    # A repair generation = repair requested AND the sampler returned an errored parent
-    # to fix (empty errored pool → needs_fix False → this behaves as a normal slot).
-    _repair_gen = bool(repair and sp.get("needs_fix"))
+    # A repair generation = a fix was wanted (the 5% fix mode OR the errfrac repair latch) AND
+    # the sampler returned an errored parent (empty errored pool → needs_fix False → normal slot).
+    # The 5% fix mode reuses the full repair machinery (escalation, attempt accounting,
+    # tombstoning) since fixing an incorrect parent IS repair.
+    _repair_gen = bool(_want_fix and sp.get("needs_fix"))
+    # D4: the forced patch MODE for a NON-fix slot. If a "fix" draw found no errored parent
+    # (needs_fix False), fall back to a diff/full/cross draw (perturbed seed so it isn't "fix"
+    # again); cross-with-no-inspirations suppression is handled inside the sampler.
+    if sp.get("needs_fix"):
+        _forced_patch = None
+    elif _mode in ("diff", "full", "cross"):
+        _forced_patch = _mode
+    else:
+        _forced_patch = _sample_patch_mode(
+            evo.get("patch_types"), evo.get("patch_type_probs"),
+            (gseed + 7919) if gseed is not None else None, exclude_fix=True,
+        )
     parent = archive_query.main(
         {
             "db_path": db_path, "db_config": db_config, "embedding_model": embedding_model,
@@ -609,16 +634,11 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         # sample_fix reads metadata.stderr_log; the parent summary carries
         # error_traceback as a top-level field (no include_metadata here), so route
         # it in (mirrors the immediate-fix path's stderr_log chain).
-        _utf = bool(evo.get("use_text_feedback", True))
+        # Point 5: spoil apparatus removed — evaluator feedback always feeds the repair prompt.
         _pmd = parent.get("metadata") or {}
-        if not _utf:
-            # P6-T3: feedback suppressed → blank BOTH channels sample_fix reads, so
-            # use_text_feedback:false is a COMPLETE spoil mitigation on the repair path.
-            _pmd["stdout_log"] = ""
-            _pmd["stderr_log"] = ""
-        elif not _pmd.get("stderr_log"):
-            # M5: a domain failure (the common cnot class) carries no traceback — fall
-            # back to the persisted text_feedback so this repair prompt isn't blind.
+        if not _pmd.get("stderr_log"):
+            # M5: a domain failure (the common cnot class) carries no traceback — fall back
+            # to the persisted text_feedback so this repair prompt isn't blind.
             _pmd["stderr_log"] = (
                 parent.get("error_traceback") or parent.get("text_feedback") or ""
             )
@@ -673,11 +693,12 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             "island_brief": brief_text,
             "brief_compose_mode": evo.get("brief_compose_mode", "replace"),
             "task_sys_msg": task.get("task_sys_msg"),
+            "objective_brief": task.get("objective_brief"),  # Point 4.3: authored objective gloss
+            "forced_patch_type": _forced_patch,              # D4: mode sampled before the parent
             "patch_types": evo.get("patch_types"),
             "patch_type_probs": evo.get("patch_type_probs"),
             "language": language,
             "extra_guidance": evo.get("extra_guidance"),
-            "use_text_feedback": evo.get("use_text_feedback", True),
             # C2: per-eval budget → bounded runtime caution when the parent/an inspiration ran slow.
             "eval_budget_sec": _eval_budget_sec(task),
             "seed": gseed,
@@ -1085,7 +1106,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     _common.assert_worktree_shinka(_REPO_ROOT)
 
     # P6-T1: BOOT guard. The orchestrator's first job is to author task_sys_msg (the
-    # goal + hard constraints, without spoiling the held-out metric). Refuse to start —
+    # goal + hard constraints). Refuse to start —
     # spending NOTHING (before bootstrap/init_run) — if it was never authored: None,
     # empty, or the starter sentinel. require_sys_msg (default True) is the override for
     # a bare debug smoke; --warmup flips it off for its throwaway run only (P2-T2).
@@ -1094,7 +1115,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if (_sysmsg is None or str(_sysmsg).strip() == ""
             or str(_sysmsg).strip() == STARTER_SYS_MSG_SENTINEL):
         _msg = ("task_sys_msg is unset/placeholder — author the goal + hard constraints "
-                "(no-spoil) before running; set task.require_sys_msg=false to override "
+                "before running; set task.require_sys_msg=false to override "
                 "for a bare debug smoke.")
         if _task0.get("require_sys_msg", True):
             raise SystemExit(f"[boot] refusing to start: {_msg}")
@@ -1355,8 +1376,6 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     "budget_usd": budget,                # meta self-skips near the cap
                     "run_id": cfg.get("run_id"),
                     "meta_failures_first_frac": evo.get("meta_failures_first_frac", 0.5),
-                    # H9/M6: gate the evaluator error text out of meta on a spoil-risk task.
-                    "use_text_feedback": bool(evo.get("use_text_feedback", True)),
                     "islands": [{"id": h.get("id"), "best": h.get("best"), "count": h.get("count")}
                                 for h in diag.get("island_health", []) or []],
                     "num_islands": len(diag.get("island_health", []) or []),

@@ -15,8 +15,9 @@ cluster returns control.
 **ORCHESTRATOR — operational, in the critical path.** The jobs the run cannot proceed
 correctly without; if you skip them or do them wrong, the flow breaks. At boot: read the
 task's initial code + evaluator, infer the goal, and author the system-message problem
-statement (the goal, the hard constraints, the *shape* of the score) **without spoiling
-the held-out metric**, plus an abstract runtime-efficiency caution (no specific numbers).
+statement (the goal, the hard constraints, the *shape* of the score; the leak-proof design
+lives in the EVALUATOR, with held-out numbers under `private` metrics — not the system
+message), plus an abstract runtime-efficiency caution (no specific numbers).
 When you decide a deep-research (DR) round is warranted: write the DR query, triage the
 brief, seed/ground islands, fold results in. These fire **whenever the flow demands them
 — there is no cadence to them.**
@@ -32,11 +33,16 @@ frequently early (the code is least proven), and less and less as it proves robu
 
 ## Two rules that make this work
 
-1. **The inner loop's LLM calls go to Azure, never to you.** Every mutation, fix, repair,
-   and meta call is made by a `scripts/` subroutine that calls Azure in background-poll
-   mode. NEVER "simulate" a mutation in your own context — that would pay an agent turn
-   (~100×) for a stateless API call and destroy the cost economics. Your tokens are spent
-   only on control-return reasoning and on writing the DR query.
+1. **The inner loop's LLM calls go to Azure, never to you.** Every per-window mutation, fix,
+   repair, and meta call is made by a `scripts/` subroutine that calls Azure in
+   background-poll mode. NEVER "simulate" the per-window loop in your own context — that would
+   pay an agent turn (~100×) for a stateless API call and destroy the cost economics. Your
+   tokens are spent on control-return reasoning, the DR query, and two RARE, explicitly carved
+   exceptions: (i) running your OWN Claude multi-agent DISCOVERY analysis
+   (`subagents/archive-analyst.md`) as an alternative to an Azure DR call, and (ii)
+   hand-authoring a grounding prompt — or authoring the grounding program yourself via
+   `subagents/grounding-engineer.md` — when the Azure inner-loop model refuses a verified
+   structural pivot. Both are one-off agent decisions on the taper, NOT the per-window loop.
 2. **Do not stop until a termination criterion is met.** A run is a long, consecutive
    process; the healthiest run is many control-returns read with no intervention. Keep
    launching the next cluster. Idleness is not done-ness — only the termination checklist
@@ -301,25 +307,26 @@ evaluator is foundation). Common flaw-signals (read off `steps.jsonl` + the wind
 - **A measure window with empty / NaN diagnostics or a non-zero exit** → the window
   crashed → treat as no-usable-data and revert (the rewrite cycle fails closed).
 
-## Boot: author the goal (no-spoil) + a spoiling self-check
+## Boot: author the goal + objective
 
 1. **Author `task_sys_msg` — your first real job.** Read the task's `initial.<ext>` and
    `evaluate.py`, then write a precise problem statement: the goal, the gate set / hard
    constraints, the score's shape, and an abstract caution that each eval has a runtime
    budget so the code must stay efficient (NO specific numbers — reinforced in-loop by the
-   numeric, no-spoil runtime-budget caution when a candidate runs slow). The harness REFUSES to
+   numeric runtime-budget caution when a candidate runs slow). The harness REFUSES to
    start with a missing / empty / placeholder `task_sys_msg` (the starter ships the
    sentinel `__UNSET_AUTHOR_AT_BOOT__`); `task.require_sys_msg:false` overrides for a bare
    debug smoke, and `--warmup` flips it off for its throwaway run only.
-2. **Do NOT spoil the eval criterion.** A fair-game system message states the gate set +
-   score shape + the initial docstring; off-limits are hidden seeds, private metrics, and
-   exact thresholds. While authoring, run the **spoiling self-check**: the evaluator's
-   error text rides back to the fix/repair prompt via the harness `stdout_log`/`stderr_log`
-   backfill, gated by `use_text_feedback` (default true). If that error text could leak
-   the held-out metric (let a mutation game the score), STOP and ask the human before
-   continuing. The mitigation is `use_text_feedback:false` — a COMPLETE suppression: it
-   blanks both channels the fix prompt reads. (Rare; the cnot task's slope feedback is
-   safe.)
+2. **Leak-proofing is the EVALUATOR's job, done at task SETUP — not yours in the loop.** A
+   fair-game system message states the gate set + score shape + the initial docstring;
+   held-out / gate-defining numbers belong in the evaluator's `private` metrics dict (only
+   `public` metrics reach the prompt via `perf_str`), and `text_feedback` describes a failure
+   without handing over a target. Once the evaluator is leak-proof, every candidate that
+   passes and improves the metric is a good candidate, and the harness ALWAYS feeds evaluator
+   text feedback to the mutation/fix/meta prompts (it speeds convergence). Optionally author
+   `task.objective_brief` — a qualitative "what we optimize + hard constraints + native ops"
+   gloss that renders next to the live metric numbers in every prompt. (The shinka-setup /
+   shinka-convert skills carry the leak-proof-evaluator design.)
 3. **Tune the proposer `reasoning_effort` — you OWN this knob; never carry the shipped default
    just because it shipped or a run prompt said "keep defaults".** Thinking-heavy proposers are
    GOOD for reliability on hard/algorithmic tasks, but a cheap model at `medium` can emit
@@ -459,44 +466,54 @@ verbatim, STOP and reshape it. A refused/failed DR call returns `refused:true` +
 (logged with its query intact, no crash) — a `content_filter` refusal almost always means
 a reproduce-paper framing, so RESHAPE the query; never re-fire the same shape.
 
-**A server-side terminal `failed` is NOT a content_filter** — it means the `o3-deep-research`
-job itself failed, and the journal call's `reason`/`error_code` now carry the real cause (Azure
-`error.code`/`message` + `incomplete_details.reason`, surfaced by `run_dr_call`). **The CONFIRMED
-failure mode on this setup is `error.code='too_many_requests'`** (exact-payload replay,
-2026-06-10): the DR deployment's TPM/RPM quota cannot sustain a full deep-research job — a single
-job internally fires many large reasoning+search calls for 30–60 min, so a LIGHT probe
-(`scripts/test_dr.py`) succeeds while a REAL job dies mid-research (observed at 8–50 min). The
-remedy is Azure-side: RAISE the deployment quota; from your side, scope the query tighter and/or
-lower `max_tool_calls`. Other terminal causes to read off `error_code`: a missing/blocked
-`web_search_preview` tool on the resource, or a wrong deployment name / model-version. FIX IT ON
-THE AZURE SIDE — re-firing the same heavy job won't help. **Cost-on-failure reality:** a
-submitted-then-failed DR call DID run web searches + compute server-side, so Azure BILLS it even
-though `usage` comes back empty; the framework now floors such a call's logged cost at
-`search_surcharge_usd` (≥$0.30) and folds it into the ledger/budget. Treat a failed DR as real
-spend, NOT free — do not loop-retry it.
+**If a DR call fails** it returns `refused:true` + a `reason` (a `content_filter` refusal almost
+always means a reproduce-paper framing — reshape per the pre-flight above; never re-fire the same
+shape), or a server-side terminal `failed` whose `reason`/`error_code` the journal carries — read
+it (e.g. a missing/blocked `web_search_preview` tool, or a wrong deployment name / model-version)
+and fix the cause; don't loop-retry. The deployment quota (30,000,000 TPM / 30,000 RPM) is ample
+for a full job. If DR ever keeps failing, do the DISCOVERY role with a Claude-native pass instead —
+spawn `subagents/archive-analyst.md` (a multi-agent read over your own archive + literature). That
+Claude-native discovery is a sanctioned alternative you can ALSO prefer up front when the question
+is "what has my archive NOT tried / is this genuinely novel here"; triage its output exactly like a
+DR brief (below). A Claude-native discovery pass counts as one intervention class for the
+termination streak, the same as an Azure DR.
 
-**Triage the returned brief — per technique, deliberately:**
-- **Novel** (no archived program or prior direction resembles it) → GROUND it (the
-  grounding run below), then give it **its own island** via `spawn_island.py` so it isn't
-  out-competed before it matures.
-- **History-similar** → combine it into the closest existing program with the grounding
-  run (`fix_retry_budget:1`), TARGETING that program via `evo.grounding_parent_id:"<id>"`
-  (H9 — pins the parent + its island; without it the grounding mutation lands on an
-  arbitrary sigmoid-sampled parent). Use `evo.grounding_island_idx` to pin only the island.
-- **Otherwise → ignore it.** Don't dilute the search.
+**Triage discovery output by the THREE PATHS — per idea, one by one, identically whether the
+ideas came from an Azure DR brief OR a Claude-native analysis. Do NOT take only the single "best"
+idea; decide a path for EACH:**
+- **NOVEL** (no archived program or prior direction resembles it) → GROUND it (the grounding
+  recipe below), then give it **its own island** via `spawn_island.py` so it isn't out-competed
+  before it matures.
+- **SIMILAR-TO-EXISTING** → still valuable: COMBINE it into the closest existing program via a
+  grounding run. "Similar to something we already have" is NOT a reason to drop an idea — it is
+  this path.
+- **USELESS** → ignore it. Don't dilute the search.
 
-**The grounding run.** Author/override a small `run.json` with `llm_models:
-["azure-gpt-5.4-pro@high"]` (pinned — the one time pro is in the mutation pool), a single
-weighted direction `evo.meta_directions:[{text:"<technique + reference + steps>",
-weight:1}]`, `evo.mutation_web_search:true`, AND `evo.fix_web_search:true` (L85 — web search
-on the MUTATION is `mutation_web_search`; the immediate-fix retries are gated SEPARATELY by
-`fix_web_search`, default false, so without it up to 3 of 4 attempts run searchless),
-`fix_retry_budget:3` (novel) or `1` (similar), and a short window. Pro reads the reference and
-implements it. Never run pro with web search on a direction with NO solid reference — that's
-the only sanctioned pro+websearch use. AFTER the grounding window REVERT these grounding-only
-knobs (`llm_models`, `mutation_web_search:false`, `fix_web_search:false`, clear the pinned
-direction) so pro + web search never persist into normal evolution; the grounded program is
-already in the shared archive (in-place, shared db — there is no separate-db fold-back).
+An adversarial verification step (yours, or a subagent's) must map each idea to ONE of these three
+paths — it must NOT kill an idea merely for being "similar to existing" or "a renamed version of
+existing code"; that is the SIMILAR-TO-EXISTING path (combine it), never a rejection.
+
+**Grounding is HAND-AUTHORED — it does NOT go through the diff/full/cross mutation sampler.** YOU
+author the prompt directly and feed it to EITHER Azure `mutate.py` OR the
+`subagents/grounding-engineer.md` subagent (`mutate.py` accepts a ready-made
+`patch_sys`/`patch_msg`/`patch_type:"full"` and never calls the sampler):
+- `patch_sys` = the `task_sys_msg` + a "# Required structural replacement" mandate + the DETAILED
+  technique (key steps + reference pointers: author/year/arXiv) + the objective/constraints (your
+  `task.objective_brief`) + the full-rewrite NAME/DESCRIPTION/CODE response format (import the
+  `FULL_SYS_FORMAT_DIFFERENT` body from `shinka.prompts` so `mutate.py`'s parser is satisfied).
+- `patch_msg` = the INIT seed program (`initial.<ext>`) framed "reference interface ONLY — do NOT
+  improve/refactor; you are REPLACING its algorithm", plus "write a program with the SAME
+  inputs/outputs implementing this idea".
+- **Run it on Azure** via `mutate.py` with `model_name:"azure-gpt-5.5"`,
+  `reasoning_effort:"medium"` (the default; escalate to `azure-gpt-5.4-pro@high` only if 5.5 won't
+  land it), and `enable_web_search:true` when a reference must be read. If the Azure model keeps
+  REFUSING the pivot, hand the SAME ingredients to `subagents/grounding-engineer.md` and let Claude
+  author the code — do NOT keep firing more Azure mutate calls at it.
+- **Result parity (both executors handled identically):** evaluate via `evaluate.py`; on a CORRECT
+  result, embed it, `archive_record.py` it (`parent_id=null` for a NOVEL pivot → its own island;
+  the closest id for SIMILAR-TO-EXISTING), then `spawn_island.py`. A first injection that scores
+  0.0 / below baseline is EXPECTED — the value is seeding a new structural family for the inner
+  loop to refine, not an immediate win.
 
 `spawn_island.py` (stdin `{db_path, db_config, embedding_model, program_id}`) seeds a NEW
 island with a copy of the grounded program as its root. It honors `db_config.max_islands`:
@@ -591,11 +608,16 @@ recommendation, forget the detail. For periodic structural reads, spawn
 
 ## Termination + end of run
 
-**Stop when:** the budget is exhausted; the user says stop; OR **five consecutive
-control-returns were each STAGNANT and each had an intervention** (a framework rewrite, a DR,
-OR a deliberate config-lever flip — the AUTOMATIC per-window meta round does NOT count, it
-isn't your action) that still could not break the stagnation → the search is stuck despite
-intervening, so stop. This is now **harness-computed and auto-finalized** (parity with budget): the harness
+**Stop when EXACTLY ONE of these three criteria is met — there are no others:** (a) the budget is
+exhausted [harness-decided, auto-finalized]; (b) **five consecutive control-returns were each
+STAGNANT and each had an intervention** (a framework rewrite, a DR or a Claude-native discovery
+pass, a hand-authored grounding, OR a deliberate config-lever flip — the AUTOMATIC per-window meta
+round does NOT count) that still could not break the stagnation [harness-decided, auto-finalized];
+(c) **a LITERAL, real user stop message typed in THIS live conversation** — the only termination you
+finalize by hand, and only when you can quote that actual user turn. NEVER finalize `stopped_by_user`
+from an inferred/remembered/assumed/"it feels done" signal — confabulating a user stop is the single
+worst failure here. If you feel stuck but the user has NOT literally said stop and neither harness
+criterion has fired, KEEP GOING (launch the next cluster) or ASK and wait for a real reply. This is now **harness-computed and auto-finalized** (parity with budget): the harness
 reads your canonical `control_return` rows (`stagnation_flag`+`intervened`) via
 `journal.termination_streak`, and when the streak reaches `cadence.termination_streak`
 (default 5) the next `--until-decision` call returns
@@ -615,8 +637,11 @@ this SKILL.md + CLAUDE.md; past runs' notes live in git history.
 **End of run:** review the whole history and write an **ending document** — the run's
 outcome + a "Future fixes for the user before the next run" section (foundation/outer-loop
 changes you could not make mid-run). Seed it from `journal.build_run_summary(results_dir)`,
-flip the run's status with the `finalize_run` journal view (the harness auto-finalizes only
-on the budget-exhausted terminal return), then **archive** the run's history/logs/artifacts
+flip the run's status with the `finalize_run` journal view — but `budget_exhausted` and
+`stagnation_intervention_exhausted` are finalized by the HARNESS (never call `finalize_run` for
+those), and you finalize `stopped_by_user` BY HAND only when you can quote the literal user turn
+that said stop; the ending document's "Termination reason" must quote that turn (or name the
+harness criterion), never just "user said stop". Then **archive** the run's history/logs/artifacts
 with the `archive_run` view into `orchestrator/run_archive/<run_id>__<finished_at>/`. **Do
 NOT read prior runs' archives while running a new job** — they exist only for the user's
 later reference.
@@ -677,6 +702,11 @@ each submit/status-GET and RETRIES a hung request, and the LONG total-job wall
 wedged socket on one status GET can no longer ride the whole 1h wall (the prior ~1–2h hang); a
 genuinely-stuck job still bounds at the wall, then degrades cleanly (mutate → `applied:false`; DR →
 a degraded brief whose billed cost is captured). Don't rewrite the transport in a strategy rewrite.
+**And never manually kill a slow in-flight Azure bg call** (TaskStop / bash-kill) to end it sooner —
+cost books only on a TERMINAL status, so a kill leaks unlogged-but-billed spend; let it ride to the
+3600s wall, deciding for yourself with the knobs you own (reasoning effort, `@medium` vs `@high`,
+prompt scope) how to handle a pathologically slow call. (This is the Azure CALL only; the sanctioned
+`run_window`/measure-window kill + `--resume` recovery is a different thing and stays allowed.)
 
 ## The run config (you author this)
 
@@ -684,6 +714,7 @@ a degraded brief whose billed cost is captured). Don't rewrite the transport in 
 { "results_dir": "<run dir>", "run_id": "<id>", "budget_usd": 50,
   "task": {"eval_program_path": "...evaluate.py", "init_program_path": "...initial.py",
            "task_sys_msg": "<precise goal>", "require_sys_msg": true,
+           "objective_brief": "<optional 'what we optimize + hard constraints + native ops' gloss, or null>",
            "language": "python", "eval_time": "00:35:00"},
   // M49: eval_time is the harness hard-kill — it MUST exceed the task evaluator's internal
   // wallclock budget, or slow candidates are SIGKILLed before the evaluator's graceful
@@ -692,7 +723,7 @@ a degraded brief whose billed cost is captured). Don't rewrite the transport in 
   "db_config": {"num_islands": 4, "archive_size": 40, "parent_selection_lambda": 10.0,
                 "migration_interval": 10, "enable_dynamic_islands": false,
                 "max_islands": 0, "island_evict_strategy": "worst_best_fitness"},
-  "evo": {"window_size": 10, "patch_types": ["diff","full","cross"], "patch_type_probs": [0.6,0.3,0.1],
+  "evo": {"window_size": 10, "patch_types": ["diff","full","cross","fix"], "patch_type_probs": [0.55,0.3,0.1,0.05],
           "llm_models": ["azure-gpt-5.4-mini","azure-gpt-5.5"], "llm_dynamic_selection_kwargs": {"cost_aware_coef": 0.25, "epsilon": 0.2},
           "reasoning_effort": "medium", "max_patch_attempts": 3, "fix_retry_budget": 1, "reward_mode": "absolute",
           "auto_meta": true, "meta_model": "azure-gpt-5.5", "meta_reasoning_effort": "medium",
@@ -711,7 +742,7 @@ learns each (model, effort) arm separately. Only encode valid combos (pro reject
 helps hard tasks but a cheap arm at `medium` can wedge a call 50–90 min — Boot step 3); it is a
 knob you OWN at boot and re-tune at any control-return, not a default to leave alone.
 **Pro policy:** keep `azure-gpt-5.4-pro` OUT of the normal mutation pool by default — it's
-reserved for the meta round (when you escalate `meta_model`) and the DR grounding run; a
+reserved for the meta round (when you escalate `meta_model`) and a grounding run; a
 future outer-loop may add `pro@high` to the pool if a task warrants it.
 
 `cadence.max_windows_per_call` is an OPTIONAL explicit ceiling — unset by default, so the
@@ -734,8 +765,8 @@ wake/termination cadence mid-run (cadence_policy.py is FOUNDATION).
 | `repair_trigger_fraction` | 0.20 | errored-fraction at which repair mode turns on | raise if repairs churn; lower to repair sooner |
 | `repair_attempt_cap` | 2 | failed repairs before a parent is tombstoned | raise to give a hard failure more tries |
 | `repair_escalation_model` | null | stronger model on the last repair before removal | set to e.g. `azure-gpt-5.4-pro@high` for a stubborn class |
-| `fix_retry_budget` | 1 | immediate eval-failure repairs per slot | raise for a hard task; the grounding run uses 3 |
-| `mutation_web_search` / `fix_web_search` | false | web search on the mutation / fix calls | ONLY on a grounding run nailing a DR reference |
+| `fix_retry_budget` | 1 | immediate eval-failure repairs per slot | raise for a hard task |
+| `mutation_web_search` / `fix_web_search` | false | web search on the mutation / fix calls | rarely needed — a hand-authored grounding prompt passes `enable_web_search` straight to `mutate.py` instead |
 | `cost_aware_coef` | 0.25 shipped (engine default 0.0 when `llm_dynamic_selection_kwargs` is unset) | bandit reward-vs-cheapness blend | raise→0.7 if cheapness should dominate; lower→0 if a pricier arm is the only one improving and is being starved |
 | `epsilon` | 0.2 | bandit exploration floor | an arm's share decaying toward 0 while it still occasionally improves → raise to 0.4–0.6 |
 | `code_embed_sim_threshold` | 0.99 | near-duplicate cosine gate, over the basis set by `novelty_embed_mode`; a near-dup is now EVALUATED then the BETTER of the pair is kept (worse dropped / tombstoned) — H5 | under the default `diff` basis the 0.99 gate rarely false-rejects; under legacy `code` basis genuine large-program edits cluster ~0.994 and are mis-flagged → switch to `diff` (preferred) or RAISE the threshold (never lower under `code`); watch `novelty_rejected_cost` |
@@ -745,10 +776,8 @@ wake/termination cadence mid-run (cadence_policy.py is FOUNDATION).
 | `validity_floor` | none (inert) | floors VALID parents' selection score (`sample_parent`) | many correct programs pinned at 0 and selection can't separate them |
 | `reward_validity_floor` | 0.001 | floors a correct candidate's bandit reward so correct-but-worse beats *failed* | an arm with high eval-success is starved because its children rarely beat the parent |
 | `reward_on_reject` | cost_only | a novelty-rejected slot bills the arm's COST only (neutral) vs `penalize` | a duplicate-prone arm should be penalized for waste |
-| `force_explore` / `llm_subset` | false / null | ignore the collapsed bandit (uniform) / restrict to a subset | re-open a starved/locked-out arm (the framework-audit check) |
-| `use_text_feedback` | true | feed the evaluator's failure reason into the fix/repair/meta prompts | false on a spoil-risk task — a COMPLETE suppression (gates the fix, sampled-ancestor, AND meta error-text channels — H9) |
-| `island_policy_driven` / `policy_spawn_cooldown` | false / 0 | drive spawn/migrate/retire via mutable `island_policy.py` at window boundaries | repairing population structure. H10: the policy reads its OWN gates — set `policy_migrate_enabled` / `policy_migrate_interval` / `policy_spawn_enabled` / `policy_spawn_stagnation` and keep the db_config auto-triggers OFF (`enable_dynamic_islands:false`, `migration_rate:0`) to avoid double-execution; the executor result + any crash are surfaced on stderr (M17). M15: a spawn fires at most ONCE per stagnation episode (the harness carries `last_policy_spawn_generation`; a new best re-arms it; `policy_spawn_cooldown` > 0 lets it re-fire after N gens). M16: `retire` now HAS a non-destructive executor (protects island 0 + global best) — a rewrite may set `retire_island`. |
-| `brief_compose_mode` | replace | how a per-island brief combines with the global `meta_directions`: `replace` (default) = the brief STANDS IN for the global direction; `augment` = the brief LAYERS on top | NOTE (H8): under the default `replace`, once an island has a brief (window 1+) the global `meta_directions` is computed then DISCARDED per-gen — set `augment` to keep BOTH. The DR-grounding recipe relies on `replace` so its pinned direction steers the run (target it via the H9 parent/island pin, not the global direction). |
+| `force_explore` / `llm_subset` | false / null | ignore the collapsed bandit (uniform) / restrict to a subset | re-open a starved/locked-out arm (the framework-audit check) || `island_policy_driven` / `policy_spawn_cooldown` | false / 0 | drive spawn/migrate/retire via mutable `island_policy.py` at window boundaries | repairing population structure. H10: the policy reads its OWN gates — set `policy_migrate_enabled` / `policy_migrate_interval` / `policy_spawn_enabled` / `policy_spawn_stagnation` and keep the db_config auto-triggers OFF (`enable_dynamic_islands:false`, `migration_rate:0`) to avoid double-execution; the executor result + any crash are surfaced on stderr (M17). M15: a spawn fires at most ONCE per stagnation episode (the harness carries `last_policy_spawn_generation`; a new best re-arms it; `policy_spawn_cooldown` > 0 lets it re-fire after N gens). M16: `retire` now HAS a non-destructive executor (protects island 0 + global best) — a rewrite may set `retire_island`. |
+| `brief_compose_mode` | replace | how a per-island brief combines with the global `meta_directions`: `replace` (default) = the brief STANDS IN for the global direction; `augment` = the brief LAYERS on top | NOTE (H8): under the default `replace`, once an island has a brief (window 1+) the global `meta_directions` is computed then DISCARDED per-gen — set `augment` to keep BOTH. |
 | `island_selection_strategy` / `enforce_island_separation` (db_config) | uniform / true | island selection pressure (`uniform`=`equal` are aliases; `proportional`=by population count; `weighted`=by island best-fitness) / same-island vs cross-island inspirations | concentrate sampling on the LARGEST island → `proportional`; on the best-fitness island → `weighted`. ⚠️ BOTH REINFORCE the leader — NEITHER rescues a starved/small island (no live strategy does; small-island rescue needs `archive_floor_per_island` ↑ or a `_select_island` rewrite). cross-pollination → separation `false`. (These are `db_config` knobs, not `evo.*`.) |
 | `archive_floor_per_island` | 3 (db_config) | per-island archive floor — a dominant island can't evict another island below this many members (H2) | islands collapsing to one lineage → raise; a single-family task → 0 (pure global fitness) |
 | `migration_rate` / `migration_interval` | 0 / 10 (db_config) | island elite migration; **0 = OFF by default**. Execution IS wired (every archive add runs deferred migration), so flipping it on is a live config change — NOT a code rewrite. M18: migration now iterates the ACTIVE island_idx set, so a dynamically SPAWNED island participates (it was invisible to the old `range(num_islands)`) | turn it on at BOOT (run.json `db_config`) OR mid-run (edit `db_config` at a control-return; the next relaunched cluster reads it — schema-safe) → `migration_rate` ≈ 0.05 |
@@ -800,14 +829,23 @@ novelty or serial eval).
 - Never edit FOUNDATION files (schema, contract, evaluate, archive_record/query,
   diagnostics, repair_record, journal, harness, deep_research, the task's evaluate/init).
   Defer foundation ideas to the ending document.
-- Never run an inner-loop mutation in your own context. Always call `mutate.py`.
-- Never make two rewrites in one control-return. Never call deep research twice per
-  stagnation cluster. Never let subagent output linger in your context.
+- Never manually kill a slow in-flight Azure bg call (mutate/meta/DR) before the 3600s wall — cost
+  books only on a terminal status, so a kill leaks unlogged-but-billed spend (the
+  `run_window`/`--resume` recovery is different and allowed). On a refused verified pivot, switch to
+  `grounding-engineer` rather than firing more Azure mutate calls.
+- Never run the **per-window** inner mutation/fix loop in your own context — always call
+  `mutate.py`. The ONLY exceptions are the two rare Claude powers: a Claude-native DISCOVERY pass
+  (`archive-analyst`) and a hand-authored grounding (`grounding-engineer` / a hand-authored
+  `patch_sys`/`patch_msg`) when the Azure model refuses a verified pivot.
+- Never make two rewrites in one control-return. Never call the paid Azure deep research twice per
+  stagnation cluster (a single Claude-native discovery pass per cluster is the separate bound).
+  Never let subagent output linger in your context.
 - Never read a prior run's archive while running a new job.
 - Never stop while a termination criterion is unmet.
 
 ## When in doubt
 
 Do less. Your value is the rare code change the inner loop's hand-coded policies cannot
-make, and the rare DR call that brings in knowledge the search can't invent. Every
+make, and the rare DISCOVERY pass (Azure DR, or your own Claude multi-agent analysis over the
+archive) that brings in knowledge the search can't invent. Every
 intervention you skip is one less chance to break something.

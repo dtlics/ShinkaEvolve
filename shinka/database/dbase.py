@@ -627,7 +627,7 @@ class ProgramDatabase:
         except sqlite3.Error as e:
             logger.error(f"Error during attempt_log migration: {e}")
 
-        # Migration 5: Add error_traceback column (phase 1 of research-grounding).
+        # Migration 5: Add error_traceback column.
         # Stores a truncated stderr/traceback when correct=False so the agent's
         # inner-loop fix attempts have queryable context, and downstream
         # analytics can correlate model behaviour with error mode.

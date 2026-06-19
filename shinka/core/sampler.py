@@ -92,11 +92,11 @@ class PromptSampler:
         else:
             sys_msg = self.task_sys_msg
 
-        # Phase 2 of research-grounding: when the orchestrator has a
-        # fresh DR brief for this parent's island, prefer it over the
-        # global freeform meta_recommendations. The freeform string
-        # still acts as a fallback for islands the DR cadence didn't
-        # touch this cycle.
+        # When the automatic per-window meta round has recorded a
+        # per-island direction (island_brief) for this parent's island,
+        # prefer it over the global freeform meta_recommendations. The
+        # freeform string still acts as a fallback for islands the meta
+        # round did not assign a direction this cycle.
         if island_brief:
             meta_recommendations = island_brief
 

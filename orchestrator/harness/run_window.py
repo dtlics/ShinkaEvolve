@@ -423,9 +423,10 @@ def _attempt_immediate_fixes(
         per-window ledger + budget railguard account for it. A within-loop budget
         check prevents *starting* an attempt we can't afford (overshoot ≤ 0).
       * ``fix_budget`` is THE lever: 1 for ordinary gens (``evo.fix_retry_budget``),
-        3 when grounding a novel DR direction as a new island's first member (WS5).
+        3 when grounding a TRIAGED discovery direction (R1 Azure deep research or
+        R2 archive-analyst) as a new island's first member (WS5).
       * ``enable_web_search`` is OFF for ordinary fixes; WS4/WS5 turn it on only
-        when the repair is nailing a DR reference. Left mutable for future
+        when the repair is nailing a DISCOVERY reference. Left mutable for future
         outer-loops (one of the framework's policy switches, like novelty/bandit).
     """
     if ev.get("correct"):
@@ -758,6 +759,16 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                 evo.get("repair_escalation_model"), evo.get("reasoning_effort"))
             _escalated = True
 
+    # NOTE (DEC-7): there is no run_window "secondary grounding gate". Canonical
+    # grounding is a STANDALONE mutate.py call the orchestrator makes BETWEEN clusters
+    # (enable_web_search:true passed directly) — it never flows through this per-candidate
+    # inner loop. The discovery-before-grounding rule is enforced where a grounded program
+    # ENTERS the archive as a new family: the PRIMARY fail-closed gate in spawn_island.py
+    # (novel new-island grounding) + grounding-engineer's refusal. A combine grounding into
+    # an existing island is ordinary insertion; the work_discovery/work_grounding split
+    # keeps it from padding the termination streak. evo.mutation_web_search below is just an
+    # (unused) inner-loop web-search toggle, NOT a grounding signal.
+
     # 3. mutate: LLM call + apply (IMMUTABLE body, MUTABLE prompt) — mockable
     mut_payload = {
         "parent_code": parent.get("code", ""),
@@ -768,10 +779,11 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         "language": language,
         "model_name": model_name,
         "reasoning_effort": reasoning_effort,
-        # WS5: web search on the MUTATION call — OFF by default; the orchestrator
-        # sets evo.mutation_web_search on a dedicated *grounding* run (pinned pro +
-        # one DR direction + the reference) so the model can consult the source
-        # while implementing it. Normal evolutionary runs leave it false.
+        # Optional web search on the INNER-LOOP mutation call — OFF by default and
+        # unused in practice (no run config has ever set it). NOT the grounding signal:
+        # canonical grounding is a standalone mutate.py call with enable_web_search:true
+        # passed directly, gated at spawn_island (PRIMARY) — not via this per-candidate
+        # knob. Left as a plain toggle for any future inner-loop web use.
         "enable_web_search": bool(evo.get("mutation_web_search", False)),
         "max_attempts": evo.get("max_patch_attempts", 3),
         "run_id": cfg.get("run_id"),
@@ -1104,6 +1116,29 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     # Install-isolation guarantee: fail loudly if `shinka` is not this repo's.
     # Pass the harness's repo root (always correct, even when scripts/ is a copy).
     _common.assert_worktree_shinka(_REPO_ROOT)
+
+    # O5 SETUP-CHECK: green-light the discovery-gate contract (DEC-6/DEC-7) at boot.
+    # Cheap, non-fragile: confirm the fail-closed recency helper is wired and that
+    # recent_work_axes carries the three work axes (audit/discovery/grounding) so the
+    # termination streak can tell discovery from grounding. Does NOT read results_dir
+    # (works on an empty run) — it only inspects the journal module's shape.
+    assert callable(getattr(journal, "discovery_in_interval", None)), (
+        "[setup] journal.discovery_in_interval missing — the fail-closed discovery "
+        "recency gate (DEC-7) is not wired; refusing to boot.")
+    assert callable(getattr(journal, "recent_work_axes", None)), (
+        "[setup] journal.recent_work_axes missing — refusing to boot.")
+    import inspect as _inspect
+    try:
+        _axes_src = _inspect.getsource(journal.recent_work_axes)
+    except (OSError, TypeError):  # source unavailable (e.g. frozen) — don't block boot
+        _axes_src = "work_audit work_discovery work_grounding"
+    assert all(_k in _axes_src for _k in
+               ("work_discovery", "work_grounding")), (
+        "[setup] recent_work_axes does not expose the three work axes "
+        "(work_audit/work_discovery/work_grounding) — DEC-6 not wired; refusing to boot.")
+    # stderr ONLY: run_window's stdout is the single JSON envelope (_common.run_main /
+    # the launcher json.loads it). A stray stdout line corrupts that contract.
+    print("[setup] discovery-gate contract OK", file=sys.stderr)
 
     # P6-T1: BOOT guard. The orchestrator's first job is to author task_sys_msg (the
     # goal + hard constraints). Refuse to start —

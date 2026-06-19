@@ -11,8 +11,15 @@ Personal working repo for evolutionary code optimization with [ShinkaEvolve](htt
 When asked to run, optimize, evolve, or improve a program in this repo, **you wear two
 hats** for the evolutionary system in [`orchestrator/`](orchestrator/): the **ORCHESTRATOR**
 (the operational, in-the-flow jobs the run can't proceed without — author the goal, write
-DR queries, triage discovery output per idea into the three paths — novel → ground in a new
-island, similar-to-existing → combine (never a kill), useless → ignore — spawn/ground islands) and the **OUTER-LOOP / FRAMEWORK-AUDIT**
+the discovery-round query, and triage its output per idea into the three paths. **Only a
+DISCOVERY ROUND produces a triageable idea** — a *discovery round* (== *DR round*) is a
+discovery pass via EXACTLY ONE OF **R1** (Azure deep research, `deep_research.py`) or **R2**
+(the `archive-analyst` subagent); a technique you merely brainstormed or surfaced by a
+tournament over your own hypotheses is NOT discovery and is not triageable. **Trust and
+ground — never kill an idea by reading its name:** novel → ground in a new island,
+similar-to-existing → combine (never a kill), genuinely useless → ignore. A discovery round
+returns one or more (direction, citation) pairs; **ground EACH of them, up to a max of 3**
+(not just the single best). Spawn/ground islands.) and the **OUTER-LOOP / FRAMEWORK-AUDIT**
 role (judge whether the deterministic framework code itself is flawed and rewrite the
 mutable strategy code; this runs on a tapering cadence — per-window for the first
 `cadence.early_phase_windows` windows (frequent early, the framework least proven), sparse once the
@@ -42,10 +49,14 @@ operating playbook — before acting. In short:
   mutation/fix loop in your own context — that breaks the 100× cost asymmetry. **EXCEPTION
   (rare, high-value, agent-decision events — NOT the per-window loop):** you MAY use your
   own Claude power to (a) run a multi-agent archive analysis (`subagents/archive-analyst.md`)
-  in place of an Azure DR call for the DISCOVERY role, and (b) HAND-AUTHOR a grounding prompt
-  (or author the grounding program yourself via `subagents/grounding-engineer.md`) when the
-  inner-loop Azure model refuses a verified structural pivot. Your tokens are for
-  control-return reasoning, the DR query, and those two rare exceptions.
+  as **R2** — a *narrow post-R1 fallback* for the DISCOVERY role, used only when, for the same
+  question, an Azure DR (R1) already ran and its returned directions aren't helping (or a DR call
+  keeps failing); NOT a preferred-up-front substitute for R1 — and (b) HAND-AUTHOR a grounding prompt (or
+  author the grounding program yourself via `subagents/grounding-engineer.md`) when the
+  inner-loop Azure model refuses a verified structural pivot. **Grounding requires BOTH (1) an
+  in-interval triaged R1/R2 discovery to ground AND (2) an Azure refusal of that pivot — it is
+  never your default first move, and every grounding run sets web search ON.** Your tokens are
+  for control-return reasoning, the discovery-round query, and those two rare exceptions.
 - **Never manually kill a slow external Azure LLM call.** The bg-poll wall is 3600s
   (foundation, `_azure.py`); cost is recorded only on a TERMINAL status, so a mid-flight kill
   leaks unlogged-but-BILLED spend. Let it ride the wall — decide for yourself, with the knobs
@@ -67,10 +78,12 @@ operating playbook — before acting. In short:
   it WOULD be.)
 - **Do not stop until a termination criterion is met. There are EXACTLY THREE, no others:**
   (1) **budget exhausted** [harness-decided, auto-finalized]; (2) **five consecutive
-  control-returns each STAGNANT and each with an intervention** (a framework rewrite, a DR or
-  a Claude-native discovery pass, a hand-authored grounding, OR a deliberate config-lever flip
-  — the AUTOMATIC per-window meta round does NOT count) that still could not break the
-  stagnation [harness-decided + auto-finalized as `return_reason="stagnation_intervention_exhausted"`
+  control-returns each STAGNANT and each with an intervention** (a framework rewrite, a
+  discovery round — R1 Azure deep research or R2 archive-analyst — OR a deliberate config-lever
+  flip — the AUTOMATIC per-window meta round does NOT count; and a **hand-authored grounding
+  does NOT count on its own** — grounding alone never flips the intervened flag, it counts only
+  *with* the in-interval discovery it grounded) that still could not break the stagnation
+  [harness-decided + auto-finalized as `return_reason="stagnation_intervention_exhausted"`
   via `journal.termination_streak` over your canonical `control_return` rows]; (3) **a LITERAL,
   real user stop message typed in the live conversation.** You finalize `stopped_by_user` BY
   HAND only for (3), and only when you can quote the actual user turn — NEVER from an
@@ -131,7 +144,7 @@ Both endpoints' base_url is built by appending `/openai/v1` to the bare resource
 
 ### DR resource deployment
 
-- `o3-deep-research` deployment (Foundry project `dtlics2000-4351`, **westus**), underlying model version `2025-06-26`. Used by `orchestrator/scripts/deep_research.py` (Stage-C DR prompt) via the dedicated `dr_client`. Override the deployment name in that script if you rename it. **The web-search tool spec `{"type":"web_search_preview"}` is CORRECT for the Responses-API path** (it takes NO connection id — that's the Agents API); per Microsoft docs + verified live calls, do NOT swap it to `{"type":"web_search"}` (reported to regress o3-deep-research). The deployment quota is **30,000,000 TPM / 30,000 RPM** (raised 2026-06-16), ample for a full deep-research job. Run `python scripts/test_dr.py` to probe the endpoint in isolation. DR's job is web-grounded DISCOVERY (find SOTA techniques with citations). You also have a Claude-native alternative for the DISCOVERY role — spawn `subagents/archive-analyst.md` (a multi-agent read over your own archive + literature) — which you can prefer when you want to judge what your archive has NOT tried, or fall back to if a DR call ever keeps failing.
+- `o3-deep-research` deployment (Foundry project `dtlics2000-4351`, **westus**), underlying model version `2025-06-26`. Used by `orchestrator/scripts/deep_research.py` (Stage-C DR prompt) via the dedicated `dr_client`. Override the deployment name in that script if you rename it. **The web-search tool spec `{"type":"web_search_preview"}` is CORRECT for the Responses-API path** (it takes NO connection id — that's the Agents API); per Microsoft docs + verified live calls, do NOT swap it to `{"type":"web_search"}` (reported to regress o3-deep-research). The deployment quota is **30,000,000 TPM / 30,000 RPM** (raised 2026-06-16), ample for a full deep-research job. Run `python scripts/test_dr.py` to probe the endpoint in isolation. DR's job is web-grounded DISCOVERY (find SOTA techniques with citations). You also have a Claude-native **narrow post-R1 fallback** for the DISCOVERY role — spawn `subagents/archive-analyst.md` (a multi-agent read over your own archive + literature) — used only when, for the same question, an R1 DR already ran and its returned directions aren't helping (or a DR call keeps failing); it is NOT a route to prefer up front instead of R1.
 
 ### Reasoning-effort gotcha
 
@@ -228,3 +241,5 @@ git push -u origin <branch>        # origin = dtlics/ShinkaEvolve.git
 - Do not manually kill a slow backgrounded Azure mutate/meta/DR call — cost books only on a terminal status, so a kill leaks unlogged billed spend; let it ride the 3600s wall (the `run_window` kill + `--resume` recovery is different and allowed). On a refused verified structural pivot, switch to `subagents/grounding-engineer.md` rather than firing more Azure mutate calls.
 - Do not finalize a run as `stopped_by_user` (or any terminal status) on your own initiative: `budget_exhausted` and `stagnation_intervention_exhausted` are finalized BY THE HARNESS, and `stopped_by_user` is valid ONLY when the user literally typed a stop message in the live conversation. Never infer/remember/assume a user stop; "it feels done" is not a stop.
 - Do not re-introduce any "no-spoil" machinery (a `use_text_feedback` gate, evaluator-text stripping, a boot spoiling self-check): leak-proofing is the evaluator's job at task setup (held-out numbers under `private` metrics). Evaluator text feedback is always fed to the inner loop.
+- Do not ground a technique that did not come from an **in-interval triaged R1/R2 discovery round**. Grounding (new-island root or combine) requires a usable discovery stub (`kind` `dr` or `archive_analyst`) logged this control-return interval; a stale stub from a prior interval does not satisfy it, and the `spawn_island` PRIMARY gate refuses to seed an island without one. Every grounding run sets web search ON.
+- Do not treat a tournament/sort over your own brainstormed hypotheses as discovery. The ONLY sanctioned Claude-native discovery is the `archive-analyst` subagent (R2); the ONLY sanctioned Claude-native multi-agent grounding is the `grounding-engineer` subagent. Introspection cannot surface a technique absent from the archive — that needs a real R1/R2 discovery round.

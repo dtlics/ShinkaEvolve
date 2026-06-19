@@ -19,7 +19,7 @@ deploy → measure → rollback protocol. See [`.claude/skills/shinka-orchestrat
 ```
 .claude/skills/       Claude Code skills (real files):
   shinka-orchestrator/  SKILL.md (the outer-loop playbook — start here) +
-                        subagents/ (debug-agent, archive-analyst)
+                        subagents/ (debug-agent, archive-analyst, grounding-engineer)
   shinka-setup / shinka-convert / shinka-inspect   task authoring + inspection
 .claude/workflows/    repo automation workflows (repo-cleanup, audit-evolution-logic, …)
 orchestrator/         the outer-loop framework code

@@ -191,11 +191,15 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             {"query": query, "program_context": program_context, "model": model,
              "reasoning_effort": payload.get("reasoning_effort", "medium")},
             {"refused": True, "reason": reason, "error": str(exc),
-             "error_code": getattr(exc, "error_code", None)},
+             "error_code": getattr(exc, "error_code", None),
+             # DEC-7: usable goes into the LOGGED stub the gate reads (not just the return).
+             "usable": False},
             cost=_billed, summary=f"DR refused/failed: {reason}",
         )
         return {"brief": [], "raw_text": "", "cost": _billed, "model": model,
                 "refused": True, "degraded": True, "reason": reason,
+                # DEC-7: refused/failed R1 discovery stub is never usable by the gate.
+                "usable": False,
                 "error_code": getattr(exc, "error_code", None)}
     cost = float(token_cost) + search_surcharge
     brief = _parse_brief(text)
@@ -208,7 +212,10 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         {"query": query, "program_context": program_context, "model": model,
          "reasoning_effort": payload.get("reasoning_effort", "medium")},
         {"brief": brief, "raw_text": text, "token_cost": float(token_cost),
-         "search_surcharge": search_surcharge},
+         "search_surcharge": search_surcharge,
+         # DEC-7: usable lives in the LOGGED stub so journal.discovery_in_interval can
+         # screen an empty-brief DR (usable=False) — not only on the return envelope.
+         "usable": bool(brief)},
         cost=cost,
         summary=f"{len(brief)} brief items",
     )
@@ -216,6 +223,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "brief": brief, "raw_text": text,
         "cost": cost, "token_cost": float(token_cost),
         "search_surcharge": search_surcharge, "model": model,
+        # DEC-7: this kind="dr" call row is the R1 discovery stub the grounding gate
+        # reads (journal.discovery_in_interval); usable iff >=1 direction was returned.
+        "usable": bool(brief),
     }
 
 

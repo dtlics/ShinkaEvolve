@@ -431,10 +431,12 @@ def _work_scores(results_dir: str) -> List[float]:
 
 def recent_work_score(results_dir: str, n: int = 1, decay: Optional[float] = None) -> Optional[float]:
     """The per-control-return WORK SCORE the agent records on interventions.jsonl
-    (how much real work the last control-return did — framework-audit + DR magnitude).
+    (how much real work the last control-return did — the scalar
+    ``work_score = work_audit + work_discovery + work_grounding``, DEC-6).
     Returns the last (n=1), the plain mean of the last n, or a recency-decayed mean
     when ``decay`` is given. None when none recorded yet — the taper's no-signal
-    default (which the harness reads as "wake every window")."""
+    default (which the harness reads as "wake every window"). The cadence taper reads
+    only this scalar, so the three-axis split is invisible to cadence_policy.py."""
     scores = _work_scores(results_dir)
     if not scores:
         return None
@@ -449,11 +451,18 @@ def recent_work_score(results_dir: str, n: int = 1, decay: Optional[float] = Non
 
 
 def recent_work_axes(results_dir: str, n: int = 1) -> Optional[Dict[str, Any]]:
-    """The last recorded {work_audit, work_dr} two-axis work magnitudes (the hook for
-    a future finer, two-axis cadence rule); None when none recorded."""
+    """The last recorded {work_audit, work_discovery, work_grounding} THREE-axis work
+    magnitudes (DEC-6; the hook for a finer, per-axis cadence rule). Splitting discovery
+    from grounding makes a grounding-WITHOUT-discovery stretch detectable — grounding
+    alone is real spend but does not count as the intervention that breaks stagnation.
+    None when none recorded yet."""
     for it in reversed(read_interventions(results_dir)):
-        if "work_audit" in it or "work_dr" in it:
-            return {"work_audit": it.get("work_audit"), "work_dr": it.get("work_dr")}
+        if "work_audit" in it or "work_discovery" in it or "work_grounding" in it:
+            return {
+                "work_audit": it.get("work_audit"),
+                "work_discovery": it.get("work_discovery"),
+                "work_grounding": it.get("work_grounding"),
+            }
     return None
 
 
@@ -474,23 +483,28 @@ def work_low_streak(results_dir: str, low_threshold: float = 1.0) -> int:
 
 def termination_streak(results_dir: str) -> int:
     """Count trailing consecutive 'control_return' rows that are BOTH stagnant AND had an
-    orchestrator intervention (H12 INCLUSIVE: a framework rewrite, a DR, OR a deliberate
-    config-lever flip — the automatic per-window meta round does NOT count). This is the
-    deterministic termination signal (H6/H7/H8): N-in-a-row means the search cannot escape stagnation
-    DESPITE intervening at every return. A stagnation-break (stagnation_flag False) or a
-    no-intervention return resets the streak. Computed from interventions.jsonl — the agent
-    writes one canonical control_return row per control-return; the harness reads it.
+    orchestrator intervention (H12 INCLUSIVE: a framework rewrite, a discovery round (R1 Azure
+    DR or R2 archive-analyst), a hand-authored grounding, OR a deliberate config-lever flip —
+    the automatic per-window meta round does NOT count). This is the deterministic termination
+    signal (H6/H7/H8): N-in-a-row means the search cannot escape stagnation DESPITE intervening
+    at every return. A stagnation-break (stagnation_flag False) or a no-intervention return
+    resets the streak. Computed from interventions.jsonl — the agent writes one canonical
+    control_return row per control-return; the harness reads it.
 
     Each row: {type:"control_return", stagnation_flag: bool, intervened: bool,
-    work_audit, work_dr, work_score, ...}. ``intervened`` is the agent's explicit
-    (work_audit>0 or work_dr>0); rows missing it fall back to that derivation so the
-    signal is robust to either shape."""
+    work_audit, work_discovery, work_grounding, work_score, ...}. ``intervened`` is the agent's
+    explicit (DEC-6: work_audit>0 OR work_discovery>0 — work_grounding ALONE never flips it, so a
+    grounding that grounds NO in-interval discovery cannot pad the streak); rows missing it fall
+    back to that derivation so the signal is robust to either shape."""
     rows = [r for r in read_interventions(results_dir) if r.get("type") == "control_return"]
     streak = 0
     for r in reversed(rows):
         intervened = r.get("intervened")
         if intervened is None:  # robust fallback if the agent omitted the explicit flag
-            intervened = float(r.get("work_audit", 0) or 0) > 0 or float(r.get("work_dr", 0) or 0) > 0
+            # DEC-6: key on work_discovery (NOT work_grounding) — grounding alone is real spend
+            # but is not the intervention that breaks stagnation.
+            work_discovery = r.get("work_discovery", 0)
+            intervened = float(r.get("work_audit", 0) or 0) > 0 or float(work_discovery or 0) > 0
         if bool(r.get("stagnation_flag")) and bool(intervened):
             streak += 1
         else:
@@ -500,8 +514,10 @@ def termination_streak(results_dir: str) -> int:
 
 def read_calls(results_dir: str, kind: Optional[str] = None) -> List[Dict[str, Any]]:
     """WS7: the compact external-call pointer index (no big prompts). Optionally
-    filter by kind ('meta' / 'dr'). Open a specific call's full detail with
-    ``read_call(results_dir, row['file'])``."""
+    filter by kind ('meta' / 'dr' / 'archive_analyst'). The two DISCOVERY-stub kinds the
+    recency gate recognizes are {dr, archive_analyst} (R1 Azure deep research and R2 the
+    archive-analyst subagent); 'meta' is the automatic per-window round (not a discovery
+    stub). Open a specific call's full detail with ``read_call(results_dir, row['file'])``."""
     rows = _read_jsonl(os.path.join(journal_dir(results_dir), "calls.jsonl"))
     return [r for r in rows if (kind is None or r.get("kind") == kind)]
 
@@ -516,6 +532,65 @@ def read_call(results_dir: str, file: str) -> Dict[str, Any]:
         return json.loads(open(p, encoding="utf-8").read())
     except json.JSONDecodeError:
         return {}
+
+
+def _control_return_boundary(results_dir: str) -> float:
+    """The interval anchor for the recency gate (DEC-7): the timestamp of the
+    MOST-RECENT type=="control_return" intervention row (0.0 if none → first interval).
+    control_return rows are the only timestamped interval anchor — windows carry none.
+    Relies on the orchestrator convention of writing the control_return row AFTER acting,
+    so a discovery stub written this interval is strictly-greater than the prior boundary."""
+    boundary = 0.0
+    for r in read_interventions(results_dir):
+        if r.get("type") == "control_return":
+            ts = r.get("timestamp")
+            if isinstance(ts, (int, float)) and float(ts) > boundary:
+                boundary = float(ts)
+    return boundary
+
+
+def discovery_in_interval(results_dir: str) -> List[Dict[str, Any]]:
+    """DEC-7 recency gate — THE single source of truth for "is there a fresh, usable
+    discovery this control-return interval?". Read-only.
+
+    A *discovery round* (== "DR round") is a discovery pass via EXACTLY ONE OF R1 (Azure
+    deep research, kind="dr") OR R2 (the archive-analyst subagent, kind="archive_analyst").
+    This returns the in-interval, USABLE discovery stubs of those two kinds; the caller
+    (the PRIMARY spawn_island.py gate; the grounding-engineer subagent likewise refuses
+    without it) fails CLOSED on an empty list — no in-interval discovery ⇒ grounding refused.
+
+    In-interval iff ``stub.timestamp > boundary`` (STRICT, DEC-7/O6), where boundary =
+    the most-recent control_return row timestamp (0.0 ⇒ first interval). USABLE iff the
+    stub denotes >=1 returned direction: the pointer ``summary`` is not a refusal AND, when
+    the full detail file is readable, its ``response.usable`` is True (an explicit
+    ``usable:false`` from R1/R2 disqualifies it; a missing detail/usable flag is treated as
+    usable so a legitimate stub is never silently dropped). A stale stub (timestamp <=
+    boundary) never satisfies the gate."""
+    boundary = _control_return_boundary(results_dir)
+    stubs = read_calls(results_dir, kind="dr") + read_calls(results_dir, kind="archive_analyst")
+    out: List[Dict[str, Any]] = []
+    for s in stubs:
+        ts = s.get("timestamp")
+        if not isinstance(ts, (int, float)) or float(ts) <= boundary:
+            continue  # stale (or undated) → not in this interval
+        # Pointer-level refusal screen: a summary that reads as a refusal disqualifies.
+        summary = str(s.get("summary") or "").strip().lower()
+        if summary and ("refus" in summary or "no usable" in summary or "unusable" in summary):
+            continue
+        # Confirm against the full detail blob when present: an explicit response.usable
+        # is False disqualifies; absent flag/detail is treated as usable (fail OPEN on a
+        # legitimate stub, not closed).
+        usable = True
+        file = s.get("file")
+        if file:
+            detail = read_call(results_dir, file)
+            resp = detail.get("response") if isinstance(detail, dict) else None
+            if isinstance(resp, dict) and "usable" in resp:
+                usable = bool(resp.get("usable"))
+        if not usable:
+            continue
+        out.append(s)
+    return out
 
 
 def read_island(results_dir: str, island_id: int) -> List[Dict[str, Any]]:

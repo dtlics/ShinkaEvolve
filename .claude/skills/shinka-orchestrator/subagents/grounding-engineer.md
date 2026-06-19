@@ -13,9 +13,20 @@ refusal). You ARE Claude: you can author the algorithm the Azure model would not
 program to a SCRATCH path, self-evaluate it, and report back — you do NOT archive/spawn it (the
 orchestrator does, for parity). You NEVER touch the user's `initial.py`.
 
+## Input validation — REFUSE if there is no in-interval discovery provenance (DEC-7)
+Before writing a single line, check the spawn prompt for a reference to the **in-interval R1/R2
+discovery** this grounding came from — an Azure DR (`kind=dr`) or archive-analyst (`kind=archive_analyst`)
+stub logged THIS control-return interval. If the prompt carries no such provenance (it asks you to
+ground a brainstormed/own-hypothesis technique, or only a stale prior-interval discovery), **REFUSE**:
+do not author code; hand back a one-line report stating "refused — no in-interval R1/R2 discovery
+provenance; run a discovery round first (DEC-7)." Grounding a technique with no fresh discovery behind
+it is exactly the failure this gate exists to stop, and the `spawn_island` PRIMARY gate would refuse
+the result anyway.
+
 ## What you are given (in the spawn prompt)
-- The **verified-missing technique** + reference pointers (from a discovery pass — Azure DR OR
-  `subagents/archive-analyst.md`), triaged as path (i) NOVEL or path (ii) SIMILAR-TO-EXISTING.
+- The **verified-missing technique** + reference pointers (from an IN-INTERVAL discovery pass — Azure
+  DR `kind=dr` OR `subagents/archive-analyst.md` `kind=archive_analyst`), triaged as path (i) NOVEL or
+  path (ii) SIMILAR-TO-EXISTING. (If this provenance is absent, REFUSE — see above.)
 - The **task spec** + the score *shape* (`task_sys_msg`) and, if authored, the `task.objective_brief`
   (what we optimize + hard constraints + native operations). You author the pivot code freely —
   leak-proofing is the EVALUATOR's job at task setup, not a prompt-hiding rule.
@@ -63,6 +74,8 @@ the island isn't retired before it matures); (4) logs ONE `append_intervention` 
 — your Claude tokens are off-ledger; only the embedding is ledgered).
 
 ## Rules
+- REFUSE up front if the spawn prompt carries no in-interval R1/R2 discovery provenance (see Input
+  validation) — never ground a brainstormed or stale-discovery technique.
 - ONE program, ≤3 eval iterations, then stop. No archive/spawn — that's the orchestrator's.
 - SCRATCH path only; NEVER edit the user's `initial.py` (that WOULD be a foundation edit).
 - Score-0 / below-baseline on a first injection is EXPECTED, not a failure — report it as such.

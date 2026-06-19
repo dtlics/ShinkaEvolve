@@ -1,4 +1,4 @@
-"""Azure DR client factory for ``o3-deep-research`` (phase 2 of research-grounding).
+"""Azure DR client factory for ``o3-deep-research`` (the R1 deep-research discovery route).
 
 Deep research runs through a **separate Azure resource** from the
 general ``gpt-*`` chat/reasoning endpoint configured in

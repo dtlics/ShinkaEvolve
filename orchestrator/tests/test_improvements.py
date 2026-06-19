@@ -222,11 +222,18 @@ def test_work_score_readers():
         journal.init_run(td, {"run_id": "w"})
         assert journal.recent_work_score(td) is None  # none recorded yet
         assert journal.work_low_streak(td) == 0
-        journal.append_intervention(td, {"type": "audit", "work_audit": 3, "work_dr": 0, "work_score": 3})
-        journal.append_intervention(td, {"type": "audit", "work_audit": 0, "work_dr": 0, "work_score": 0})
+        # DEC-6: the discovery axis is split into work_discovery + work_grounding; the
+        # taper scalar is still work_audit + work_discovery + work_grounding.
+        journal.append_intervention(td, {"type": "audit", "work_audit": 3, "work_discovery": 0,
+                                         "work_grounding": 0, "work_score": 3})
+        journal.append_intervention(td, {"type": "audit", "work_audit": 0, "work_discovery": 0,
+                                         "work_grounding": 0, "work_score": 0})
         assert journal.recent_work_score(td) == 0.0
         assert abs(journal.recent_work_score(td, n=2) - 1.5) < 1e-9  # mean(3, 0)
-        assert journal.recent_work_axes(td) == {"work_audit": 0, "work_dr": 0}
+        # recent_work_axes returns the THREE axes (audit/discovery/grounding) so a
+        # grounding-only stretch (work_grounding>0, work_discovery==0) is detectable.
+        assert journal.recent_work_axes(td) == {"work_audit": 0, "work_discovery": 0,
+                                                "work_grounding": 0}
         assert journal.work_low_streak(td) == 1  # only the trailing 0 is low; the 3 breaks it
         journal.append_intervention(td, {"type": "audit", "work_score": 0})
         assert journal.work_low_streak(td) == 2  # two trailing lows
@@ -2466,11 +2473,102 @@ def test_termination_streak():
         assert journal.termination_streak(td) == 2
         journal.append_intervention(td, _row(False, True))  # stagnation broke → reset
         assert journal.termination_streak(td) == 0
-        # fallback: a row WITHOUT an explicit `intervened` derives it from work_audit/work_dr
+        # fallback: a row WITHOUT an explicit `intervened` derives it from
+        # work_audit/work_discovery (DEC-6 — keyed on work_discovery, NOT work_grounding).
         journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
-                                         "work_dr": 2})
+                                         "work_discovery": 2})
         assert journal.termination_streak(td) == 1
-        # a DR alone counts as an intervention (no ">=1 DR of 5" special rule anymore)
+        # a discovery round alone counts as an intervention (no ">=1 DR of 5" special rule anymore)
+
+    # REQUIRED NEGATIVE (DEC-6): grounding ALONE never flips intervened, so a stagnant
+    # control_return whose only work is work_grounding does NOT advance the termination
+    # streak — a combine/grounding cannot pad the streak with no discovery behind it.
+    with tempfile.TemporaryDirectory() as td:
+        journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
+                                         "work_grounding": 2})
+        assert journal.termination_streak(td) == 0
+    return None
+
+
+def test_discovery_in_interval():
+    """DEC-7: journal.discovery_in_interval is the SINGLE source of truth for the
+    fail-closed recency gate that spawn_island (primary) reads (and grounding-engineer
+    refuses without). Boundary = timestamp of the most-recent type=='control_return' interventions
+    row (0.0 if none → first interval). It returns the in-interval USABLE discovery
+    stubs of kind {dr, archive_analyst}: stub.timestamp STRICTLY-GREATER than the
+    boundary AND usable (response.usable True). Empty list ⇒ the caller fails closed."""
+    import tempfile
+    import time as _time
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import journal
+
+    def _stub(td, kind, usable, brief, summary):
+        # A discovery stub is exactly a calls.jsonl pointer (kind in {dr, archive_analyst})
+        # written by log_call; the detail blob's response carries the `usable` bool
+        # (usable == bool(brief)). cost 0.0 keeps the ledger untouched in the test.
+        return journal.log_call(
+            td, kind,
+            request={"query": "how to improve X"},
+            response={"usable": usable, "brief": brief},
+            cost=0.0, summary=summary,
+        )
+
+    # (a) no control_return + no calls → empty (caller fails closed)
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "d"})
+        assert journal.discovery_in_interval(td) == []
+
+    # (b) a usable kind="dr" stub AFTER the last control_return → returned
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "d"})
+        # boundary: an OLD control_return row (explicit, small timestamp)
+        journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
+                                         "work_audit": 1, "timestamp": 1000.0})
+        _stub(td, "dr", True, ["use a Steiner-tree router"], "DR: 1 direction")  # ts = now ≫ 1000
+        got = journal.discovery_in_interval(td)
+        assert len(got) == 1 and got[0]["kind"] == "dr"
+
+    # (c) a stub AT/<= the boundary → excluded (strictly-greater recency)
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "d"})
+        _stub(td, "dr", True, ["a direction"], "DR: 1 direction")  # logged FIRST
+        stub_ts = journal.read_calls(td, kind="dr")[0]["timestamp"]
+        # control_return recorded AFTER acting (the canonical convention) → boundary
+        # is >= the stub timestamp, so the stub is no longer in-interval.
+        journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
+                                         "work_audit": 1, "timestamp": stub_ts})
+        assert journal.discovery_in_interval(td) == []  # at boundary (not strictly greater)
+        # and a stub strictly before the boundary is likewise excluded
+        journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
+                                         "work_audit": 1, "timestamp": stub_ts + 100.0})
+        assert journal.discovery_in_interval(td) == []
+
+    # (d) a refused / usable:false stub after the boundary → excluded
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "d"})
+        journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
+                                         "work_audit": 1, "timestamp": 1000.0})
+        _stub(td, "dr", False, [], "DR REFUSED: no usable direction")  # usable:false
+        assert journal.discovery_in_interval(td) == []
+
+    # (e) a usable kind="archive_analyst" stub after the boundary → returned (route parity)
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "d"})
+        journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
+                                         "work_audit": 1, "timestamp": 1000.0})
+        _stub(td, "archive_analyst", True, ["combine islands 2 and 4"],
+              "archive-analyst: 1 direction")
+        got = journal.discovery_in_interval(td)
+        assert len(got) == 1 and got[0]["kind"] == "archive_analyst"
+
+    # first-interval (no control_return at all): a usable stub IS in-interval (boundary 0.0)
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "d"})
+        _stub(td, "dr", True, ["a direction"], "DR: 1 direction")
+        assert _time.time() > 0.0  # sanity: log_call stamps a real (>0) timestamp
+        got = journal.discovery_in_interval(td)
+        assert len(got) == 1 and got[0]["kind"] == "dr"
     return None
 
 
@@ -3409,6 +3507,7 @@ if __name__ == "__main__":
         ("sample_parent_direction_oriented", test_sample_parent_direction_oriented),
         ("novelty_keep_better_contract", test_novelty_keep_better_contract),
         ("termination_streak", test_termination_streak),
+        ("discovery_in_interval", test_discovery_in_interval),
     ]
     ok = True
     for name, fn in tests:

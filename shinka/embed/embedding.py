@@ -124,7 +124,7 @@ class EmbeddingClient:
         Initialize the EmbeddingClient.
 
         Args:
-            model_name (str): The OpenAI, Azure, or Gemini embedding model name to use.
+            model_name (str): The OpenAI or Azure embedding model name to use (Azure-only fork; Gemini/google was removed in the prune).
             verbose (bool): Enable verbose logging.
         """
         self.model_name = model_name
@@ -391,7 +391,7 @@ class AsyncEmbeddingClient:
         Initialize the AsyncEmbeddingClient.
 
         Args:
-            model_name (str): The OpenAI, Azure, or Gemini embedding model name to use.
+            model_name (str): The OpenAI or Azure embedding model name to use (Azure-only fork; Gemini/google was removed in the prune).
             verbose (bool): Enable verbose logging.
         """
         self.model_name = model_name

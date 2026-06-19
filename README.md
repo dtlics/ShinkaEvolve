@@ -26,12 +26,13 @@ orchestrator/         the outer-loop framework code
   scripts/           JSON-contract subroutines — mutable strategy policies
                      (sample_parent, novelty_check, select_llm, compute_reward,
                      record_policy, stagnation_detector, island_policy,
-                     cadence_policy, island_brief, construct_mutation_prompt;
+                     island_brief, construct_mutation_prompt;
                      meta_summarize + mutate are prompt-mutable / body-foundation)
                      + immutable foundation (evaluate, archive_record, archive_query,
                      diagnostics, deep_research, repair_record, spawn_island,
-                     _azure, _common)
-  harness/           run_window (inner loop), validate_strategy, strategy_store, journal
+                     cadence_policy, _azure, _common)
+  harness/           run_window (inner loop), validate_strategy, strategy_store,
+                     rollback_decision, journal
   strategy_history/  append-only audit of every deployed strategy version
   NOTES.md           the orchestrator's per-run note (cleared at each run start)
   tests/             parity / improvements / smoke (offline, no API)

@@ -179,8 +179,10 @@ subprocess each call is how a deployed code rewrite takes effect — the next in
 imports the new file. (`--windows 1` runs exactly one bounded window; `--windows 1
 --trace-steps` is the framework-audit MEASURE window — see the rewrite cycle.)
 
-`run_window` self-caffeinates on macOS (holds `PreventUserIdleSystemSleep` for its
-lifetime, auto-released on exit) so a long cluster is not reaped by host idle-sleep. There
+`run_window` self-caffeinates against host idle-sleep for its lifetime (auto-released on
+exit) — on macOS via `PreventUserIdleSystemSleep`, on Windows via
+`SetThreadExecutionState(ES_SYSTEM_REQUIRED)` (Linux is a no-op) — so a long cluster is not
+reaped by host idle-sleep. There
 is no separate detached launcher — the background-launched `--until-decision` IS the wake
 primitive; it returns by exiting and re-invokes you. Keep the lid open / on AC for
 unattended runs.
@@ -913,6 +915,9 @@ novelty or serial eval).
 - Never edit FOUNDATION files (schema, contract, evaluate, archive_record/query,
   diagnostics, repair_record, journal, harness, deep_research, the task's evaluate/init).
   Defer foundation ideas to the ending document.
+- Never read `docs/archive/` as current guidance — it holds APPLIED/SUPERSEDED `FIX_PLAN_*` /
+  `AUDIT_*` docs kept for historical reference ONLY (each describes a PAST state). The live
+  guidance is `CLAUDE.md` + this file; a stale "PLAN ONLY" banner inside an archived plan is not a to-do.
 - **Never ground a technique that did not come from an in-interval triaged R1/R2 discovery stub.**
   The PRIMARY gate (`spawn_island.py`) fails closed without one (it refuses to seed a new island),
   and `subagents/grounding-engineer.md` refuses a spawn prompt with no in-interval R1/R2 provenance;

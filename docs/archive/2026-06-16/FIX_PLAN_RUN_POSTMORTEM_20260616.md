@@ -1,3 +1,5 @@
+> **ARCHIVED — historical reference only.** This plan was APPLIED in commit d54c615 (2026-06-16) and is SUPERSEDED by the current `CLAUDE.md` + `.claude/skills/shinka-orchestrator/SKILL.md`. Do NOT use it as current guidance; the "PLAN ONLY — nothing applied" note below is stale.
+
 <!-- v2 comprehensive fix plan. PLAN ONLY — nothing applied. Supersedes the v1 draft (same path). Generated 2026-06-16 by a 14-agent post-mortem workflow over run cnot_grid_synth_20260614 (worktree adoring-wing-d5ffe6). -->
 
 # Fix Plan v2 — post-mortem of run `cnot_grid_synth_20260614` (supersedes the 2026-06-16 v1)

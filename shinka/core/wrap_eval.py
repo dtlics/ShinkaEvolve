@@ -467,7 +467,7 @@ def run_shinka_eval(
         print(f"Evaluation error: {e}")
         # Capture the full traceback while we still have live exc_info. The
         # truncated string is persisted via save_json_results into correct.json
-        # so the agentic proposer's evaluate_tool path and downstream analytics
+        # so the orchestrator's fix-mode prompt + journal/analytics
         # can read the actual stack site (not just str(e)).
         error_traceback_str: Optional[str] = traceback.format_exc()
         metrics = {

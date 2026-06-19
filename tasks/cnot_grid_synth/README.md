@@ -73,8 +73,10 @@ surfaced to the inner loop; correctness is enforced by `evaluate.py`'s authorita
 - 30 random invertible matrices per L from
   `qiskit.synthesis.linear.linear_matrix_utils.random_invertible_binary_matrix`,
   seeded deterministically — same matrices for every candidate.
-- Per-trial timeout: 5 s (the seed runs in well under 100 ms; this is a
-  backstop against runaway candidates).
+- Per-trial timeout: 300 s (env `CNOT_PER_TRIAL_TIMEOUT_S`), under a 30-min
+  wall-clock budget for the whole evaluation (env `CNOT_EVAL_WALLCLOCK_BUDGET_S`).
+  The seed runs in well under 100 ms, so both are backstops against runaway
+  candidates.
 
 Total cost per evaluation: ~270 syntheses (~25 s for the seed).
 

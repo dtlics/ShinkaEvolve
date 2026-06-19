@@ -171,8 +171,9 @@ python orchestrator/harness/run_window.py --config <run>/run.json --until-decisi
 ```
 
 **Long / unattended runs — stay alive, no deploy-and-walk-away.** `run_window`
-*self-caffeinates* on macOS (holds a `PreventUserIdleSystemSleep` assertion for its
-lifetime) so a long cluster isn't reaped by a host idle-sleep (the cause of earlier
+*self-caffeinates* against host idle-sleep for its lifetime (on macOS via a
+`PreventUserIdleSystemSleep` assertion, on Windows via `SetThreadExecutionState(ES_SYSTEM_REQUIRED)`;
+Linux is a no-op) so a long cluster isn't reaped by a host idle-sleep (the cause of earlier
 mid-run kills). The wake primitive is simply the **background-launched
 `run_window --until-decision`**: it returns control by EXITING at the cluster boundary
 and re-invokes you, so you stay alive and in the loop (warmup is fully hands-on; the real
@@ -238,6 +239,7 @@ git push -u origin <branch>        # origin = dtlics/ShinkaEvolve.git
 - Do not re-add non-Azure providers or the old `shinka_run` / agentic-proposer code — this fork is Azure-only and orchestrator-driven.
 - Do not touch the FOUNDATION mid-run (sqlite schema, the scripts' JSON contract, `evaluate.py`, the user's `evaluate.py`/`initial.*`, and — S1 — `cadence_policy.py` + the termination logic: the wake-decay schedule and when the run ends are NOT orchestrator-rewritable; their knobs are boot-only config). Defer foundation ideas to the end-of-run **ending document**.
 - Do not read a prior run's archive (`orchestrator/run_archive/`) while running a new job — those are for the user's later reference only, not run inputs.
+- Do not read the doc archive (`docs/archive/`) as current guidance. It holds APPLIED / SUPERSEDED fix plans and past audits (`FIX_PLAN_*`, `AUDIT_*`) kept for historical reference ONLY — each describes a PAST state of the repo, not what to do now. The live, authoritative guidance is THIS file (`CLAUDE.md`) + `.claude/skills/shinka-orchestrator/SKILL.md`. A stale "PLAN ONLY" / "nothing applied" banner inside an archived plan does NOT mean there is work to do.
 - Do not manually kill a slow backgrounded Azure mutate/meta/DR call — cost books only on a terminal status, so a kill leaks unlogged billed spend; let it ride the 3600s wall (the `run_window` kill + `--resume` recovery is different and allowed). On a refused verified structural pivot, switch to `subagents/grounding-engineer.md` rather than firing more Azure mutate calls.
 - Do not finalize a run as `stopped_by_user` (or any terminal status) on your own initiative: `budget_exhausted` and `stagnation_intervention_exhausted` are finalized BY THE HARNESS, and `stopped_by_user` is valid ONLY when the user literally typed a stop message in the live conversation. Never infer/remember/assume a user stop; "it feels done" is not a stop.
 - Do not re-introduce any "no-spoil" machinery (a `use_text_feedback` gate, evaluator-text stripping, a boot spoiling self-check): leak-proofing is the evaluator's job at task setup (held-out numbers under `private` metrics). Evaluator text feedback is always fed to the inner loop.

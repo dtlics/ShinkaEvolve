@@ -83,7 +83,7 @@ Do not edit the original source tree unless the user explicitly requests in-plac
      inner loop); running the
      task means BEING the orchestrator/outer-loop under the new run loop.
 8. Smoke test before handoff.
-   - Run `python evaluate.py --program_path <initial file> --results_dir /tmp/shinka_convert_smoke`
+   - Run `python evaluate.py --program_path <initial file> --results_dir ./_smoke_out`
    - Confirm evaluator runs without exceptions.
    - Confirm required metrics/correctness outputs are written.
 9. Hand off to the **shinka-orchestrator** outer loop to run evolution

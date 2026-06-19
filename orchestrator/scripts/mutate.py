@@ -10,8 +10,11 @@ to Azure, never the orchestrator's own tokens** — the inner loop must run at
 API-call speed (the cost asymmetry that makes the whole design work). The real
 path uses Azure **background mode + polling** (the same resilient transport
 ``deep_research`` uses) so long reasoning calls don't hit the documented
-long-idle-TCP hang. Non-Azure/OpenAI providers fall back to the legacy
-synchronous client (they don't expose background mode).
+long-idle-TCP hang. This fork is Azure/OpenAI-only — the background path admits only
+``("azure_openai", "openai")`` (``_azure.bg_query`` raises for any other provider), so
+there is no general non-Azure fall-back; the legacy synchronous branch survives only
+as a defensive fallback for the bare ``openai`` provider when background mode is
+unavailable.
 
 Retry: on APPLY failure (patch doesn't apply), it re-prompts the same model with
 the apply error fed back, up to ``max_attempts`` (default 3). EVAL failures are

@@ -758,13 +758,21 @@ def extract_between(
     return_dict: bool = True,
     fallback: bool = False,
 ) -> Optional[Union[str, dict]]:
-    """Extract text from between start and end tags.
+    """Extract a block from between start and end tags.
 
     Args:
-        content (str): The input string containing CUDA code
+        content (str): Text to search for a block between ``start`` and
+            ``end`` tags (default ``<json>`` / ``</json>``).
+        start (str): Opening tag delimiter.
+        end (str): Closing tag delimiter.
+        return_dict (bool): If True, json.loads the matched block and return
+            the parsed dict; otherwise return the raw matched string.
+        fallback (bool): If True and no tagged block is found, retry against a
+            ``` ... ``` code-fenced block.
 
     Returns:
-        str: The extracted text, or None if no text is found
+        The parsed dict (return_dict=True) or raw string, or "none" if no
+        block is found.
     """
     match = re.search(f"{start}\\s*(.*?)\\s*{end}", content, re.DOTALL)
     if match:

@@ -39,7 +39,7 @@ Invoke this skill when the user:
 5. Ensure candidate output schema matches evaluator expectations (tuple/dict for Python module eval, or file/CLI contract for non-Python). **Make the evaluator leak-proof:** put held-out / gate-defining numbers under a `private` metrics dict — only `public` metrics reach the inner loop (`perf_str` renders only `public`), and `text_feedback` describes failures without revealing a target. Then any candidate that passes and improves the metric is a good candidate, and the inner loop is always fed the evaluator's feedback.
 6. Validate draft `evaluate.py` before handoff:
    - Run a smoke test:
-     - `python evaluate.py --program_path initial.<ext> --results_dir /tmp/shinka_eval_smoke`
+     - `python evaluate.py --program_path initial.<ext> --results_dir ./_smoke_out`
    - Confirm evaluator runs without exceptions.
    - Confirm a metrics `dict` is produced (either from `aggregate_fn` or `metrics.json`) with at least:
      - `combined_score` (numeric),

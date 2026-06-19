@@ -1,3 +1,5 @@
+> **ARCHIVED — historical reference only.** APPLIED + verified and committed (da85d0d, 2026-06-19); SUPERSEDED by the current `CLAUDE.md` + `.claude/skills/shinka-orchestrator/SKILL.md`. Do NOT use as current guidance.
+
 # FIX PLAN — Discovery→Ground gap (locked design + bundled change plan)
 
 > **STATUS: APPLIED to the working tree (uncommitted) on 2026-06-19.** DEC-1..DEC-7 are live in

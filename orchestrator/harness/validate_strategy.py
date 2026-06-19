@@ -219,6 +219,10 @@ CONTRACTS: Dict[str, Dict[str, Any]] = {
             else "meta must return island_directions as a list"
         ),
     },
+    # cadence_policy.py is FOUNDATION / non-deployable (S1): strategy_store._assert_mutable
+    # raises PermissionError for it, so the rewrite-deploy path NEVER validates it. This
+    # contract is retained only for an out-of-band sanity smoke (e.g. invoking
+    # validate_strategy directly on the shipped file), NOT the rewrite-deploy path.
     "cadence_policy.py": {
         "required_keys": {"return", "reason"},
         "needs_archive": False,
@@ -309,8 +313,10 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             _MUT = (
                 "sample_parent.py", "novelty_check.py", "select_llm.py", "compute_reward.py",
                 "record_policy.py", "stagnation_detector.py", "island_policy.py",
-                "cadence_policy.py", "construct_mutation_prompt.py", "mutate.py", "meta_summarize.py",
+                "construct_mutation_prompt.py", "mutate.py", "meta_summarize.py",
                 "island_brief.py",  # M3: keep in sync with strategy_store.MUTABLE_TARGETS
+                # (cadence_policy.py is FOUNDATION/non-deployable — S1 — and is
+                # deliberately EXCLUDED from MUTABLE_TARGETS, so it is not listed here.)
             )
         if target not in _MUT:
             return {

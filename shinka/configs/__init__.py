@@ -1,4 +1,7 @@
-"""Packaged Hydra configs for installed Shinka CLI usage."""
+"""Packaged Hydra configs retained for the upstream load path (``shinka.utils.utils_hydra``).
+
+(The Shinka CLI was removed in the Azure-only prune.)
+"""
 
 from __future__ import annotations
 

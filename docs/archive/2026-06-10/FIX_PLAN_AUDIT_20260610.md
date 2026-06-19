@@ -1,3 +1,5 @@
+> **ARCHIVED — historical reference only.** This plan was APPLIED (Waves 1–5, through 2026-06-14) and is SUPERSEDED by the current `CLAUDE.md` + `.claude/skills/shinka-orchestrator/SKILL.md`. Do NOT use it as current guidance; the "no code/doc changed yet" line below is stale.
+
 # Fix Plan — ShinkaEvolve Orchestrator Audit (2026-06-10)
 
 **Addresses:** `docs/archive/2026-06-10/AUDIT_LOGIC_WORKFLOW_20260610.md` — 180 findings (13 H · 49 M · 95 L · 23 N) + the S1–S9 design-divergence supplement (189 items total).

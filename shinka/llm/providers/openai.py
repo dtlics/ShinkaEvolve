@@ -1,10 +1,10 @@
-"""Legacy non-agentic OpenAI provider path.
+"""OpenAI/Azure Responses-API query implementation.
 
-Only reached when ``AgentLLMClient._query_via_legacy`` is invoked — i.e.,
-when a structured ``output_model`` is requested or the backend isn't
-detected as Azure/OpenAI. The agentic path goes through the OpenAI Agents
-SDK Runner, which parses ``/v1/responses`` payloads internally; the
-helpers below are not used there.
+This is the sole query implementation for the OpenAI/Azure backend: every
+``shinka.llm.query`` call dispatches into ``query_openai`` /
+``query_openai_async`` unconditionally for each supported provider. (The
+former ``AgentLLMClient._query_via_legacy`` path and the OpenAI Agents SDK
+Runner were removed in the Azure-only prune.)
 """
 
 import openai

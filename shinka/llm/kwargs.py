@@ -105,7 +105,10 @@ def sample_model_kwargs(
     else:
         r_effort = "disabled"
 
-    # Some opennrouter models only support running with reasoning effort
+    # Some openrouter models only support running with reasoning effort.
+    # (openrouter is NOT currently queryable in this Azure-only fork —
+    # query.py _SUPPORTED = ('openai', 'azure_openai'); pricing.csv keeps
+    # openrouter rows for cost lookup only.)
     if requires_reasoning(api_model_name) and r_effort == "disabled":
         r_effort = "low"
 

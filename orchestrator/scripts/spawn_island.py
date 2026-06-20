@@ -7,6 +7,14 @@ branch (SKILL.md Boot/triage): the orchestrator first GROUNDS the direction (a n
 web-grounded pro mutation that produces a correct program), then calls THIS to copy
 that program onto a fresh island as its root.
 
+PATH SCOPE: this is the executor for the discovery-triage **path (i) NOVEL** ONLY. It
+copies the grounded program onto a FRESH island so the new structural family is not
+out-competed before it matures. The discovery-triage **path (ii) SIMILAR-TO-EXISTING
+does NOT call spawn_island**: that grounding is a plain archive_record with
+parent_id = the closest existing program (the grounded program becomes that program's
+LINEAGE CHILD in the SAME island), and the existing similar program is never
+overwritten, evicted, or replaced.
+
 The technique seeded here MUST originate from an in-interval discovery round (DR
 round) — EXACTLY ONE OF R1 (Azure deep research, ``deep_research.py``, stub
 ``kind="dr"``) OR R2 (archive-analyst subagent, stub ``kind="archive_analyst"``) —

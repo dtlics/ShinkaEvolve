@@ -16,8 +16,9 @@ DISCOVERY ROUND produces a triageable idea** — a *discovery round* (== *DR rou
 discovery pass via EXACTLY ONE OF **R1** (Azure deep research, `deep_research.py`) or **R2**
 (the `archive-analyst` subagent); a technique you merely brainstormed or surfaced by a
 tournament over your own hypotheses is NOT discovery and is not triageable. **Trust and
-ground — never kill an idea by reading its name:** novel → ground in a new island,
-similar-to-existing → combine (never a kill), genuinely useless → ignore. A discovery round
+ground — never kill an idea by reading its name:** novel → ground in a new island (`spawn_island.py`),
+similar-to-existing → combine via `archive_record` `parent_id`=closest with NO new island and the
+existing program NOT replaced (never a kill), genuinely useless → ignore. A discovery round
 returns one or more (direction, citation) pairs; **ground EACH of them, up to a max of 3**
 (not just the single best). Spawn/ground islands.) and the **OUTER-LOOP / FRAMEWORK-AUDIT**
 role (judge whether the deterministic framework code itself is flawed and rewrite the

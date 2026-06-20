@@ -17,6 +17,9 @@ so it can be read with grep/Read (no unpickling, no query layer):
                               line per inner-loop decision (sampler / prompt summary
                               / llm output / eval / framework decision). Absent in a
                               normal run; cleaned up after warmup. Folds no cost.
+  journal/novelty.jsonl       (per-candidate novelty-comparison records — one row per
+                              evaluated correct candidate whose novelty gate ran; ids+numbers
+                              only, the audit trail behind novelty_acceptance_rate). Folds no cost.
 
 `strategy_history/` (separate) holds the per-strategy-version snapshots. Together
 they let the orchestrator zoom from "how's the run overall" → "what did window 37
@@ -360,6 +363,58 @@ def log_step(results_dir: str, record: Dict[str, Any]) -> None:
     framework decision)."""
     rec = {**record, "timestamp": record.get("timestamp", time.time())}
     _append_jsonl(os.path.join(journal_dir(results_dir), "steps.jsonl"), rec)
+
+
+def log_novelty(results_dir: str, record: Dict[str, Any]) -> None:
+    """Append ONE per-candidate novelty-comparison record to journal/novelty.jsonl.
+
+    Written for every EVALUATED CORRECT candidate whose novelty gate ran (one row per
+    keep-best-vs-keep-separate decision), so the orchestrator can audit individual calls
+    — not just the per-window aggregate acceptance rate — and TUNE
+    evo.code_embed_sim_threshold from real pairs. ids + numbers only, NEVER code. Folds
+    NO cost. Schema (see SKILL.md 'Tuning the novelty threshold'):
+      {timestamp, window_index, generation, candidate_id, parent_id, island_idx,
+       decision in {accepted_novel|kept_better_evicted|dropped_worse|idle_no_compare},
+       max_similarity, most_similar_id, most_similar_score, candidate_score,
+       n_compared, diff_lines, threshold}
+    The most_similar_id link + both scores is the point: it lets the orchestrator fetch
+    JUST the two programs of a borderline row by id (archive_query) instead of scanning
+    the archive; diff_lines (unified-diff length) is the change-magnitude proxy that
+    separates a scalar tweak (tiny diff, high similarity) from a new-direction edit
+    (larger diff, lower similarity)."""
+    rec = {**record, "timestamp": record.get("timestamp", time.time())}
+    _append_jsonl(os.path.join(journal_dir(results_dir), "novelty.jsonl"), rec)
+
+
+def read_novelty(results_dir: str, last_n: Optional[int] = None,
+                 window_index: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Read per-candidate novelty records (optionally a single window, and/or the last N)."""
+    rows = _read_jsonl(os.path.join(journal_dir(results_dir), "novelty.jsonl"))
+    if window_index is not None:
+        rows = [r for r in rows if r.get("window_index") == window_index]
+    return rows[-last_n:] if last_n else rows
+
+
+def novelty_near_threshold(results_dir: str, margin: float = 0.02,
+                           window_index: Optional[int] = None) -> List[Dict[str, Any]]:
+    """The BORDERLINE novelty rows — abs(max_similarity - threshold) <= margin — the pairs
+    the gate could plausibly have classified either way. The efficient entry point for
+    tuning evo.code_embed_sim_threshold: read these compact rows (ids + numbers), then
+    fetch ONLY each row's {candidate_id, most_similar_id} pair via archive_query to eyeball
+    whether they are truly similar (-> threshold too low, raise it) or genuinely different
+    (-> threshold too high, lower it) — never scanning full programs. Skips rows with no
+    comparison (n_compared==0 / missing threshold)."""
+    out: List[Dict[str, Any]] = []
+    for r in read_novelty(results_dir, window_index=window_index):
+        thr = r.get("threshold")
+        sim = r.get("max_similarity")
+        if not isinstance(thr, (int, float)) or not isinstance(sim, (int, float)):
+            continue
+        if int(r.get("n_compared", 0) or 0) <= 0:
+            continue
+        if abs(float(sim) - float(thr)) <= margin:
+            out.append(r)
+    return out
 
 
 def total_cost(results_dir: str) -> float:
@@ -739,6 +794,14 @@ if __name__ == "__main__":
             return {"result": read_steps(rd, payload.get("generation"), payload.get("last_n"))}
         if view == "step_tail":
             return {"result": read_steps(rd, last_n=int(payload.get("last_n", 20)))}
+        if view == "novelty":
+            return {"result": read_novelty(rd, payload.get("last_n"), payload.get("window_index"))}
+        if view == "novelty_near_threshold":
+            return {"result": novelty_near_threshold(
+                rd, float(payload.get("margin", 0.02) or 0.02), payload.get("window_index"))}
+        if view == "log_novelty":
+            log_novelty(rd, payload["record"])
+            return {"logged": True}
         if view == "append_intervention":
             append_intervention(rd, payload["entry"])
             return {"appended": True}

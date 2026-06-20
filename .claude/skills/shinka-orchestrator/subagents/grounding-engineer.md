@@ -59,19 +59,23 @@ Return Markdown with exactly these sections:
   call it a failure.
 - **Parent for grounding** — `null` for path (i) NOVEL (it gets its OWN island); the closest
   program id for path (ii) SIMILAR-TO-EXISTING (combine-into).
-- **Handoff** — one line: "ready for archive_record + spawn_island" (correct) OR "could not
-  instantiate after 3 tries — recommend re-triage / re-scope" (incorrect). This is NOT a run-stop
-  signal — you never authorize a termination.
+- **Handoff** — one line: "ready for archive_record + spawn_island" (correct, path (i) NOVEL) OR
+  "ready for archive_record parent_id=closest, NO spawn" (correct, path (ii) SIMILAR-TO-EXISTING) OR
+  "could not instantiate after 3 tries — recommend re-triage / re-scope" (incorrect). This is NOT a
+  run-stop signal — you never authorize a termination.
 
 ## PARITY — what the orchestrator does with your result (identical to an Azure grounding output)
-Your correct program is handled EXACTLY as a successful Azure grounding mutation: embed →
-`archive_record` → `spawn_island`. You do NOT run these; you hand back the path. The orchestrator
-then: (1) embeds the code via `EmbeddingClient("azure-text-embedding-3-small").get_embedding` and
-ledgers the tiny cost; (2) `archive_record`s it with `parent_id` = your "Parent for grounding"
-(`null` → its own island for a NOVEL pivot; the closest id for SIMILAR), `metadata.grounding`;
-(3) `spawn_island`s the new id into a NEW structural family (`max_islands:0` default, or pinned, so
-the island isn't retired before it matures); (4) logs ONE `append_intervention` ($0 authoring cost
-— your Claude tokens are off-ledger; only the embedding is ledgered).
+Your correct program is handled EXACTLY as a successful Azure grounding mutation; the orchestrator
+runs the steps (you do NOT — you hand back the path), and the ARCHIVE step BRANCHES BY PATH:
+(1) embeds the code via `EmbeddingClient("azure-text-embedding-3-small").get_embedding` and ledgers
+the tiny cost; (2) `archive_record`s it with `parent_id` = your "Parent for grounding"
+(`null` → its OWN island for a path (i) NOVEL pivot; the closest id for path (ii) SIMILAR),
+`metadata.grounding`; (3) for **path (i) NOVEL ONLY**, `spawn_island`s the new id into a NEW
+structural family (`max_islands:0` default, or pinned, so the island isn't retired before it
+matures) — for **path (ii) SIMILAR-TO-EXISTING there is NO spawn**: the `archive_record`
+`parent_id`=closest in step (2) already makes it a lineage child of the existing program (left
+intact, never overwritten / evicted / replaced); (4) logs ONE `append_intervention` ($0 authoring
+cost — your Claude tokens are off-ledger; only the embedding is ledgered).
 
 ## Rules
 - REFUSE up front if the spawn prompt carries no in-interval R1/R2 discovery provenance (see Input

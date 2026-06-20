@@ -3418,6 +3418,84 @@ def test_m46_count_live_excludes_tombstoned():
     return None
 
 
+def test_novelty_logging_stream():
+    # FEATURE (task B): the per-candidate novelty audit stream journal/novelty.jsonl + the
+    # borderline reader for tuning code_embed_sim_threshold + the diagnostics histogram
+    # passthrough. ids + numbers only, one row per evaluated-correct candidate whose gate ran.
+    import journal
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import diagnostics as diag
+
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "r", "goal": "g"})
+        thr = 0.99
+        rows = [
+            # window 0: one genuinely novel (far), one borderline near-dup kept-better
+            {"window_index": 0, "generation": 1, "candidate_id": "c1", "parent_id": "p1",
+             "island_idx": 0, "decision": "accepted_novel", "max_similarity": 0.40,
+             "most_similar_id": "m1", "most_similar_score": 0.5, "candidate_score": 1.2,
+             "n_compared": 3, "diff_lines": 40, "threshold": thr},
+            {"window_index": 0, "generation": 2, "candidate_id": "c2", "parent_id": "p2",
+             "island_idx": 0, "decision": "kept_better_evicted", "max_similarity": 0.985,
+             "most_similar_id": "m2", "most_similar_score": 1.0, "candidate_score": 1.3,
+             "n_compared": 5, "diff_lines": 6, "threshold": thr},
+            # window 1: a dropped-worse borderline + an idle (no comparison) row
+            {"window_index": 1, "generation": 3, "candidate_id": "c3", "parent_id": "p3",
+             "island_idx": 1, "decision": "dropped_worse", "max_similarity": 0.995,
+             "most_similar_id": "m3", "most_similar_score": 1.5, "candidate_score": 1.1,
+             "n_compared": 4, "diff_lines": 3, "threshold": thr},
+            {"window_index": 1, "generation": 4, "candidate_id": "c4", "parent_id": "p4",
+             "island_idx": 1, "decision": "idle_no_compare", "max_similarity": 0.0,
+             "most_similar_id": None, "most_similar_score": None, "candidate_score": 1.0,
+             "n_compared": 0, "diff_lines": 50, "threshold": thr},
+        ]
+        for r in rows:
+            journal.log_novelty(td, r)
+
+        # read_novelty: all rows; window filter; last_n tail
+        allrows = journal.read_novelty(td)
+        assert len(allrows) == 4, allrows
+        assert all("timestamp" in r for r in allrows)  # log_novelty stamps each row
+        w0 = journal.read_novelty(td, window_index=0)
+        assert [r["candidate_id"] for r in w0] == ["c1", "c2"], w0
+        tail = journal.read_novelty(td, last_n=1)
+        assert len(tail) == 1 and tail[0]["candidate_id"] == "c4", tail
+
+        # novelty_near_threshold(margin=0.02): ONLY the borderline rows (c2 @0.985, c3 @0.995),
+        # EXCLUDING the far row (c1 @0.40) and the idle n_compared==0 row (c4).
+        near = journal.novelty_near_threshold(td, margin=0.02)
+        near_ids = sorted(r["candidate_id"] for r in near)
+        assert near_ids == ["c2", "c3"], near_ids
+        # and window-scoped
+        near_w1 = journal.novelty_near_threshold(td, margin=0.02, window_index=1)
+        assert [r["candidate_id"] for r in near_w1] == ["c3"], near_w1
+
+        # row schema keys present
+        for key in ("candidate_id", "most_similar_id", "most_similar_score",
+                    "candidate_score", "diff_lines", "decision", "threshold"):
+            assert key in allrows[0], (key, allrows[0])
+
+    # diagnostics passes novelty_sim_histogram through (round-trips) and defaults to {}
+    orig_aq = diag.archive_query.main
+    orig_ih = diag.island_policy.island_health
+    try:
+        diag.island_policy.island_health = lambda *a, **k: []
+        diag.archive_query.main = lambda p: {"result": {
+            "total": 1, "correct": 1, "best_score": 1.0, "islands": [], "tombstoned_count": 0}}
+        base = {"db_path": "x", "db_config": {}, "embedding_model": "m",
+                "window_index": 0, "iters_completed": 1, "best_score_start": 1.0,
+                "window_size": 1}
+        hist = {"0.97-0.99": 2, "0.99-1.00": 1}
+        out = diag.main({**base, "novelty_sim_histogram": hist})
+        assert out["novelty_sim_histogram"] == hist, out["novelty_sim_histogram"]
+        out2 = diag.main(dict(base))  # omitted → {}
+        assert out2["novelty_sim_histogram"] == {}, out2["novelty_sim_histogram"]
+    finally:
+        diag.archive_query.main = orig_aq
+        diag.island_policy.island_health = orig_ih
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
@@ -3508,6 +3586,7 @@ if __name__ == "__main__":
         ("novelty_keep_better_contract", test_novelty_keep_better_contract),
         ("termination_streak", test_termination_streak),
         ("discovery_in_interval", test_discovery_in_interval),
+        ("novelty_logging_stream", test_novelty_logging_stream),
     ]
     ok = True
     for name, fn in tests:

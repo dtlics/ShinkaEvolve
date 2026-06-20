@@ -35,10 +35,13 @@ Return Markdown with these sections:
 - **Recommendation** — the single most useful structural intervention right now. Your read may
   ITSELF be the discovery: if you identify a verified-missing technique, recommend GROUNDING it (the
   orchestrator hand-authors the grounding prompt → `mutate.py` or `subagents/grounding-engineer.md`,
-  then `spawn_island`). Triage each candidate idea by the THREE PATHS — NOVEL → ground + new island;
-  SIMILAR-TO-EXISTING → combine via grounding (do NOT reject an idea merely for being "similar to
-  existing" or "a renamed version of existing code"; that is the combine path, not a kill);
-  USELESS → ignore (sparingly). **Lead with R1 escalation:** if the most useful technique requires
+  then, for a NOVEL technique, `spawn_island` a new island; for a SIMILAR-TO-EXISTING technique,
+  combine via `archive_record` `parent_id`=closest with NO new island). Triage each candidate idea
+  by the THREE PATHS — NOVEL → ground + new island (`archive_record` `parent_id`=null then
+  `spawn_island`); SIMILAR-TO-EXISTING → combine into the closest existing program via grounding
+  (`archive_record` `parent_id`=closest, NO `spawn_island`, the existing program left intact — do
+  NOT reject an idea merely for being "similar to existing" or "a renamed version of existing code";
+  that is the combine path, not a kill); USELESS → ignore (sparingly). **Lead with R1 escalation:** if the most useful technique requires
   external, web-cited references you cannot supply from the archive alone — which is the common case,
   since introspection cannot surface a technique ABSENT from the archive — recommend
   `deep_research: run an R1 Azure DR for fresh web-cited references` as the PRIMARY branch. You (R2)

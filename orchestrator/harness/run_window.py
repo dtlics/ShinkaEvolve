@@ -34,6 +34,7 @@ import math
 import os
 import random
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -154,6 +155,33 @@ def _novelty_embed_text(evo: Dict[str, Any], parent_code: str, candidate_code: s
         )
     )
     return diff or candidate_code
+
+
+# Bin edges for the per-window max-similarity histogram folded into window diagnostics
+# (novelty_sim_histogram). Coarse and clustered near the 0.99 default gate so the
+# orchestrator can watch the near-dup mass shift as it tunes code_embed_sim_threshold.
+_NOVELTY_SIM_BINS = (
+    (0.90, "<0.90"), (0.95, "0.90-0.95"), (0.97, "0.95-0.97"),
+    (0.99, "0.97-0.99"), (1.0001, "0.99-1.00"),
+)
+
+
+def _sim_bin(sim: float) -> str:
+    for edge, label in _NOVELTY_SIM_BINS:
+        if sim < edge:
+            return label
+    return _NOVELTY_SIM_BINS[-1][1]
+
+
+def _unified_diff_line_count(parent_code: str, candidate_code: str) -> int:
+    """Lines in the parent->candidate unified diff — the cheap change-magnitude proxy
+    logged per candidate (a scalar tweak is a few lines; a new-direction edit is many).
+    Mirrors _novelty_embed_text's diff construction so the count matches the diff the
+    novelty gate embeds under the default 'diff' basis."""
+    import difflib
+
+    return sum(1 for _ in difflib.unified_diff(
+        parent_code.splitlines(), candidate_code.splitlines(), lineterm="", n=3))
 
 
 def _max_generation(db_path: str, db_config: Dict[str, Any], embedding_model: str) -> int:
@@ -839,9 +867,12 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     code_embedding: Optional[List[float]] = None
     nov: Dict[str, Any] = {}
     _slot_embed_cost = 0.0
+    _cand_id = str(uuid.uuid4())   # generated up front so the novelty log + the archived row share one id
+    _slot_diff_lines: Optional[int] = None
     if evo.get("enable_novelty"):
         # H2: embed the parent->candidate DIFF (default) instead of the whole program,
         # so a genuine improvement is NOT false-flagged as a near-dup of its parent.
+        _slot_diff_lines = _unified_diff_line_count(parent.get("code", ""), mut["candidate_code"])
         code_embedding, _embed_cost = _embed(
             cfg, _novelty_embed_text(evo, parent.get("code", ""), mut["candidate_code"])
         )
@@ -879,6 +910,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         if evo.get("enable_novelty") and mut["candidate_code"] != _pre_fix_code:
             # H2: re-embed the (post-fix) parent->candidate diff, consistent with the
             # pre-fix embed above, so the stored embedding matches the gate's basis.
+            _slot_diff_lines = _unified_diff_line_count(parent.get("code", ""), mut["candidate_code"])
             code_embedding, _re_embed_cost = _embed(
                 cfg, _novelty_embed_text(evo, parent.get("code", ""), mut["candidate_code"])
             )
@@ -952,6 +984,32 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             "code_embed_sim_threshold": evo.get("code_embed_sim_threshold", 0.99),
             "island_idx": sp.get("island_idx"),
         })
+        _max_sim = float(nov.get("max_similarity", 0.0) or 0.0)
+        _n_cmp = int(nov.get("n_compared", 0) or 0)
+        if _n_cmp > 0:  # feature: per-window similarity histogram (only real comparisons)
+            _hist = counters.setdefault("novelty_sim_histogram", {})
+            _b = _sim_bin(_max_sim)
+            _hist[_b] = _hist.get(_b, 0) + 1
+
+        def _log_nov(decision: str) -> None:
+            # feature: ONE per-candidate novelty record (ids + numbers, never code). Use
+            # cfg["results_dir"] (the RUN dir), NOT the local results_dir (the per-gen eval dir).
+            journal.log_novelty(cfg["results_dir"], {
+                "window_index": counters.get("window_index"),
+                "generation": generation,
+                "candidate_id": _cand_id,
+                "parent_id": sp.get("parent_id"),
+                "island_idx": sp.get("island_idx"),
+                "decision": decision,
+                "max_similarity": _max_sim,
+                "most_similar_id": nov.get("most_similar_id"),
+                "most_similar_score": nov.get("most_similar_score"),
+                "candidate_score": float(ev.get("combined_score", 0.0) or 0.0),
+                "n_compared": _n_cmp,
+                "diff_lines": _slot_diff_lines,
+                "threshold": float(evo.get("code_embed_sim_threshold", 0.99) or 0.99),
+            })
+
         if nov.get("accept"):
             # L17: an accept with n_compared==0 means the gate had NOTHING to compare against
             # (novelty enabled mid-run over an unembedded archive, or every neighbor's embed
@@ -960,8 +1018,10 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             # instead of reading a phantom 1.0.
             if int(nov.get("n_compared", 0) or 0) > 0:
                 counters["novelty_accepts"] += 1  # genuinely novel — archive normally below
+                _log_nov("accepted_novel")
             else:
                 counters["novelty_idle_count"] = counters.get("novelty_idle_count", 0) + 1
+                _log_nov("idle_no_compare")
         else:
             _inc_id = nov.get("most_similar_id")
             _inc_score = nov.get("most_similar_score")
@@ -994,6 +1054,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                 _trace({"step": "framework_decision", "action": "dropped_novelty_worse",
                         "max_similarity": nov.get("max_similarity"),
                         "incumbent": _inc_id, "rejected_cost": _rej_cost})
+                _log_nov("dropped_worse")
                 return  # keep the BETTER (incumbent); the worse newcomer is not archived
             # newcomer is strictly BETTER → keep it AND evict (tombstone) the worse
             # near-duplicate so the population doesn't carry both (the incumbent's row +
@@ -1021,6 +1082,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                     counters["novelty_evict_fail_count"] = counters.get("novelty_evict_fail_count", 0) + 1
                     _trace({"step": "framework_decision", "action": "kept_better_evict_failed",
                             "incumbent": _inc_id, "error": repr(_exc)})
+            _log_nov("kept_better_evicted")
 
     # 4b. compute reward (MUTABLE — scoring concern, generation half)
     # M26: on a REPAIR gen the parent is the ERRORED program (score ≈ 0), so crediting
@@ -1067,6 +1129,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
 
     # 5. archive_record (IMMUTABLE plumbing)
     program_fields: Dict[str, Any] = {
+        "id": _cand_id,
         "code": mut["candidate_code"],
         "language": language,
         "generation": generation,
@@ -1214,6 +1277,8 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         next_gen = _max_generation(db_path, db_config, embedding_model) + 1
         counters = {
             "iter_index": 0, "eval_total": 0, "eval_failures": 0,
+            "window_index": widx,            # threaded into the per-candidate novelty log
+            "novelty_sim_histogram": {},     # per-window max-similarity histogram (feature)
             "arm_submitted": {},   # H5: per-arm submitted counts THIS window (rollback arm 4a)
             "novelty_accepts": 0, "novelty_rejects": 0, "fix_count": 0, "cost": 0.0,
             "novelty_kept_better": 0,       # M34: near-dup pairs where the newcomer won + evicted the incumbent
@@ -1348,6 +1413,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 "novelty_idle_count": counters.get("novelty_idle_count", 0),
                 "novelty_evict_fail_count": counters.get("novelty_evict_fail_count", 0),
                 "embed_failures": counters.get("embed_failures", 0),
+                "novelty_sim_histogram": counters.get("novelty_sim_histogram", {}),
                 "eval_failures": counters["eval_failures"],
                 "eval_total": counters["eval_total"],
                 "fix_count": counters["fix_count"],

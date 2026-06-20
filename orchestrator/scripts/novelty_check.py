@@ -14,7 +14,10 @@ AND score so the CALLER can KEEP THE BETTER of the pair (H5): run_window evaluat
 near-duplicate, compares scores, and either drops the worse newcomer or archives it
 and tombstones the worse incumbent. (This file only DECIDES near-duplication + surfaces
 the comparison data; the keep-better eviction is wired in run_window.) test_parity.py
-checks the cosine + threshold decision matches a direct computation.
+checks the cosine + threshold decision matches a direct computation. The per-candidate
+audit trail of these decisions (one row per evaluated-correct candidate: the four-way
+decision + max_similarity + most_similar_id + diff_lines) is written to journal/novelty.jsonl
+by run_window (the caller), and the per-window aggregate rate to window diagnostics.
 
 INPUT (stdin JSON):
   {

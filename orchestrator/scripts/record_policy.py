@@ -22,7 +22,7 @@ INPUT (stdin JSON):
     "parent": {"combined_score"} | null,
     "mutation": {"patch_type","patch_name","num_applied","cost","model_name","transport","attempts"},
     "sample": {"parent_id","archive_inspiration_ids","top_k_inspiration_ids","needs_fix"},
-    "novelty": {"max_similarity","n_compared"} | null,
+    "novelty": {"max_similarity","n_compared","most_similar_id"} | null,
     "reward": {"reward","baseline"} | null
   }
 
@@ -76,6 +76,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "reward_baseline": reward.get("baseline"),
         "novelty_max_similarity": novelty.get("max_similarity"),
         "novelty_n_compared": novelty.get("n_compared"),
+        "novelty_most_similar_id": novelty.get("most_similar_id"),
         # runtime signals (C2) — runtime always recorded; timed_out only when True (compact)
         "runtime_sec": (float(_runtime) if _runtime is not None else None),
         "timed_out": (True if ev.get("timed_out") else None),

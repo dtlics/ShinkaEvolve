@@ -149,9 +149,10 @@ work_discovery, work_grounding, work_score, intervened}`:
   interval: 0 not-run, 1 run-but-nothing-new, 2 a combinable direction, 3 a novel direction
   worth a new island. A merely *brainstormed* technique (no R1/R2 stub) scores **0** — it is
   not discovery.
-- `work_grounding` — GROUNDING magnitude: 0 none, 1 combined into an existing program, 2 a
-  new-island root. Settable ONLY when `work_discovery>0` THIS interval supplied the technique
-  (grounding cannot be logged without the discovery it grounded).
+- `work_grounding` — GROUNDING magnitude: 0 none, 1 combined into an existing program (= path (ii)
+  SIMILAR: `archive_record` `parent_id`=closest, NO spawn), 2 a new-island root (= path (i) NOVEL:
+  `archive_record` `parent_id`=null THEN `spawn_island.py`). Settable ONLY when `work_discovery>0`
+  THIS interval supplied the technique (grounding cannot be logged without the discovery it grounded).
 - `work_score` — `work_audit + work_discovery + work_grounding` (the scalar the taper reads
   via `journal.recent_work_score`; `journal.work_low_streak` counts the recent low-work
   returns the escalation uses).
@@ -219,6 +220,7 @@ Diagnostics shape (printed to stdout + appended to `journal/windows.jsonl`):
 { window_index, iters_completed, best_score_start, best_score_end, delta,
   J_score, threshold, strategy_fingerprint,
   novelty_acceptance_rate (null when no novelty events), novelty_rejected_cost,
+  novelty_sim_histogram,
   evaluation_failure_rate, apply_exhausted_count, apply_failure_rate,
   timeout_count, wrong_answer_count, errored_fraction,
   model_collapse:{top_arm, top_share, n_arms_active, collapsed},
@@ -401,7 +403,7 @@ stay compatible.
 |---|---|---|---|
 | **Scoring / reward** | `compute_reward.py` | `select_llm.py` (bandit), `sample_parent.py` (score→parent weight) | per-program `reward_used` vs `improvement_over_parent`; bandit counts |
 | **Exploration / parent** | `sample_parent.py` | (feeds the prompt) | flat progress with high novelty acceptance |
-| **Diversity / novelty** | `novelty_check.py` | `record_policy.py`, `diagnostics` | `novelty_acceptance_rate` (null when no events); `novelty_rejected_cost` |
+| **Diversity / novelty** | `novelty_check.py` | `record_policy.py`, `diagnostics`, `journal/novelty.jsonl` (per-candidate) | `novelty_acceptance_rate` (null when no events); `novelty_rejected_cost`; per-pair via `journal/novelty.jsonl` |
 | **Prompt** | `construct_mutation_prompt.py` (incl. the bounded runtime-budget caution, driven by `eval_budget_sec`/`parent_runtime_sec`/`parent_timed_out` + parent/inspiration runtime metadata) | `mutate.py` (sends it) | `evaluation_failure_rate`, recurring `exhausted_retry_slots`, `timeout_count` |
 | **Fix / repair** | the immediate-fix loop in `run_window.py` (`evo.fix_retry_budget`) + repair mode (`sample_parent` `select:"errored"`) | `construct_mutation_prompt.py` (the `sample_fix` prompt), `mutate.py`, `repair_record.py` | `fix_rate`, `fix_success_rate`, `repair_fail_count` |
 | **Stagnation trigger** | `stagnation_detector.py` | `diagnostics.py` | the progress trajectory + `low_streak` |
@@ -535,13 +537,20 @@ ideas came from an R1 (Azure DR) brief OR an R2 (archive-analyst) analysis. Only
 triageable (a self-invented hypothesis fails provenance and is dropped). A discovery round returns
 one or more (direction, citation) pairs; do NOT take only the single "best" one — decide a path for
 EACH, and GROUND each triaged direction, up to a MAX of 3 per round (O3). Lean toward acting:**
-- **NOVEL** (no archived program or prior direction resembles it) → GROUND it (the grounding
-  recipe below), then give it **its own island** via `spawn_island.py` so it isn't out-competed
-  before it matures.
-- **SIMILAR-TO-EXISTING** → still valuable: COMBINE it into the closest existing program via a
-  grounding run. "Similar to something we already have" is NOT a reason to drop an idea — it is
-  this path.
-- **USELESS** → ignore it (use this sparingly). Don't dilute the search.
+- **path (i) NOVEL** (no archived program or prior direction resembles it) → GROUND it with a
+  HAND-AUTHORED prompt (the grounding recipe below), then give it **its own island** via
+  `spawn_island.py`: `archive_record.py` with `parent_id=null`, THEN `spawn_island.py` copies it
+  onto a fresh island as that family's root so it isn't out-competed before it matures. Scores
+  `work_grounding=2`.
+- **path (ii) SIMILAR-TO-EXISTING** → COMBINE it into the closest existing program. This is a
+  FIRST-CLASS path, not a fallback: (1) HAND-AUTHOR the grounding prompt (NOT the mutation sampler)
+  AND additionally hand the model the CLOSEST existing program as the thing to combine the new
+  direction into; (2) on a CORRECT result, `archive_record.py` it with `parent_id` = that closest
+  program's id, so it enters as a LINEAGE CHILD in the SAME island/family — NO new island, NO
+  `spawn_island.py`; (3) the existing similar program is NOT overwritten, evicted, or replaced —
+  both coexist and the inner loop refines from there. "Similar to something we already have" is
+  NEVER a kill — it is this path. Scores `work_grounding=1`.
+- **path (iii) USELESS** → ignore it (use this sparingly). Don't dilute the search.
 
 The adversarial verification step (yours, or a subagent's) is **LENIENT — its job is
 provenance-authentication + path-assignment, NOT rejecting directions.** It must (1) authenticate
@@ -568,10 +577,16 @@ author the prompt directly and feed it to EITHER Azure `mutate.py` OR the
   `task.objective_brief`) + the full-rewrite NAME/DESCRIPTION/CODE response format (import the
   `FULL_SYS_FORMAT_DIFFERENT` body from `shinka.prompts.prompts_full` so `mutate.py`'s parser is
   satisfied — it is NOT re-exported from the `shinka.prompts` package, so importing it from there
-  raises ImportError).
-- `patch_msg` = the INIT seed program (`initial.<ext>`) framed "reference interface ONLY — do NOT
-  improve/refactor; you are REPLACING its algorithm", plus "write a program with the SAME
-  inputs/outputs implementing this idea".
+  raises ImportError). The "# Required structural replacement" framing is the **path (i) NOVEL**
+  framing (a from-scratch pivot). For **path (ii) SIMILAR-TO-EXISTING**, frame the prompt instead
+  as COMBINING the new direction INTO the closest existing program (hand THAT program as the base
+  to EXTEND, not a from-scratch replacement) — otherwise the recipe (Azure `mutate.py` or
+  `grounding-engineer`, web search ON) is identical for both paths.
+- `patch_msg` = for **path (i) NOVEL**, the INIT seed program (`initial.<ext>`) framed "reference
+  interface ONLY — do NOT improve/refactor; you are REPLACING its algorithm", plus "write a
+  program with the SAME inputs/outputs implementing this idea". For **path (ii) SIMILAR**, hand the
+  CLOSEST existing program as the base to extend ("combine this new direction INTO this program,
+  same inputs/outputs").
 - **Run it on Azure** via `mutate.py` with `model_name:"azure-gpt-5.5"`,
   `reasoning_effort:"medium"` (the default; escalate to `azure-gpt-5.4-pro@high` only if 5.5 won't
   land it), and **`enable_web_search:true` on EVERY grounding run** — a grounding always turns web
@@ -581,17 +596,24 @@ author the prompt directly and feed it to EITHER Azure `mutate.py` OR the
   new-island grounding) and by `subagents/grounding-engineer.md`'s refusal. If the Azure model keeps
   REFUSING the pivot, hand the SAME ingredients to `subagents/grounding-engineer.md` and let Claude
   author the code — do NOT keep firing more Azure mutate calls at it.
-- **Result parity (both executors handled identically):** evaluate via `evaluate.py`; on a CORRECT
-  result, embed it, `archive_record.py` it (`parent_id=null` for a NOVEL pivot → its own island;
-  the closest id for SIMILAR-TO-EXISTING), then `spawn_island.py`. A first injection that scores
-  0.0 / below baseline is EXPECTED — the value is seeding a new structural family for the inner
-  loop to refine, not an immediate win.
+- **Result parity (both executors handled identically) — but the ARCHIVE step BRANCHES BY PATH:**
+  evaluate via `evaluate.py`; on a CORRECT result, embed it, then:
+  * **path (i) NOVEL** → `archive_record.py` with `parent_id=null`, THEN `spawn_island.py` (its own
+    island; `work_grounding=2`).
+  * **path (ii) SIMILAR** → `archive_record.py` with `parent_id` = the closest existing program's id
+    (a lineage child in THAT program's island), and do NOT call `spawn_island.py` — no new island,
+    and the existing similar program is not overwritten / evicted / replaced (`work_grounding=1`).
+  A first injection that scores 0.0 / below baseline is EXPECTED — the value is seeding (path i) or
+  extending (path ii) a structural family for the inner loop to refine, not an immediate win.
 
 `spawn_island.py` (stdin `{db_path, db_config, embedding_model, program_id, results_dir,
-discovery_provenance?}`) seeds a NEW island with a copy of the grounded program as its root.
-`results_dir` is **REQUIRED** — it is what the PRIMARY gate reads: at the top of `main()` (before
-opening the DB) it calls `journal.discovery_in_interval(results_dir)` and returns
-`{ok:false}` / non-zero (NO island seeded) when no in-interval usable R1/R2 stub exists.
+discovery_provenance?}`) seeds a NEW island with a copy of the grounded program as its root. It is
+the **path (i) NOVEL executor ONLY**: path (ii) SIMILAR never calls it — that grounding is a plain
+`archive_record.py` with `parent_id` = the closest existing program (a lineage child in the SAME
+island), with NO spawn and the existing program left intact. `results_dir` is **REQUIRED** — it is
+what the PRIMARY gate reads: at the top of `main()` (before opening the DB) it calls
+`journal.discovery_in_interval(results_dir)` and returns `{ok:false}` / non-zero (NO island seeded)
+when no in-interval usable R1/R2 stub exists.
 `discovery_provenance` is an OPTIONAL exact-match tightener (the stub reference the grounding acted
 on). It honors `db_config.max_islands`:
 at the cap it retires the worst island non-destructively (rows preserved for lineage) and
@@ -741,6 +763,12 @@ later reference.
   source of truth for the recency rule — empty ⇒ the gate fails closed), and
   `journal.recent_work_axes` exposes the three work axes (`work_audit`/`work_discovery`/
   `work_grounding`) so a grounding-without-discovery stretch is detectable.
+- `journal/novelty.jsonl` — ONE compact record per EVALUATED CORRECT candidate whose novelty gate
+  ran: `{window_index, generation, candidate_id, parent_id, island_idx, decision in
+  {accepted_novel|kept_better_evicted|dropped_worse|idle_no_compare}, max_similarity,
+  most_similar_id, most_similar_score, candidate_score, n_compared, diff_lines, threshold}` (ids +
+  numbers, never code). The per-call audit trail behind the aggregate `novelty_acceptance_rate`.
+  Readers: `journal.read_novelty`, `journal.novelty_near_threshold`.
 - `journal/steps.jsonl` — the per-step oversight trace, present ONLY under tracing (warmup
   and the measure window); cleaned up after warmup.
 - `journal/islands/island_<i>.jsonl` — per-island trajectory.
@@ -774,7 +802,7 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
 | `island_policy.py` | fork/migrate/retire decision (spawn fires ≤once per stagnation episode via the durable `last_policy_spawn_generation` marker — M15; a rewrite MAY now decide a `retire_island`, executed non-destructively + protecting island 0 + the global best — M16) | **Yes** | No |
 | `cadence_policy.py` | WHEN control returns (early-phase per-window floor, then the work-score taper; not the budget) | No (FOUNDATION — S1; knobs are boot-only) | No |
 | `island_brief.py` | record a per-island direction (auto-called by the meta round) | **Yes** | No |
-| `spawn_island.py` | seed a new island from a grounded program (PRIMARY gate: fails closed unless `journal.discovery_in_interval(results_dir)` is non-empty — DEC-7) | No (foundation) | No |
+| `spawn_island.py` | seed a new island from a grounded program (PRIMARY gate: fails closed unless `journal.discovery_in_interval(results_dir)` is non-empty — DEC-7) (path (i) NOVEL only; path (ii) SIMILAR is a plain `archive_record` `parent_id`=closest, no spawn) | No (foundation) | No |
 | `construct_mutation_prompt.py` | build the mutation/fix prompt | **Yes** | No |
 | `mutate.py` | call Azure (bg+poll), parse, apply, retry | Body no, prompt yes | **Yes (Azure)** |
 | `meta_summarize.py` | the automatic per-window meta round (per-island directions) | prompt yes | **Yes (Azure)** |
@@ -855,7 +883,7 @@ wake/termination cadence mid-run (cadence_policy.py is FOUNDATION).
 | `mutation_web_search` / `fix_web_search` | false | web search on the INNER-LOOP mutation / fix calls | rarely needed and unused in practice (no run config has set it). NOT the grounding signal: a grounding run passes `enable_web_search:true` straight to the standalone `mutate.py` call, and discovery-before-grounding is enforced at `spawn_island.py` (PRIMARY gate) + the grounding-engineer refusal — not via this knob |
 | `cost_aware_coef` | 0.25 shipped (engine default 0.0 when `llm_dynamic_selection_kwargs` is unset) | bandit reward-vs-cheapness blend | raise→0.7 if cheapness should dominate; lower→0 if a pricier arm is the only one improving and is being starved |
 | `epsilon` | 0.2 | bandit exploration floor | an arm's share decaying toward 0 while it still occasionally improves → raise to 0.4–0.6 |
-| `code_embed_sim_threshold` | 0.99 | near-duplicate cosine gate, over the basis set by `novelty_embed_mode`; a near-dup is now EVALUATED then the BETTER of the pair is kept (worse dropped / tombstoned) — H5 | under the default `diff` basis the 0.99 gate rarely false-rejects; under legacy `code` basis genuine large-program edits cluster ~0.994 and are mis-flagged → switch to `diff` (preferred) or RAISE the threshold (never lower under `code`); watch `novelty_rejected_cost` |
+| `code_embed_sim_threshold` | 0.99 | near-duplicate cosine gate, over the basis set by `novelty_embed_mode`; a near-dup is now EVALUATED then the BETTER of the pair is kept (worse dropped / tombstoned) — H5 | under the default `diff` basis the 0.99 gate rarely false-rejects; under legacy `code` basis genuine large-program edits cluster ~0.994 and are mis-flagged → switch to `diff` (preferred) or RAISE the threshold (never lower under `code`); watch `novelty_rejected_cost`. Audit per-pair via `journal/novelty.jsonl` + `journal.novelty_near_threshold`; see "Tuning the novelty threshold" |
 | `novelty_embed_mode` | diff | WHAT the gate embeds: `diff` = parent→candidate unified diff (genuine edits separate to low cosine; the per-island pool can GROW) vs `code` = legacy whole-program embedding (collapses each island to a single-survivor greedy chain on a large program — H2) | keep `diff`; use `code` only to reproduce legacy behavior or on a resumed archive whose stored embeddings are whole-program |
 | `novelty_tie_epsilon` | 0.0 | keep-the-better tie margin (H2): an equal-scoring DISTINCT near-dup within epsilon is KEPT and the incumbent tombstoned (`>=`), so the lineage traverses score plateaus instead of dropping every tie after a full eval | raise slightly to keep more near-ties for plateau exploration |
 | `stagnation_abs_floor`/`rel_frac` | 0.001 / 0.05 | the "low window" bar | recalibrate to the task's natural per-window climb |
@@ -900,6 +928,43 @@ counts-share arm reads THIS window's submitted counts (`llm_bandit_window_counts
 mid-run selection collapse is actually detectable (the run-cumulative total could never move
 the share mid-run).
 
+## Tuning the novelty threshold (the novelty.jsonl audit loop)
+
+`evo.code_embed_sim_threshold` (default 0.99) is the cosine gate over the parent→candidate DIFF
+embedding (`novelty_embed_mode:diff`). It is THE knob separating a scalar / hyperparameter tweak
+(tiny diff, near-identical text → HIGH similarity → should be a keep-best near-dup) from a few-line
+NEW-DIRECTION edit (distinctive diff → LOWER similarity → should be a SEPARATE archive entry). The
+orchestrator OWNS this knob and re-checks it on a control-return when the population looks
+**monocultural** (too many near-dups surviving) or **churny** (real variants evicted).
+
+**THE DATA.** Every evaluated correct candidate writes ONE `journal/novelty.jsonl` row
+`{window_index, generation, candidate_id, parent_id, island_idx, decision in
+{accepted_novel|kept_better_evicted|dropped_worse|idle_no_compare}, max_similarity, most_similar_id,
+most_similar_score, candidate_score, n_compared, diff_lines, threshold}` pairing it with its single
+most-similar program (`most_similar_id`) + both scores + `max_similarity` + `n_compared` +
+`diff_lines` + the threshold in force. The per-window `novelty_sim_histogram` (bins
+`<0.90 / 0.90-0.95 / 0.95-0.97 / 0.97-0.99 / 0.99-1.00`) shows where the mass sits at a glance.
+
+**READ IT EFFICIENTLY (numbers first — do NOT dig out full programs to start):**
+1. glance at `novelty_sim_histogram` across recent windows;
+2. `journal.novelty_near_threshold(results_dir, margin=0.02)` returns ONLY borderline rows
+   (`abs(max_similarity - threshold) <= margin`) — ids + numbers, no code;
+3. for JUST those borderline rows, fetch the TWO programs by id (`archive_query` on `candidate_id` +
+   `most_similar_id`) and eyeball whether they are truly the same idea.
+
+**WHICH WAY TO TURN IT:**
+- borderline pairs look like the SAME idea, only numbers changed (small `diff_lines`, high
+  `max_similarity`) yet were `accepted_novel` → the gate is letting near-dups proliferate → LOWER the
+  threshold (or confirm `novelty_embed_mode:diff`);
+- borderline pairs look GENUINELY DIFFERENT (larger `diff_lines`) yet were `dropped_worse` /
+  `kept_better_evicted` → the gate is killing real variants → RAISE the threshold;
+- `diff_lines` is the tie-breaker cosine alone misses: a large-diff edit caught as a near-dup is
+  almost always a real new direction (raise); a 1–2 line edit accepted as novel is almost always a
+  scalar tweak (lower).
+
+A threshold change is a config-LEVER flip (log it as `work_audit ≥ 1` on the work score) — a knob,
+not a code rewrite; the next relaunched cluster reads it.
+
 ### Scalability — deferred
 
 Per-generation novelty is an O(N) cosine over CACHED embeddings of a size-capped archive
@@ -921,9 +986,10 @@ novelty or serial eval).
 - **Never ground a technique that did not come from an in-interval triaged R1/R2 discovery stub.**
   The PRIMARY gate (`spawn_island.py`) fails closed without one (it refuses to seed a new island),
   and `subagents/grounding-engineer.md` refuses a spawn prompt with no in-interval R1/R2 provenance;
-  a stale stub from a prior interval does not satisfy them. (A COMBINE grounding into an existing
-  island is ordinary archive insertion, not separately gated; the `work_discovery`/`work_grounding`
-  split keeps it from padding the termination streak.)
+  a stale stub from a prior interval does not satisfy them. (A path (ii) SIMILAR COMBINE grounding
+  into an existing island is ordinary `archive_record` insertion with `parent_id`=closest — no
+  `spawn_island`, not separately gated; the `work_discovery`/`work_grounding` split keeps it from
+  padding the termination streak.)
 - **Never treat a tournament / sort over your OWN hypotheses as discovery.** The only sanctioned
   Claude-native discovery is `subagents/archive-analyst.md` (R2); the only sanctioned multi-agent
   grounding is `subagents/grounding-engineer.md`. A bracket over self-invented ideas surfaces no

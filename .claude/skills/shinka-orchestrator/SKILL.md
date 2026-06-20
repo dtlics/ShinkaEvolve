@@ -159,7 +159,9 @@ work_discovery, work_grounding, work_score, intervened}`:
 - `stagnation_flag` — copy this return's window-diagnostics value (the stall state NOW).
 - `intervened` — `work_audit>0 or work_discovery>0` (did you actually act this return?).
   **`work_grounding` ALONE never flips `intervened`** — a grounding counts only WITH the
-  discovery it grounded, so a grounding over a stale/absent discovery cannot pad the streak.
+  discovery it grounded, so a grounding over a stale/absent discovery cannot pad the streak; the
+  stagnation-breaking intervention is the DR the grounding rides (`work_discovery>0`), not the
+  grounding itself.
   INCLUSIVE: a deliberate config-LEVER flip counts (log it as `work_audit` ≥ 1); the automatic
   per-window meta round does NOT (it isn't your action); a pure no-op read leaves it false.
 
@@ -347,10 +349,21 @@ evaluator is foundation). Common flaw-signals (read off `steps.jsonl` + the wind
    `public` metrics reach the prompt via `perf_str`), and `text_feedback` describes a failure
    without handing over a target. Once the evaluator is leak-proof, every candidate that
    passes and improves the metric is a good candidate, and the harness ALWAYS feeds evaluator
-   text feedback to the mutation/fix/meta prompts (it speeds convergence). Optionally author
-   `task.objective_brief` — a qualitative "what we optimize + hard constraints + native ops"
-   gloss that renders next to the live metric numbers in every prompt. (The shinka-setup /
-   shinka-convert skills carry the leak-proof-evaluator design.)
+   text feedback to the mutation/fix/meta prompts (it speeds convergence). **Author
+   `task.objective_brief` — do not skip it.** It is a qualitative gloss rendered by
+   `objective_section` directly above the live metric numbers in every mutation/fix prompt, and it
+   is the ONE slot that tells the proposer **what we optimize + the hard constraints + WITH WHAT**
+   — the building blocks a valid candidate may use and any it must avoid. There is no fixed field
+   to fill: pitch the "with what" at whatever the task's OWN defining property is — for one task a
+   discrete operation/move set (e.g. `cnot_grid_synth`: the adjacency-restricted CNOT/Clifford gate
+   set the circuit may use), for another the permitted libraries/primitives (and any forbidden
+   ones), for another a structural invariant or a resource budget the solution must respect. The
+   proposer cannot reliably infer that surface from the code alone, so naming it here is the
+   highest-leverage context you supply. Division of labor: `objective_brief` carries the prose
+   (what + constraints + with-what), `perf_str` carries the live numbers — do NOT add a separate
+   "available ops" field, which would duplicate this slot and confuse the model. It costs tokens
+   only when authored and is byte-identical (`""`) when null. (The shinka-setup / shinka-convert
+   skills carry the leak-proof-evaluator design.)
 3. **Tune the proposer `reasoning_effort` — you OWN this knob; never carry the shipped default
    just because it shipped or a run prompt said "keep defaults".** Thinking-heavy proposers are
    GOOD for reliability on hard/algorithmic tasks, but a cheap model at `medium` can emit
@@ -511,7 +524,15 @@ the task* — or for a well-defined sub-problem — in the model's OWN words wit
 (author/year/arXiv id). Do NOT ask for "the exact algorithm from [named paper]" or a
 verbatim snippet: that shape reads as "reproduce copyrighted text" and Azure's content
 filter refuses it deterministically. Keep it concise — the problem, the constraints, what
-you've tried, the sub-question. **Pre-flight self-check before every DR call:** re-read
+you've tried, the sub-question. Beyond the bare problem, characterize the task by its CORE
+structure — the objective + score shape, the hard constraints, and what makes a candidate solution
+ADMISSIBLE (the space a valid solution must live in) — so DR returns techniques that fit THIS
+problem rather than ones that assume structure it does not have. There is no fixed field to fill:
+pitch the characterization at whatever the task's own defining property is (one task's admissible
+space is a discrete move/operation set, another's is a set of permitted dependencies, another's is
+a structural invariant or a resource budget). (The DR system prompt is FOUNDATION — you steer DR
+only through this query/context you author, never by editing `deep_research.py`.)
+**Pre-flight self-check before every DR call:** re-read
 your drafted query and confirm its GOAL is general SOTA for the task/sub-task, not
 "reproduce a specific named paper"; if it asks to reproduce one paper's algorithm
 verbatim, STOP and reshape it. A refused/failed DR call returns `refused:true` + a `reason`
@@ -574,7 +595,8 @@ author the prompt directly and feed it to EITHER Azure `mutate.py` OR the
 `patch_sys`/`patch_msg`/`patch_type:"full"` and never calls the sampler):
 - `patch_sys` = the `task_sys_msg` + a "# Required structural replacement" mandate + the DETAILED
   technique (key steps + reference pointers: author/year/arXiv) + the objective/constraints (your
-  `task.objective_brief`) + the full-rewrite NAME/DESCRIPTION/CODE response format (import the
+  `task.objective_brief`, which carries the admissible-solution constraints so the grounded program
+  cannot violate them) + the full-rewrite NAME/DESCRIPTION/CODE response format (import the
   `FULL_SYS_FORMAT_DIFFERENT` body from `shinka.prompts.prompts_full` so `mutate.py`'s parser is
   satisfied — it is NOT re-exported from the `shinka.prompts` package, so importing it from there
   raises ImportError). The "# Required structural replacement" framing is the **path (i) NOVEL**
@@ -709,8 +731,8 @@ recommendation, forget the detail. For periodic structural reads, spawn
 
 **Stop when EXACTLY ONE of these three criteria is met — there are no others:** (a) the budget is
 exhausted [harness-decided, auto-finalized]; (b) **five consecutive control-returns were each
-STAGNANT and each had an intervention** (a framework rewrite, a discovery round [R1 or R2], OR a
-deliberate config-lever flip — the AUTOMATIC per-window meta round does NOT count) that still
+STAGNANT and each had an intervention** (a framework rewrite, a discovery round [R1 or R2] — which is
+then grounded — OR a deliberate config-lever flip — the AUTOMATIC per-window meta round does NOT count) that still
 could not break the stagnation [harness-decided, auto-finalized]. A hand-authored **grounding does
 NOT count on its own** — `work_grounding` never flips `intervened`; it counts only WITH the
 in-interval discovery it grounded (`work_discovery>0`), so a grounding over a stale/absent
@@ -828,7 +850,7 @@ prompt scope) how to handle a pathologically slow call. (This is the Azure CALL 
 { "results_dir": "<run dir>", "run_id": "<id>", "budget_usd": 50,
   "task": {"eval_program_path": "...evaluate.py", "init_program_path": "...initial.py",
            "task_sys_msg": "<precise goal>", "require_sys_msg": true,
-           "objective_brief": "<optional 'what we optimize + hard constraints + native ops' gloss, or null>",
+           "objective_brief": "<optional 'what we optimize + hard constraints + the building blocks a valid candidate may use' gloss, or null>",
            "language": "python", "eval_time": "00:35:00"},
   // M49: eval_time is the harness hard-kill — it MUST exceed the task evaluator's internal
   // wallclock budget, or slow candidates are SIGKILLed before the evaluator's graceful

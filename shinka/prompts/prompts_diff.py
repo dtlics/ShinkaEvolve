@@ -37,8 +37,8 @@ for i in range(m):
 </DIFF>
 
 * You may only modify text that lies below a line containing "EVOLVE-BLOCK-START" and above the next "EVOLVE-BLOCK-END". Everything outside those markers is read-only.
-* Do not repeat the markers "EVOLVE-BLOCK-START" and "EVOLVE-BLOCK-END" in the SEARCH/REPLACE blocks.  
-* Every block’s SEARCH section must be copied **verbatim** from the current file.  Including indentation.
+* Do not repeat the markers "EVOLVE-BLOCK-START" and "EVOLVE-BLOCK-END" in the SEARCH/REPLACE blocks.
+* Every block's SEARCH section must be copied **verbatim** from the current file, including indentation.
 * You can propose multiple independent edits. SEARCH/REPLACE blocks follow one after another. DO NOT ADD ANY OTHER TEXT BETWEEN THESE BLOCKS.
 * Make sure the file still runs after your changes.
 """.rstrip()
@@ -64,9 +64,9 @@ Note that the changes you propose will be applied sequentially, so you should as
 
 # Task
 
-Suggest a new idea to improve the performance of the code that is inspired by your expert knowledge of the considered subject.
-Your goal is to maximize the `combined_score` of the program.
+Propose an edit that improves the program's performance and raises its combined score. If the system message gave a direction for this attempt, that direction is the goal of your edit; otherwise choose the most promising improvement yourself.
 Describe each change with a SEARCH/REPLACE block.
 
 IMPORTANT: Do not rewrite the entire program - focus on targeted improvements.
+Every SEARCH block must come from inside the EVOLVE-BLOCK-START/EVOLVE-BLOCK-END region and must match the current file verbatim including indentation.
 """.rstrip()

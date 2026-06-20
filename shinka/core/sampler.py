@@ -137,9 +137,9 @@ class PromptSampler:
             _verb = "edit" if patch_type == "diff" else "rewrite"
             sys_msg += "\n\n# Direction for this attempt"
             sys_msg += (
-                f"\nBase your {_verb} on the direction below. It is the intended approach "
-                "for this generation — treat it as the goal of your change, not an optional "
-                "suggestion:\n"
+                f"\nThis {_verb} must pursue the direction below. It is the assigned goal "
+                "for this generation, not an optional suggestion — commit to it fully and "
+                "make the change that best realizes it, rather than a small unrelated tweak:\n"
             )
             sys_msg += f"\n{meta_recommendations}"
             logger.info(
@@ -177,10 +177,14 @@ class PromptSampler:
         )
 
         if len(sorted_inspirations) > 0:
+            # On a cross gen the real crossover material is supplied separately
+            # (get_cross_component), so soften this block to plain background context —
+            # otherwise its "do NOT combine these" framing contradicts the cross task.
             eval_history_msg = construct_eval_history_msg(
                 sorted_inspirations,
                 language=self.language,
                 include_text_feedback=self.use_text_feedback,
+                for_cross=(patch_type == "cross"),
             )
         else:
             eval_history_msg = ""
@@ -223,6 +227,7 @@ class PromptSampler:
                 archive_inspirations,
                 top_k_inspirations,
                 language=self.language,
+                parent=parent,
             )
         elif patch_type == "paper":
             raise NotImplementedError("Paper edit not implemented.")

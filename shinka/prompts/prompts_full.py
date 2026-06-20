@@ -175,8 +175,9 @@ Here are the performance metrics of the program:
 
 # Task
 
-Rewrite the program to improve its performance on the specified metrics. Where promising, draw on your own expert knowledge of the subject to introduce a genuinely new idea rather than only incremental tuning.
+Rewrite the program to improve its performance on the specified metrics. If the system message gave a direction for this attempt, that direction is the goal of your rewrite; otherwise pursue the most promising improvement yourself.
 Provide the complete new program code.
 
 IMPORTANT: Make sure your rewritten program maintains the same inputs and outputs as the original program, but with improved internal implementation.
+Only the region between the EVOLVE-BLOCK-START and EVOLVE-BLOCK-END markers is editable; keep both markers verbatim and leave everything outside them unchanged.
 """.rstrip()

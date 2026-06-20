@@ -538,13 +538,17 @@ def work_low_streak(results_dir: str, low_threshold: float = 1.0) -> int:
 
 def termination_streak(results_dir: str) -> int:
     """Count trailing consecutive 'control_return' rows that are BOTH stagnant AND had an
-    orchestrator intervention (H12 INCLUSIVE: a framework rewrite, a discovery round (R1 Azure
-    DR or R2 archive-analyst), a hand-authored grounding, OR a deliberate config-lever flip —
-    the automatic per-window meta round does NOT count). This is the deterministic termination
-    signal (H6/H7/H8): N-in-a-row means the search cannot escape stagnation DESPITE intervening
-    at every return. A stagnation-break (stagnation_flag False) or a no-intervention return
-    resets the streak. Computed from interventions.jsonl — the agent writes one canonical
-    control_return row per control-return; the harness reads it.
+    orchestrator intervention. The counted interventions are EXACTLY (H12 INCLUSIVE): a
+    framework rewrite, a DISCOVERY ROUND (R1 Azure DR or R2 archive-analyst) — which is then
+    GROUNDED — OR a deliberate config-lever flip. The automatic per-window meta round does NOT
+    count. A hand-authored GROUNDING is NOT a standalone counted intervention: a grounding never
+    runs without the in-interval discovery that produced its technique (the spawn_island PRIMARY
+    gate + grounding-engineer refusal enforce this), so it RIDES that DR and counts only via it
+    (work_discovery>0), never on its own. This is the deterministic termination signal (H6/H7/H8):
+    N-in-a-row means the search cannot escape stagnation DESPITE intervening at every return. A
+    stagnation-break (stagnation_flag False) or a no-intervention return resets the streak.
+    Computed from interventions.jsonl — the agent writes one canonical control_return row per
+    control-return; the harness reads it.
 
     Each row: {type:"control_return", stagnation_flag: bool, intervened: bool,
     work_audit, work_discovery, work_grounding, work_score, ...}. ``intervened`` is the agent's

@@ -169,7 +169,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
                 else f"A recent candidate took ~{_slow_rt:.0f}s, close to the budget.")
         patch_sys = (
             f"{patch_sys}\n\n# Runtime budget\n{_obs} Each evaluation has {_budget_txt}; a "
-            "candidate that exceeds it is timed out and scores 0 regardless of circuit quality. "
+            "candidate that exceeds it is timed out and scores 0 regardless of solution quality. "
             "Keep the algorithmic improvement, but make the synthesis efficient enough to finish "
             "well within the budget — do NOT trade away correctness or depth for raw speed; just "
             "avoid gratuitously slow constructions."

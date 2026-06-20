@@ -21,20 +21,24 @@ EXPERT_CREATIVE_PREAMBLE = (
 
 
 def perf_str(combined_score: float, public_metrics: Dict[str, float]) -> str:
-    perf_str = f"Combined score to maximize: {combined_score:.2f}\n"
+    # C2: render each public metric on its own line as "- {key}: {value}" for readability
+    # on many-metric tasks (was a single ';'-joined run-on line). Pure presentation: the
+    # numbers and their meaning are identical, and direction/best-so-far still belong to
+    # objective_brief (perf_str has no archive context).
+    perf_str = f"Combined score to maximize: {combined_score:.2f}"
     for key, value in public_metrics.items():
         if isinstance(value, float):
-            perf_str += f"{key}: {value:.2f}; "
+            perf_str += f"\n- {key}: {value:.2f}"
         else:
-            perf_str += f"{key}: {value}; "
-    return perf_str[:-2]
+            perf_str += f"\n- {key}: {value}"
+    return perf_str
 
 
 def objective_section(objective_brief) -> str:
     """Point 4.3: render the orchestrator-authored qualitative score-shape paragraph
-    (what we optimize + hard constraints + native operations) as a header for the metric
-    slot. Empty string when no brief was authored, so the prompt is byte-identical to the
-    legacy form. AUGMENTS perf_str's numbers; carries only authored prose."""
+    (what we optimize + hard constraints + the building blocks a valid candidate may use) as a
+    header for the metric slot. Empty string when no brief was authored, so the prompt is
+    byte-identical to the legacy form. AUGMENTS perf_str's numbers; carries only authored prose."""
     if not objective_brief or not str(objective_brief).strip():
         return ""
     return f"# What we are optimizing\n{str(objective_brief).strip()}\n\n"
@@ -61,17 +65,34 @@ def construct_eval_history_msg(
     language: str = "python",
     include_text_feedback: bool = False,
     correct: bool = True,
+    for_cross: bool = False,
 ) -> str:
     """Construct an edit message for the given parent program and
-    inspiration programs."""
-    if correct:
+    inspiration programs.
+
+    ``for_cross`` softens the framing for a cross gen: on a crossover the actual
+    material to combine is supplied separately (``get_cross_component``), so this
+    block must NOT tell the model "do not combine these" (that would contradict the
+    crossover task). It stays plain background context. For diff/full it keeps the
+    D3 "eval history, not inspirations to stitch together" framing.
+    """
+    if correct and for_cross:
+        # cross: the crossover target is shown separately; these are just background.
+        inspiration_str = (
+            "For background, here are a few other prior programs from this run with "
+            "their scores — context on what has already been tried (the program to cross "
+            "over with is given separately below):\n\n"
+        )
+    elif correct:
         # Point 4.2 (D3): non-cross modes keep these prior programs, but they are EVAL
         # HISTORY for quick reference — NOT inspirations to copy/combine. (cross supplies its
         # real crossover material separately via get_cross_component.)
         inspiration_str = (
             "Here are a few prior programs from this run, shown as EVAL HISTORY for "
             "quick reference only — they are NOT inspirations to copy or combine, just "
-            "context on what has already been tried; you need not study them closely:\n\n"
+            "context on what has already been tried — note which approaches improved the "
+            "score and which failed, but do not simply copy or stitch them together; aim "
+            "to advance beyond them:\n\n"
         )
     else:
         inspiration_str = (
@@ -81,7 +102,12 @@ def construct_eval_history_msg(
 
     for i, prog in enumerate(inspiration_programs):
         if i == 0:
-            inspiration_str += "# Prior programs (eval history — reference only)\n\n" if correct else "# Prior programs\n\n"
+            if not correct:
+                inspiration_str += "# Prior programs\n\n"
+            elif for_cross:
+                inspiration_str += "# Other prior programs (background)\n\n"
+            else:
+                inspiration_str += "# Prior programs (eval history — reference only)\n\n"
         inspiration_str += f"```{language}\n{prog.code}\n```\n\n"
 
         if correct:

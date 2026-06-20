@@ -33,9 +33,9 @@ operating playbook — before acting. In short:
   (`run_window.py --until-decision`) returns control by EXITING; you are woken, read the
   diagnostics, and act. You are not in the path of every mutation.
 - **Boot is your first critical-path job.** You author the `task_sys_msg` (goal + hard
-  constraints + the score *shape* + an abstract runtime caution) and, optionally,
-  `task.objective_brief` — a qualitative "what we optimize + hard constraints + native
-  operations" gloss rendered next to the live metric numbers in every mutation/fix prompt.
+  constraints + the score *shape* + an abstract runtime caution) and
+  `task.objective_brief` — a qualitative "what we optimize + hard constraints + the building
+  blocks a valid candidate may use" gloss rendered next to the live metric numbers in every mutation/fix prompt.
   The harness **refuses to start** while `task_sys_msg` is missing/empty or still the
   `__UNSET_AUTHOR_AT_BOOT__` sentinel the starter ships — that guard only ensures a goal was
   authored. **Leak-proofing is the EVALUATOR's job, set at task SETUP — never an inner-loop
@@ -80,10 +80,11 @@ operating playbook — before acting. In short:
 - **Do not stop until a termination criterion is met. There are EXACTLY THREE, no others:**
   (1) **budget exhausted** [harness-decided, auto-finalized]; (2) **five consecutive
   control-returns each STAGNANT and each with an intervention** (a framework rewrite, a
-  discovery round — R1 Azure deep research or R2 archive-analyst — OR a deliberate config-lever
-  flip — the AUTOMATIC per-window meta round does NOT count; and a **hand-authored grounding
-  does NOT count on its own** — grounding alone never flips the intervened flag, it counts only
-  *with* the in-interval discovery it grounded) that still could not break the stagnation
+  discovery round — R1 Azure deep research or R2 archive-analyst — which is then grounded — OR a
+  deliberate config-lever flip — the AUTOMATIC per-window meta round does NOT count; and a
+  **hand-authored grounding does NOT count on its own** — grounding alone never flips the
+  intervened flag, it counts only *with* the in-interval discovery it grounded) that still could
+  not break the stagnation
   [harness-decided + auto-finalized as `return_reason="stagnation_intervention_exhausted"`
   via `journal.termination_streak` over your canonical `control_return` rows]; (3) **a LITERAL,
   real user stop message typed in the live conversation.** You finalize `stopped_by_user` BY

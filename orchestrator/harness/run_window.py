@@ -622,6 +622,9 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             # P5-T4: the repair escalation hook below reads parent.metadata.repair_attempts
             # to detect strike-two; without this the hook could never fire.
             "include_metadata": True,
+            # C4: only a CROSS gen needs the embedding (get_cross_component picks the
+            # crossover partner MOST DISTANT from the parent); skip the blob read otherwise.
+            "include_embedding": (_forced_patch == "cross"),
         }
     )["result"]
 
@@ -643,6 +646,9 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                         # C2: carry runtime_sec/timed_out metadata so the prompt builder can
                         # surface a runtime-budget caution from a slow/timed-out inspiration.
                         "include_metadata": True,
+                        # C4: a CROSS gen picks the crossover partner by embedding distance
+                        # (get_cross_component -> _most_distant); carry embeddings only then.
+                        "include_embedding": (_forced_patch == "cross"),
                     }
                 )["result"]
             )

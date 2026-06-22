@@ -54,18 +54,30 @@ config, but the evaluator's checks are authoritative.
 ## Score
 
 ```
-combined_score = max(0, baseline_slope − candidate_slope)
+combined_score = max(0, sum_L (baseline_depth(L) − candidate_depth(L)) / sum_L n)     # n = L²
 ```
 
-`baseline_slope` is the OLS slope of mean CX-depth vs `n=L²` for snake-order
-KMS, computed once over the full benchmark and cached in
-`_baseline_cache.json` (gitignored). The seed in `initial.py` is identical to
-the baseline → score = 0 by construction. Goubault de Brugière & Martiel
-(arXiv:2303.07302) reported `4n+8` on grids, suggesting score ≈ 0.85 is
-attainable. (Note: this paper reference lives only in this README; shinka
-never feeds the README to the LLM. Leak-proofing is the evaluator's job — the held-out
-`depths_per_L` stays under the evaluator's `private` metrics and the paper target is never
-surfaced to the inner loop; correctness is enforced by `evaluate.py`'s authoritative checks.)
+This is the **average-case prefactor metric**: the n-weighted average reduction in
+`c_hat(L) = mean_CX_depth(L) / n` across all grid sizes — i.e. total average-case CX-depth
+*saved per qubit*, weighted toward the larger `n` (where the constant prefactor's real power
+shows). The per-L baseline means come from a frozen snake-order KMS reference cached in
+`_baseline_cache.json` (gitignored). The seed in `initial.py` is identical to the baseline →
+score = 0 by construction. Goubault de Brugière & Martiel (arXiv:2303.07302) report `~4n` on
+grids; a synthesis at that level would score ≈ +0.8 (driving the n-weighted prefactor from
+~4.81 toward 4.0), and the average case can do better than the worst-case bound.
+
+This metric scores **absolute efficiency at every size**, not the depth-vs-`n` *slope*. The
+earlier slope objective (`baseline_slope − candidate_slope`) was abandoned because it was
+reward-hackable: a candidate could fake a flat/negative slope by *inflating small-grid depth*
+without ever producing a smaller circuit (see `results/.../RUN_SUMMARY.md` from run_20260619).
+The prefactor metric cannot be gamed that way — padding any size raises its depth and only
+*lowers* the score. The OLS slope and its R² are kept in `public` metrics as **diagnostics
+only** (a low R² flags a non-linear / padded depth profile; genuine syntheses fit at R² ≈ 1.0).
+
+(Note: the paper reference lives only in this README; shinka never feeds the README to the LLM.
+Leak-proofing is the evaluator's job — the held-out per-matrix `depths_per_L` stays under the
+evaluator's `private` metrics and the paper target is never surfaced to the inner loop;
+correctness is enforced by `evaluate.py`'s authoritative checks.)
 
 ## Benchmark
 

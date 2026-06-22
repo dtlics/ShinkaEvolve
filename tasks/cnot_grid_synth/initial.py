@@ -20,9 +20,13 @@ Allowed gates (the harness rejects any candidate that violates these):
 
 Score: CX-only depth, computed AFTER transpile to {cx, u3} at
 optimization_level=0. So SWAP transparently costs depth 3, CZ costs depth 1
-(decomposes to H·CX·H), iSWAP ~2, etc. The score formula rewards
-reductions in CX-depth slope (mean depth vs n=L²) across L = 2..10, 30
-random matrices each.
+(decomposes to H·CX·H), iSWAP ~2, etc. The score rewards lowering the
+AVERAGE-CASE prefactor c_hat = mean_CX_depth / n at EVERY grid size
+L = 2..10 (30 random matrices each), n-weighted so the larger n matter most:
+score = sum_L (baseline_depth(L) − your_depth(L)) / sum_L n. In other words,
+produce genuinely SMALLER circuits (less CX-depth per qubit) at every size —
+especially large n. Padding small-n circuits does NOT help (it only raises
+your depth and lowers the score); only real efficiency gains count.
 
 Mental model: row operations over F_2.
   Applying CX(c, t) to a running n×n matrix A (initially the identity)

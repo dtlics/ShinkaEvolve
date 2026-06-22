@@ -6,11 +6,17 @@ random invertible binary matrices via Qiskit's
 `synthesize_cnot_grid(M, L)`, then enforce two correctness gates and measure
 CX-only depth.
 
-Score: max(0, baseline_slope − candidate_slope), where baseline_slope is
-the OLS slope of mean CX-depth vs n=L² for a frozen snake-KMS reference
-synthesis, computed once and cached in `_baseline_cache.json`. The seed
-in initial.py is hand-coded KMS that matches the baseline by
-construction → score ≈ 0; any genuine improvement is positive.
+Score (PREFACTOR metric): max(0, sum_L (D_base(L) − D_cand(L)) / sum_L n),
+i.e. the n-weighted average reduction in the average-case prefactor
+c_hat(L) = mean_CX_depth(L) / n (n = L²) across all grid sizes — total
+average-case depth SAVED per qubit, with the larger n weighted more. The
+per-L baseline means D_base(L) come from a frozen snake-KMS reference cached
+in `_baseline_cache.json`. The seed in initial.py is hand-coded KMS that
+matches the baseline by construction → score ≈ 0; any genuinely more
+efficient synthesis (lower depth/n) is positive; a hypothetical ~4n synthesis
+scores ≈ +0.8. This scores ABSOLUTE efficiency at every size, NOT the
+depth-vs-n slope, so it cannot be gamed by inflating small-n depth to fake a
+flat/negative slope (the OLS slope + its R² are kept only as diagnostics).
 
 Hard correctness gates (either failure → combined_score = 0, correct = False):
   Gate 1 (adjacency): every 2-qubit gate's qubit pair must be in
@@ -387,21 +393,43 @@ def aggregate_fn(results: list) -> dict[str, Any]:
 
     ns = np.array([L * L for L in L_RANGE], dtype=float)
     means = np.array([per_L[L]["mean"] for L in L_RANGE])
+    base_means = np.array([baseline["per_L_mean"][str(L)] for L in L_RANGE])
+
+    # OBJECTIVE (prefactor metric): minimize the AVERAGE-CASE prefactor
+    # c_hat(L) = mean_depth(L) / n at every grid size, n-weighted so the larger n (where the
+    # constant prefactor's real power shows) dominate. Concretely:
+    #     score = sum_L (D_base(L) - D_cand(L)) / sum_L n(L)
+    #           = total average-case CX-depth SAVED across all sizes, per qubit
+    #           = the n-weighted mean reduction in depth-per-qubit (units of c_hat).
+    # This scores ABSOLUTE efficiency, NOT the depth-vs-n slope, so a candidate cannot win by
+    # inflating small-n depth to fake a flat/negative slope: padding ANY size raises that
+    # size's depth and only LOWERS the score (and a low slope with a huge intercept is heavily
+    # penalized by the inflated small-n c_hat). The seed ties the baseline -> 0; a genuine ~4n
+    # synthesis scores ~+0.8 (it drives the n-weighted prefactor from ~4.81 toward 4.0).
+    # Floored at 0: worse-than-baseline isn't a useful search direction.
+    score = max(0.0, float((base_means - means).sum() / ns.sum()))
+
+    # --- Diagnostics ONLY (NOT the objective): the depth-vs-n line + its fit quality, kept so
+    # gaming attempts are visible. A low R^2 (<~0.9) flags a non-linear / padded depth profile;
+    # genuine syntheses fit a line at R^2 ~ 1.0. These never drive combined_score. ---
     A_lin = np.vstack([ns, np.ones_like(ns)]).T
     slope, intercept = np.linalg.lstsq(A_lin, means, rcond=None)[0]
     resid = means - (slope * ns + intercept)
     sse = float(np.sum(resid ** 2))
     sst = float(np.sum((means - means.mean()) ** 2)) if len(means) > 1 else 1.0
     r_squared = 1.0 - sse / sst if sst > 0 else 1.0
-    # Floored at 0: the seed already matches baseline (slope ≈ baseline_slope),
-    # so worse-than-baseline candidates aren't a useful direction; the search
-    # only cares about beating the baseline.
-    score = max(0.0, float(baseline["slope"]) - float(slope))
+
+    cand_chat = {L: float(per_L[L]["mean"] / (L * L)) for L in L_RANGE}
+    base_chat = {L: float(base_means[i] / (L * L)) for i, L in enumerate(L_RANGE)}
+    max_L = L_RANGE[-1]
 
     return {
         "combined_score": float(score),
         "correct": True,
         "public": {
+            "prefactor_score": float(score),
+            "c_hat_at_max_L": cand_chat[max_L],
+            "baseline_c_hat_at_max_L": base_chat[max_L],
             "slope": float(slope),
             "intercept": float(intercept),
             "r_squared": float(r_squared),
@@ -412,9 +440,12 @@ def aggregate_fn(results: list) -> dict[str, Any]:
         "private": {"depths_per_L": {L: per_L[L]["depths"] for L in L_RANGE}},
         "extra_data": {},
         "text_feedback": (
-            f"slope={slope:.4f} (baseline {baseline['slope']:.4f}; "
-            f"Δ={baseline['slope'] - slope:+.4f}); R²={r_squared:.3f}; "
-            + "; ".join(f"L={L}:c={per_L[L]['c_hat']:.2f}" for L in L_RANGE)
+            f"OBJECTIVE = reduce average CX-depth/n (the prefactor c_hat=depth/n) at EVERY grid "
+            f"size, with larger n weighted more. score={score:+.4f} (n-weighted avg depth-per-qubit "
+            f"saved vs baseline; seed=0, higher is better; ~+0.8 means ~4n). R2={r_squared:.3f} "
+            f"(diagnostic; genuine syntheses ~1.0). Per-L c_hat (yours/baseline; lower is better, "
+            f"especially at large L): "
+            + "; ".join(f"L={L}:{cand_chat[L]:.2f}/{base_chat[L]:.2f}" for L in L_RANGE)
         ),
     }
 

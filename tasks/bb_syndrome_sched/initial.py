@@ -104,15 +104,22 @@ def bb_neighbors(code):
 
 
 # EVOLVE-BLOCK-START
-def build_schedule(xnbs, znbs, xanc, zanc):
+def build_schedule(xnbs, znbs, xanc, zanc, logical_xs, logical_zs):
     """Build the syndrome-measurement schedule.
 
-    Inputs (BB Tanner structure, already computed -- you have FULL visibility of which data
-    qubits each check touches, so you can reason about conflicts and hook-error propagation):
+    Inputs (BB Tanner structure + the code's logical operators, already computed -- you have FULL
+    visibility, so you can reason about conflicts AND hook-error propagation onto the logicals):
       xnbs[i] : list of the 6 data-qubit indices that X-check i acts on, in a fixed order
       znbs[i] : list of the 6 data-qubit indices that Z-check i acts on, in a fixed order
       xanc[i] : ancilla index measuring X-check i      (use exactly these ancilla indices)
       zanc[i] : ancilla index measuring Z-check i
+      logical_xs[i] : tuple of data-qubit indices in the support of the i-th logical-X operator
+      logical_zs[i] : tuple of data-qubit indices in the support of the i-th logical-Z operator
+        (the SAME operators the score measures). USE THESE to shape hook errors: a single mid-circuit
+        ancilla fault leaves a residual data-qubit "hook" whose danger depends on whether it overlaps
+        a LOW-WEIGHT logical operator. Order each check's CNOTs so residual hooks avoid these supports
+        / stay inside the decoder's reach -- this is the AlphaSyndrome lever (the hook term is
+        otherwise un-steerable from the Tanner structure alone). The IBM seed below IGNORES them.
 
     Returns: list of ticks; each tick is a list of (data, ancilla, pauli) tuples, pauli in {"X","Z"}.
     Empty ticks are dropped. X- and Z-checks MAY share ticks (interleaving) -- that is the point.
@@ -140,10 +147,13 @@ def build_schedule(xnbs, znbs, xanc, zanc):
     The seed below is IBM's gross-code schedule: at each of 7 ticks every X-check engages one
     neighbor-direction (sX[t]) and every Z-check engages one (sZ[t]); "idle" = engage none this
     tick. It is UNIFORM across checks. The biggest source of improvement is to break that
-    uniformity -- e.g. make a check's per-neighbor timing depend on its index i, or on which data
-    qubit a neighbor is -- to shape hooks per check the way AlphaSyndrome does, while keeping the
-    interleaving shallow. You have the full xnbs/znbs structure to do this; just keep the four
-    hard constraints above satisfied.
+    uniformity -- e.g. make a check's per-neighbor timing depend on its index i, on which data
+    qubit a neighbor is, and (the strongest lever) on the LOGICAL OPERATORS: rank each check's
+    candidate hooks by how much a single-fault residual would overlap a low-weight logical_xs /
+    logical_zs support, and time the CNOTs so the dangerous overlaps are split apart in time and
+    pushed off the logicals -- shaping hooks per check the way AlphaSyndrome does, while keeping the
+    interleaving shallow. You have the full xnbs/znbs structure AND the logical supports to do this;
+    just keep the hard constraints above satisfied.
     """
     # IBM gross-code schedule: neighbor-direction engaged at each tick (X and Z fire together).
     sX = ["idle", 1, 4, 3, 5, 0, 2]
@@ -189,13 +199,25 @@ def _check_labeling(code, xnbs, znbs, xanc, zanc):
             )
 
 
+def _logical_supports(code):
+    """Data-qubit supports of the code's logical operators (from the code JSON), passed to
+    build_schedule so it can steer hook errors away from low-weight logicals (the AlphaSyndrome
+    lever). X-type logicals contribute their 'X' positions; Z-type their 'Z' positions. These are
+    PUBLIC code structure -- the SAME operators evaluate.py pins as the measured observable, not a
+    held-out gate number: using them only orders the CNOTs, it cannot fake the Stim-measured LER."""
+    lx = [tuple(j for j, c in enumerate(s) if c == "X") for s in code["logical_xs"]]
+    lz = [tuple(j for j, c in enumerate(s) if c == "Z") for s in code["logical_zs"]]
+    return lx, lz
+
+
 def run_experiment(code_path: str = "qecc/bbcode-72.json", **kwargs):
     """Entry point called by the Shinka evaluator. Returns the candidate schedule (ticks)
     plus the code path; evaluate.py builds the circuit, checks validity, and scores it."""
     code = json.load(open(code_path))
     xnbs, znbs, xanc, zanc = bb_neighbors(code)
     _check_labeling(code, xnbs, znbs, xanc, zanc)  # fail closed on an unsupported code's JSON
-    ticks = build_schedule(xnbs, znbs, xanc, zanc)
+    logical_xs, logical_zs = _logical_supports(code)
+    ticks = build_schedule(xnbs, znbs, xanc, zanc, logical_xs, logical_zs)
     # tuples -> lists so the result serializes cleanly across the Shinka boundary
     ticks = [[[int(d), int(a), str(p)] for (d, a, p) in tick] for tick in ticks]
     return {"ticks": ticks, "code_path": code_path}

@@ -27,15 +27,21 @@ SCORING (baseline-relative so the IBM seed anchors at 0):
   asyndrome.scheduler.evaluate_circuit (MPP-bracketed single round, ancilla-only depolarizing),
   so it does not import the asyndrome package.
 
-RUNTIME (measured): on bbcode-72 at NSHOTS=50000 one full evaluate is ~34 s, essentially all of
-it the two BP-OSD decodes (~34 s); structural+sanity+distance checks are <0.5 s combined. Cost is
-~linear in NSHOTS (~14 s at 20k, ~68 s at 100k) and the larger bbcode-288 is several x slower. Shinka
-parallelizes evals (run_workers / async proposals), so wall-clock scales down with workers.
+RUNTIME (measured, osd_order=3, ~0.19 ms / decoded shot): a full evaluate samples each observable
+circuit until it collects ~TARGET_ERRORS logical errors (or hits MAX_SHOTS) -- so it is VARIABLE:
+~2.5 min for the seed and ~2.5-5 min for a SOTA-band schedule (a LOWER-LER schedule needs MORE shots
+to reach the error target -> SLOWER; a worse one fewer -> faster). Worst case ~2*MAX_SHOTS decoded
+shots (~5 min) on a near-perfect schedule. Set the harness eval_time generously (>= 00:08:00).
+Lower TARGET_ERRORS (e.g. 1000) to ~halve eval time at the cost of a bit more noise.
 
-NOISE: at LER ~1e-2 the score std is ~0.43/sqrt(LER*NSHOTS): ~0.03 at 20k, ~0.02 at 50k, ~0.015
-at 100k. Since beating IBM means ~0.1-point gains, 50k gives ~3:1 signal:noise; raise NSHOTS (or
-num_runs) if selection looks noisy. A fresh random sampling seed is drawn per eval so the search
-cannot lock onto one lucky noise realization (see _ler_one).
+NOISE (the point of the error-budget sampler): the score std is ~0.434/sqrt(F) with F = total
+logical errors observed across the two circuits. Targeting a fixed error COUNT (F ~= 2*TARGET_ERRORS
+= 4000 -> std ~0.0069) holds the noise ~CONSTANT across schedules of very different LER -- a fixed
+shot count instead reads NOISIER on exactly the low-LER schedules we care about, so the greedy
+archive-max "chases noise" (winner's curse: the reported best overstates the true best by
+~std*sqrt(2 ln N_candidates)). With a constant ~0.007 std, selection can trust a new best. Raise
+TARGET_ERRORS to tighten further (std ~ 1/sqrt(TARGET_ERRORS); eval cost ~ linear). A fresh random
+seed is drawn per eval so the search cannot lock onto one lucky noise realization (see _ler_count).
 
 Deps: stim, numpy, stimbposd  (pip install stim numpy stimbposd ldpc).
 """
@@ -54,7 +60,21 @@ from shinka.core import run_shinka_eval
 CNOT_P = 0.007432674432642006
 IDLE_P = 0.005243978963702009
 
-NSHOTS = 50000          # shots for the LER estimate (see RUNTIME / NOISE above)
+# --- LER estimation: ERROR-BUDGET (sinter-style) sampling ------------------------------------
+# We sample each observable circuit until it has collected TARGET_ERRORS logical errors (or hits
+# MAX_SHOTS), instead of using a fixed shot count. This holds the SCORE'S SAMPLING NOISE ~CONSTANT
+# across schedules: a lower-LER schedule yields fewer logical errors per shot, so a fixed shot count
+# would be noisiest on exactly the good schedules we care about (and the greedy archive-max then
+# "chases noise" — the winner's curse). With F = total logical errors observed across the two
+# observable circuits, the score std is ~0.434/sqrt(F); TARGET_ERRORS=2000 PER circuit -> F~4000 ->
+# std ~0.0069 (vs ~0.023 at the old fixed 50k shots). This mirrors how AlphaSyndrome estimates LER
+# ("based on the number of logical flipping events"). MAX_SHOTS bounds eval wall-clock (a near-perfect
+# schedule would otherwise sample forever); raise it (and MIN_SHOTS) to resolve a sub-1/MAX_SHOTS LER.
+TARGET_ERRORS = 2000     # logical errors to collect PER observable circuit (x- and z-)
+MIN_SHOTS     = 50_000   # never stop before this many shots (resolution floor)
+MAX_SHOTS     = 800_000  # per-circuit shot ceiling (bounds eval wall-clock; ~2.5 min/circuit worst case)
+BATCH_SHOTS   = 50_000   # sample + decode in batches of this size
+
 OSD_ORDER = 3           # BP-OSD combination-sweep order. asyndrome left osd_order commented out, so
                         # its decoder ran at the stimbposd DEFAULT (60, osd_cs); 3 is a deliberate
                         # faster-but-weaker choice. It still reproduces the paper's ~44% BP-OSD LER
@@ -217,11 +237,39 @@ def _circuit_distance(circuit, d):
         return None
 
 
-def _ler_one(circuit, n, nshots, seed):
+def _ler_count(circuit, n, seed):
+    """Adaptive ERROR-BUDGET LER estimate for ONE observable circuit. Builds the BP-OSD decoder
+    once, then samples + decodes in batches of BATCH_SHOTS until TARGET_ERRORS logical errors have
+    been observed (and at least MIN_SHOTS shots) or MAX_SHOTS is reached. Returns (n_logical_errors,
+    n_shots). Each batch is FRESHLY seeded so the shots are independent; the decoder is deterministic
+    given the syndromes, so reusing it across batches is correct. Targeting a fixed error COUNT (not
+    a fixed shot count) holds the estimate's relative error ~1/sqrt(errors) ~constant across schedules
+    of very different LER -- the property that lets selection trust a new 'best' instead of noise."""
     dem = circuit.detector_error_model(decompose_errors=True, ignore_decomposition_failures=True)
-    det, obs = circuit.compile_detector_sampler(seed=seed).sample(nshots, separate_observables=True)
-    pred = BPOSD(dem, max_bp_iters=n, osd_order=OSD_ORDER).decode_batch(det)
-    return int(np.sum(np.any(pred != obs, axis=1)))
+    decoder = BPOSD(dem, max_bp_iters=n, osd_order=OSD_ORDER)
+    # Build the sampler ONCE; Stim's compiled sampler advances its PRNG across .sample() calls, so
+    # successive batches are independent shots. ADAPTIVELY SIZE each batch: BP-OSD's decode_batch has
+    # a meaningful per-CALL overhead (many small decodes are ~2x slower than one big one), so after a
+    # probe batch we estimate the remaining shots needed and take the rest in ~1 more big batch -- this
+    # hits the error target in ~2 decode calls with minimal over-sampling.
+    sampler = circuit.compile_detector_sampler(seed=int(seed) & 0x7FFFFFFF)
+    shots = 0
+    fails = 0
+    batch = BATCH_SHOTS
+    while shots < MAX_SHOTS:
+        b = int(min(batch, MAX_SHOTS - shots))
+        det, obs = sampler.sample(b, separate_observables=True)
+        pred = decoder.decode_batch(det)
+        fails += int(np.sum(np.any(pred != obs, axis=1)))
+        shots += b
+        if shots >= MIN_SHOTS and fails >= TARGET_ERRORS:
+            break
+        if fails > 0:                          # size the next batch to land on TARGET_ERRORS
+            need = (TARGET_ERRORS - fails) * shots / fails
+            batch = max(int(need * 1.10), BATCH_SHOTS)
+        else:                                  # no errors yet -> quadruple the probe
+            batch = shots * 4
+    return fails, shots
 
 
 # ---------------------------------------------------------------------------
@@ -302,31 +350,40 @@ def aggregate_fn(results: list) -> dict:
         return _invalid(f"reduces circuit distance to {dist} (must be >= {floor})", depth)
 
     # (4) logical error rate -> baseline-relative score. Fresh random seed per eval (anti-overfit).
+    # ERROR-BUDGET sampling: each circuit is sampled until it has collected ~TARGET_ERRORS logical
+    # errors (or hits MAX_SHOTS), so the score's sampling noise is ~constant (~0.434/sqrt(total errors))
+    # regardless of the schedule's LER -- the key change that lets selection trust a new best.
     s = int(np.random.SeedSequence().generate_state(1)[0])
-    zf = _ler_one(z_circuit, n, NSHOTS, s)
-    xf = _ler_one(x_circuit, n, NSHOTS, s ^ 0x9E3779B9)
-    zrate, xrate = zf / NSHOTS, xf / NSHOTS
+    zf, z_shots = _ler_count(z_circuit, n, s)
+    xf, x_shots = _ler_count(x_circuit, n, s ^ 0x9E3779B9)
+    zrate, xrate = zf / z_shots, xf / x_shots
     overall = 1.0 - (1.0 - xrate) * (1.0 - zrate)
+    n_err = zf + xf
+    est_std = (0.434 / math.sqrt(n_err)) if n_err > 0 else None
 
     if overall <= 0.0:
-        # 0 logical errors observed: genuinely strong but under-resolved. Cap and ask for shots.
-        score = math.log10(SEED_LER * NSHOTS)
-        fb = (f"valid; depth={depth}, distance={dist}. 0 logical errors in {NSHOTS} shots "
-              f"(LER < {1.0/NSHOTS:.1e}); raise NSHOTS to resolve. score capped ~={score:.3f}")
+        # 0 logical errors even at the shot ceiling: genuinely excellent but under-resolved.
+        resolved = 1.0 / max(z_shots, x_shots)
+        score = math.log10(SEED_LER / resolved)
+        fb = (f"valid; depth={depth}, distance={dist}. 0 logical errors in {z_shots}+{x_shots} shots "
+              f"(LER < {resolved:.1e}); raise MAX_SHOTS to resolve. score capped ~={score:.3f}")
         return {"combined_score": float(score),
                 "public": {"valid": True, "depth": depth, "distance": dist, "overall_ler": 0.0,
                            "x_ler": xrate, "z_ler": zrate},
+                "private": {"shots": [z_shots, x_shots], "errors": [zf, xf], "seed_ler": SEED_LER},
                 "text_feedback": fb}
 
     score = math.log10(SEED_LER / overall)
     fb = (f"valid; depth={depth}, distance={dist}, overall_LER={overall:.3e} "
-          f"(X={xrate:.2e}, Z={zrate:.2e}); score=log10(seed/LER)={score:+.3f} "
-          f"(seed IBM=0.00, AlphaSyndrome~=+0.15). Lower depth and better hook ordering both help.")
+          f"(X={xrate:.2e}, Z={zrate:.2e}); score=log10(seed/LER)={score:+.3f} +-{est_std:.3f} "
+          f"({n_err} logical errors over {z_shots}+{x_shots} shots; seed IBM=0.00, AlphaSyndrome~=+0.15). "
+          f"Lower depth and better hook ordering both help.")
     return {
         "combined_score": float(score),
         "public": {"valid": True, "depth": depth, "distance": dist,
                    "overall_ler": overall, "x_ler": xrate, "z_ler": zrate},
-        "private": {"shots": NSHOTS, "seed_ler": SEED_LER},
+        "private": {"shots": [z_shots, x_shots], "errors": [zf, xf], "score_std": est_std,
+                    "seed_ler": SEED_LER},
         "text_feedback": fb,
     }
 

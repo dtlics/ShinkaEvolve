@@ -12,10 +12,13 @@ import the `asyndrome` package, only its code-definition JSONs.
 
 ## What's optimized
 
-The function `build_schedule(xnbs, znbs, xanc, zanc)` inside the EVOLVE-BLOCK of
-[initial.py](initial.py). It returns the full tick assignment of the
+The function `build_schedule(xnbs, znbs, xanc, zanc, logical_xs, logical_zs)` inside
+the EVOLVE-BLOCK of [initial.py](initial.py). It returns the full tick assignment of the
 syndrome-extraction circuit: a list of **ticks**, where each tick is a list of
-`(data_qubit, ancilla_qubit, pauli)` Pauli checks executed in that time step.
+`(data_qubit, ancilla_qubit, pauli)` Pauli checks executed in that time step. Besides the
+fixed Tanner neighbours it is handed `logical_xs[i]` / `logical_zs[i]` — the data-qubit
+supports of the code's logical operators (the SAME operators the score measures) — so it can
+steer hook errors away from low-weight logicals (the AlphaSyndrome lever); the IBM seed ignores them.
 
 This representation can express **any** interleaving of X- and Z-checks
 (including deliberate idles), so the search is not restricted to
@@ -77,6 +80,20 @@ CNOT order decides where a mid-circuit ancilla fault lands). IBM is
 shallow-but-rigid; AlphaSyndrome is deep-but-hook-optimal — beating both is the
 goal.
 
+**Sampling noise — ERROR-BUDGET (not fixed shots).** `overall_LER` is estimated by sampling
+each observable circuit until it has collected ~`TARGET_ERRORS` (default 2000) logical errors
+(or hits `MAX_SHOTS`). The score std is then ~`0.434/√(total errors)` ≈ **±0.007**, held
+~constant *regardless of the schedule's LER* — a fixed shot count instead reads noisiest on
+exactly the low-LER schedules you care about, so the greedy archive-max "chases noise" (winner's
+curse: the reported best overstates the true best by ~`std·√(2 ln N_candidates)`). Eval is now
+VARIABLE-time (~2.5–5 min for a SOTA-band schedule, ~2.5 min for the seed): a LOWER-LER schedule
+needs MORE shots to reach the error target → SLOWER (a near-perfect one hits the ~5-min `MAX_SHOTS`
+cap), a worse one fewer → faster. Set the harness `eval_time` >= `00:08:00`. Lower `TARGET_ERRORS`
+(e.g. 1000 → std ~0.0094, ~half the eval time) if a multi-day run's wall-clock is a concern; raise
+it to tighten (std ~ 1/√TARGET_ERRORS; cost ~ linear). Even so,
+**de-noise the very top candidates** (re-eval a few times) before claiming a beyond-SOTA result,
+and confirm head-to-head vs AlphaSyndrome's published schedule at a high error budget.
+
 ## Leak-proofing
 
 There is **no held-out gate number** to leak: the task is pure LER minimization,
@@ -102,8 +119,8 @@ calibrated to this decoder):
 | IBM seed `sX/sZ`, Brisbane `p_CNOT`/`p_idle` | exact match to reference |
 | Block-convention labeling ↔ shipped JSON | **matches only for ℓ==m** (72 ✅, 288 ✅; 90/108/144 ✗ — see "Codes") |
 | Seed valid under generic harness | ✅ depth 7, distance 5 (= d−1), measures correctly |
-| Seed LER @ 50k | **1.04e-2** vs hard-coded `SEED_LER = 1.05e-2` (ratio 1.00) |
-| AlphaSyndrome's published schedule, re-scored here | LER **7.37e-3**, score **+0.151**, depth 18 |
+| Seed LER (error-budget, ~4000 errors) | score ≈ **0.00 ±0.007** vs `SEED_LER = 1.05e-2` (anchors at 0) |
+| AlphaSyndrome's published schedule, re-scored here | LER **7.37e-3**, score **+0.151** (single 50k eval — de-noise for a true comparison), depth 18 |
 | Reduction vs seed (artifact's `(IBM−α)/α` metric) | **41.6%** ≈ paper's **~44%** BP-OSD on `[[72,12,6]]` |
 
 So the harness reproduces the paper's headline improvement, and the published
@@ -149,9 +166,10 @@ python tasks/bb_syndrome_sched/evaluate.py \
 cat /tmp/bb_smoke/correct.json /tmp/bb_smoke/metrics.json
 ```
 
-Expected (~35 s at NSHOTS=50000): `correct=true`, `valid=true`, `depth=7`,
-`distance=5`, `overall_ler ≈ 1.04e-2`, `combined_score ≈ 0.0` (seed anchors at 0;
-±0.02 from sampling noise).
+Expected (~2.5 min; the error-budget sampler collects ~2000 logical errors/circuit, ~800k
+shots total): `correct=true`, `valid=true`, `depth=7`, `distance=5`, `overall_ler ≈ 1.05e-2`,
+`combined_score ≈ 0.0` (seed anchors at 0; now only **±0.007** from sampling noise —
+see `private.score_std` and `private.shots`/`errors`).
 
 ### Full evolution (as the orchestrator)
 
@@ -165,9 +183,13 @@ then drive windows — see
 python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
 ```
 
-Each eval is ~35 s at 50k shots (≈ all BP-OSD decode); Shinka parallelizes evals
-across workers. Raise NSHOTS / `num_runs` if selection looks noisy (score std
-≈ 0.43/√(LER·NSHOTS) ≈ 0.02 at 50k).
+Each eval is **variable-time** (~2.5 min for the seed, ~2.5–5 min for SOTA-band schedules, ≈ all
+BP-OSD decode): the error-budget sampler collects ~`TARGET_ERRORS` logical errors per circuit, so a
+lower-LER schedule needs more shots (slower, capped at `MAX_SHOTS`) and a worse one fewer (faster).
+The orchestrator harness evaluates **sequentially** (one candidate at a time — there is no
+`run_workers` parallelism in `orchestrator/harness/run_window.py`; wall-clock is paced by this eval
+plus the Azure mutate latency). The score std is ~`0.434/√(total errors)` ≈ ±0.007 at the default
+2000-error target; raise/lower `TARGET_ERRORS` in `evaluate.py` to trade precision vs eval time.
 
 ## Files
 

@@ -34,6 +34,7 @@ import math
 import os
 import random
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1235,6 +1236,9 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     num_windows = max(1, int(cfg.get("windows", 1) or 1))  # G4: --windows 0 coerces to 1 (full-keyed diag, not a near-empty dict)
 
     os.makedirs(cfg["results_dir"], exist_ok=True)
+    # Clear any stale cooperative-stop sentinel left by a prior process generation, so a
+    # crash-orphaned .stop cannot immediately stop this fresh/resumed run (a stop-loop).
+    _clear_stop(cfg["results_dir"])
     _boot_embed_cost = _bootstrap_initial(cfg)
 
     journal.init_run(cfg["results_dir"], _run_meta(cfg))
@@ -1261,6 +1265,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     prior_low_streak = int(window_state.get("prior_low_streak", 0))
 
     budget = cfg.get("budget_usd")
+    run_id = cfg.get("run_id")  # for the cooperative .stop sentinel target match
     # F4: the self-contained strategy pointer — {target: hash} over all mutable
     # files, computed from the live scripts/. Stamped into every window so the log
     # pins the exact strategy version (all files) that produced each window.
@@ -1623,6 +1628,11 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 last_diag["budget_hit"] = True
                 last_diag["return_reason"] = "budget_exhausted"
                 break
+            # Cooperative graceful stop: the agent asked this run to stop (e.g. for a
+            # framework-rewrite measure window). Exit between windows — no process kill.
+            if _stop_requested(cfg["results_dir"], run_id):
+                last_diag["return_reason"] = "stopped_by_user_request"
+                break
             decision = cadence_policy_script.main(
                 {
                     "stagnation_flag": last_diag.get("stagnation_flag"),
@@ -1651,6 +1661,9 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
             window_index += 1
             if last_diag.get("budget_hit"):
                 last_diag["return_reason"] = "budget_exhausted"
+                break
+            if _stop_requested(cfg["results_dir"], run_id):
+                last_diag["return_reason"] = "stopped_by_user_request"
                 break
         last_diag.setdefault("return_reason", "windows_done")
 
@@ -1728,6 +1741,149 @@ def _hold_no_idle_sleep():
         except Exception:
             return None
     return None  # Linux / other: no-op, no raise
+
+
+# ---------------------------------------------------------------------------
+# Per-run isolation (cross-worktree / cross-session). A run_window owns its
+# results_dir for its whole lifetime via an exclusive OS advisory lock on
+# <results_dir>/.run.lock. Holding the lock IS the run's identity, liveness, and
+# co-tenancy: the kernel releases it on ANY exit (clean, crash, SIGKILL, sandbox
+# reclaim), so there is never a stale lock to clean up. A second run_window on the
+# same results_dir fails to acquire it and refuses to start instead of silently
+# commingling programs.sqlite / bandit_state.pkl / journal. This is what lets
+# concurrent worktree runs stay independent WITHOUT anyone touching the global OS
+# PID space — no Get-Process / Stop-Process by pid, so PID reuse can never make one
+# session act on another session's run_window. To stop a run, write the cooperative
+# <results_dir>/.stop sentinel (below); to recover a dead run, relaunch --resume
+# (the lock turns a wrong "it's dead" guess into a harmless refuse-to-start, not a
+# double-writer).
+# ---------------------------------------------------------------------------
+class _RunLock:
+    """Holds the open lock fd for the process lifetime. MUST stay referenced — if
+    it is garbage-collected the fd closes and the OS drops the lock."""
+
+    def __init__(self, fd: int) -> None:
+        self._fd: Optional[int] = fd
+
+    def release(self) -> None:
+        if self._fd is None:
+            return
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                try:
+                    os.lseek(self._fd, 0, 0)
+                    msvcrt.locking(self._fd, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+            else:
+                import fcntl
+                try:
+                    fcntl.flock(self._fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+        finally:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+
+    def __del__(self) -> None:  # best-effort release if release() was never called
+        self.release()
+
+
+def acquire_run_lock(results_dir: str, run_id: Optional[str] = None) -> _RunLock:
+    """Take the exclusive per-run lock on <results_dir>/.run.lock, or raise
+    SystemExit if another LIVE run_window already owns this results_dir. Returns a
+    guard whose fd must stay alive for the whole run (store it at process-lifetime
+    scope — a dropped guard releases the lock). Cross-platform: fcntl.flock on
+    POSIX, msvcrt.locking on Windows; both auto-released by the kernel on death, so
+    a crash never leaves the directory falsely 'owned'. The fd is opened
+    non-inheritable so the eval subprocess cannot keep the lock alive past us."""
+    os.makedirs(results_dir, exist_ok=True)
+    lock_path = os.path.join(results_dir, ".run.lock")
+    owner_path = os.path.join(results_dir, ".run_owner.json")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0), 0o644)
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+            try:
+                os.set_inheritable(fd, False)  # don't leak the lock into the eval child
+            except (OSError, AttributeError, ValueError):
+                pass
+            os.lseek(fd, 0, 0)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        owner = ""
+        try:
+            with open(owner_path, encoding="utf-8") as f:
+                owner = " owned by " + f.read().strip()
+        except OSError:
+            pass
+        raise SystemExit(
+            f"[run-lock] refusing to start: {results_dir} is already locked by a live "
+            f"run_window{owner}. Let it finish, or relaunch with --resume only after it "
+            f"exits — never start a second run on one results_dir."
+        )
+    # Human-readable forensics only (NOT a gate): lets the refuse message name the holder.
+    try:
+        with open(owner_path, "w", encoding="utf-8") as f:
+            f.write(_common.dumps({"pid": os.getpid(), "run_id": run_id, "started_at": time.time()}))
+    except OSError:
+        pass
+    return _RunLock(fd)
+
+
+# Cooperative graceful-stop sentinel. The agent asks a LIVE run to stop between
+# windows by writing <results_dir>/.stop (optionally {"target_run_id": ...}); it
+# never kills a process. run_window consumes it at a window boundary and exits 0
+# (no mid-eval kill => no half-written sqlite). A stale .stop from a prior process
+# generation is cleared at startup, so it can never stop-loop a --resume.
+def _read_stop(results_dir: str) -> Optional[Dict[str, Any]]:
+    p = os.path.join(results_dir, ".stop")
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            data = json.loads(f.read() or "{}")
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}  # present-but-malformed still means "stop requested"
+
+
+def _clear_stop(results_dir: str) -> None:
+    try:
+        os.remove(os.path.join(results_dir, ".stop"))
+    except OSError:
+        pass
+
+
+def _stop_requested(results_dir: str, run_id: Optional[str]) -> bool:
+    """True (and consumes the sentinel) iff a .stop targets THIS run."""
+    st = _read_stop(results_dir)
+    if st is None:
+        return False
+    tgt = st.get("target_run_id")
+    if tgt is None or tgt == run_id:
+        _clear_stop(results_dir)
+        return True
+    return False
+
+
+def _absolutize_paths(cfg: Dict[str, Any], config_path: str) -> None:
+    """Anchor a relative results_dir / db_path to the CONFIG-FILE directory (not the launch CWD),
+    in place, so a relative "results" resolves to <config dir>/results deterministically and two
+    worktrees can never collide on a shared launch CWD. Absolute paths in the config are kept."""
+    cfg_dir = os.path.dirname(os.path.abspath(config_path))
+    for key in ("results_dir", "db_path"):
+        val = cfg.get(key)
+        if val and not os.path.isabs(val):
+            cfg[key] = os.path.normpath(os.path.join(cfg_dir, val))
 
 
 def _run_meta(cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1887,6 +2043,10 @@ def _cli() -> None:
     args = ap.parse_args()
     with open(args.config, encoding="utf-8") as f:
         cfg = json.load(f)
+    # Anchor a relative results_dir / db_path to the CONFIG-FILE directory, not the launch CWD,
+    # so two worktrees can never collide on a shared launch CWD (the load-bearing anchor for the
+    # per-run lock below — distinct configs ⇒ distinct results_dir ⇒ distinct lock).
+    _absolutize_paths(cfg, args.config)
     if args.cleanup_warmup:
         removed = cleanup_warmup(cfg["results_dir"])
         sys.stdout.write(_common.dumps({"ok": True, "cleaned_warmup": removed}))
@@ -1947,6 +2107,10 @@ def _cli() -> None:
                 f"[resume] window_index→{ws['window_index']} "
                 f"prior_low_streak→{ws['prior_low_streak']}\n"
             )
+    # Take the per-run lock for the whole run (held until this process exits; the OS releases it on
+    # any death). A second run_window on this results_dir refuses to start instead of commingling
+    # state. Kept in a local that outlives main() — dropping it would release the lock mid-run.
+    _run_lock = acquire_run_lock(cfg["results_dir"], cfg.get("run_id"))  # noqa: F841
     result = main(cfg)
     if _warmup_dir:
         result["warmup_workspace"] = _warmup_dir

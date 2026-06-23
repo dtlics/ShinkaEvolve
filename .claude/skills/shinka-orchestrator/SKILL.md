@@ -198,8 +198,10 @@ wait forever for a cluster that is already dead). With the default `window_size`
 window can outlast that threshold, so a deploy-and-yield is exactly what dies. While a cluster
 is backgrounded, therefore, do NOT yield into a long idle: arm a short self-wake **heartbeat**
 — a backgrounded timer of a few minutes that exits and re-invokes you — and on each wake
-confirm `run_window` is still alive and progressing (the process exists; `journal/run.json`
-`updated_at` and `windows.jsonl` advancing), then re-arm; keep the interval well under the
+confirm `run_window` is still alive and progressing by JOURNAL PROGRESS in this run's
+`results_dir` ONLY — `journal/run.json` `updated_at` advancing + `windows.jsonl` gaining
+lines; **never probe or kill by PID / `Get-Process` / `tasklist`** (see "Run identity,
+stopping, recovery" below), then re-arm; keep the interval well under the
 reclaim threshold (~4 min is safe). Stop re-arming only when `run_window`'s own clean-exit
 notification arrives. The heartbeat does NOT detach `run_window` (it stays a harness-tracked
 job, so its exit still wakes you) — it keeps the *session* active so the tracked job is not
@@ -215,6 +217,22 @@ ANY turn while a cluster is backgrounded, run the P0 self-check "is a live heart
 (alongside "did I record a work score?"). Stop re-arming ONLY on `run_window`'s own clean-exit
 wake — a stagnation/taper return is followed by another launched cluster, which must be
 heartbeated again.
+
+**Run identity, stopping, recovery — never touch the OS process.** A run IS its
+`results_dir`: `run_window` holds an exclusive OS lock on `<results_dir>/.run.lock` for its
+whole lifetime (the kernel frees it on ANY death — clean, crash, or kill), and writes
+`<results_dir>/.run_owner.json` for forensics. Therefore — **liveness** is journal progress
+in THIS run's `results_dir` (above), NEVER `Get-Process`/`tasklist`/a PID probe (OS PIDs are
+reused across worktrees, so a PID check or kill can land on ANOTHER session's `run_window`).
+**To stop or pause a running cluster** (e.g. to interrupt for a framework rewrite), write
+`<results_dir>/.stop` (optionally `{"target_run_id": "<id>"}`); it exits 0 at the next window
+boundary — NEVER `Stop-Process`. **To recover a dead/wedged run**, relaunch `--resume`: it
+re-acquires the lock and, if the original is somehow still alive, refuses to start instead of
+double-writing — so a wrong "it's dead" guess is harmless, not a corrupted archive. Two runs
+aimed at one `results_dir` (e.g. a copied config) likewise make the second refuse loudly.
+Don't `cat`/edit `.run.lock` (it is OS-locked). This is what makes concurrent worktree
+sessions independent — distinct configs ⇒ distinct `results_dir` ⇒ distinct lock ⇒ no
+crosstalk, with nothing in your recipe reaching the global PID space.
 
 Diagnostics shape (printed to stdout + appended to `journal/windows.jsonl`):
 
@@ -671,7 +689,10 @@ rewrite from poisoning the run. Helpers: `harness/strategy_store.py`,
    `journal.append_intervention(...)`.
 5. **Measure, STAYING AWAKE.** Run exactly ONE measure window with tracing on so its step
    logs exist: `run_window.py --config <run>/run.json --windows 1 --trace-steps`. Read its
-   `steps.jsonl` — do not go to wait-mode yet. (If the effect needs more than one window,
+   `steps.jsonl` — do not go to wait-mode yet. (You do this at a control-return, so the
+   cluster has already EXITED and the `results_dir` run-lock is free; if you ever need to
+   interrupt a still-running cluster first, write `<results_dir>/.stop` and wait for its clean
+   exit — otherwise the measure window refuses on the held lock, by design.) (If the effect needs more than one window,
    mark it to check next round — rare.) **M39 — a measure window can run for many minutes
    (one full window of eval subprocesses), so survive idle-reclaim the same way the main
    cluster does:** launch it in the BACKGROUND (it returns control by EXITING) and hold the
@@ -841,8 +862,9 @@ a degraded brief whose billed cost is captured). Don't rewrite the transport in 
 **And never manually kill a slow in-flight Azure bg call** (TaskStop / bash-kill) to end it sooner —
 cost books only on a TERMINAL status, so a kill leaks unlogged-but-billed spend; let it ride to the
 3600s wall, deciding for yourself with the knobs you own (reasoning effort, `@medium` vs `@high`,
-prompt scope) how to handle a pathologically slow call. (This is the Azure CALL only; the sanctioned
-`run_window`/measure-window kill + `--resume` recovery is a different thing and stays allowed.)
+prompt scope) how to handle a pathologically slow call. (This is the Azure CALL only. To stop or pause
+a `run_window` cluster, write `<results_dir>/.stop` and let it exit at the next window boundary, then
+`--resume` — never `Stop-Process`/`Get-Process` a run by PID; see "Run identity, stopping, recovery".)
 
 ## The run config (you author this)
 

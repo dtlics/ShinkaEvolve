@@ -1,0 +1,39 @@
+{
+  "results_dir": "results",
+  "run_id": "REPLACE_ME",
+  "budget_usd": 50,
+  "task": {
+    "eval_program_path": "tasks/pbb_code_discovery/evaluate.py",
+    "init_program_path": "tasks/pbb_code_discovery/initial.py",
+    "task_sys_msg": "You are an expert in quantum error-correcting codes, specifically non-CSS PERTURBED bivariate bicycle (PBB) codes. You are improving a Python function generate_candidates(ell, m) that returns a list of candidate 4-tuples (A_terms, B_terms, C_terms, D_terms) of (x_exp, y_exp) monomials over F_2[x,y]/(x^ell-1, y^m-1). A,B are weight-3 base polynomials; C,D are perturbation polynomials added to the z-part of block 1 ([C|D]); C=D=empty gives a CSS code, non-empty C,D give a genuinely non-CSS code. GOAL: maximize the figure of merit FOM = k*d^2/n, where n=2*ell*m physical qubits, k=logical qubits (exact GF(2) rank), d=code distance. The evaluator scores combined_score = the sum over the scored lattices of the best TRUST-ADJUSTED FOM per lattice; higher is better. HARD CONSTRAINTS the evaluator enforces (violations are silently skipped, wasting budget): A and B must each have exactly 3 distinct monomials; C and D must each be NON-EMPTY; all monomials within a polynomial distinct; x-exponents in [0,ell), y-exponents in [0,m); within-block-1 commutativity (A C^T + B D^T) mod 2 must be SYMMETRIC; C must NOT equal D (self-dual perturbation is always distance 2). SCORING SHAPE: codes with d<=4 score 0 (a tiny k/n floor keeps valid-but-low-d strictly above nothing); only codes with d>=5 earn FOM. The evaluator certifies distance EXACTLY where it can (a hash-based exact low-weight check is exact for d<=6 at n<=216 and d<=4 at n>216) and uses symplectic MILP above that; a BP-OSD fallback is heavily DISCOUNTED because it overestimates non-CSS distance, so DO NOT try to win via large speculative distance bounds — only trusted/exact distance counts. RUNTIME CAUTION: keep total candidates per lattice modest (hundreds, not thousands); distance certification is the expensive step, so prefer a focused set of high-quality, commutativity-valid candidates over brute-force enumeration. The current best published non-CSS PBB FOM is 6.0 ([[72,12,6]]); beating it at ANY lattice is the objective.",
+    "objective_brief": "Optimize FOM = k*d^2/n for non-CSS perturbed bivariate bicycle (PBB) codes, summed as the best trust-adjusted FOM per scored lattice (lattices (ell,m) in {(6,6),(9,6),(12,6),(15,6),(30,6),(6,3),(3,6)}; n=2*ell*m). A valid candidate is a 4-tuple (A,B,C,D): A,B weight-3 base trinomials, C,D non-empty perturbation polynomials, all exponents in [0,ell)x[0,m), monomials distinct, C != D, and (A C^T + B D^T) symmetric over F_2 (commutativity). Building blocks: the x/y base patterns and two known d>=6 bases at (6,6) live in initial.py's KNOWN_CODES / BASE_AB_PAIRS as starting points; the open problem is discovering NEW (A,B) bases whose CSS skeleton already has d>=3 and then tuning compact (2-3 term) C,D that satisfy commutativity. Hard gate: distance d<=4 scores 0; only d>=5 with EXACT or TRUSTED certification (not a discounted BP-OSD bound) contributes. Larger lattices have more room for high d (e.g. d=10 at n=180,k=12 -> FOM 6.7 beats the current best 6.0).",
+    "language": "python",
+    "eval_time": "00:32:00"
+  },
+  "db_config": {"num_islands": 4, "archive_size": 40, "parent_selection_lambda": 10.0},
+  "evo": {
+    "window_size": 10,
+    "patch_types": ["diff", "full", "cross", "fix"],
+    "patch_type_probs": [0.55, 0.3, 0.1, 0.05],
+    "llm_models": ["azure-gpt-5.4-mini", "azure-gpt-5.5"],
+    "llm_dynamic_selection_kwargs": {"cost_aware_coef": 0.25, "epsilon": 0.2},
+    "reasoning_effort": "medium",
+    "max_patch_attempts": 3,
+    "reward_mode": "absolute",
+    "auto_meta": true,
+    "meta_model": "azure-gpt-5.5",
+    "meta_reasoning_effort": "medium",
+    "repair_trigger_fraction": 0.20,
+    "repair_attempt_cap": 2,
+    "repair_escalation_model": null,
+    "embedding_model": "azure-text-embedding-3-small",
+    "enable_novelty": true,
+    "novelty_embed_mode": "diff",
+    "code_embed_sim_threshold": 0.99,
+    "stagnation_abs_floor": 0.001,
+    "stagnation_rel_frac": 0.05,
+    "consecutive_required": 2
+  },
+  "cadence": {"mode": "until_decision", "base_low": 5, "low_threshold": 1, "early_phase_windows": 5},
+  "window_state": {"window_index": 0, "prior_low_streak": 0}
+}

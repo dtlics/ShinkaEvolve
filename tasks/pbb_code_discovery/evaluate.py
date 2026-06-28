@@ -95,16 +95,18 @@ MAX_DISTANCE_PER_LATTICE: int = int(os.environ.get("PBB_MAX_DIST_PER_LATTICE", "
 MAX_CANDIDATES_PER_LATTICE: int = int(os.environ.get("PBB_MAX_CANDIDATES_PER_LATTICE", "3000"))
 # BP-OSD trial budget handed to the worker (only used in the fallback path).
 NUM_TRIALS: int = int(os.environ.get("PBB_NUM_TRIALS", "1000"))
-# Distance-pool worker count (each worker is single-threaded).
-NUM_WORKERS: int = int(os.environ.get("PBB_NUM_WORKERS", str(max(1, min((os.cpu_count() or 4) // 2, 16)))))
-# Whole-eval wall-clock budget; ~matches config_noncss.yaml evaluator timeout (1500 s).
-# The harness task.eval_time MUST exceed this (the shipped config uses 00:32:00 = 1920 s).
-EVAL_WALLCLOCK_BUDGET_S: float = float(os.environ.get("PBB_EVAL_WALLCLOCK_BUDGET_S", str(1500)))
-# Ceiling on the parallel distance phase. A ProcessPoolExecutor cannot cancel an already-RUNNING
-# worker, so the real distance-phase time can overshoot this by up to one max single-task runtime
-# (~370 s: <1 s hash + 360 s MILP budget at n=360). Invariant:
-#   pool_timeout + max_task  <  EVAL_WALLCLOCK_BUDGET_S  <  eval_time   (1000 + 370 < 1500 < 1920).
-DISTANCE_POOL_TIMEOUT_S: float = float(os.environ.get("PBB_DISTANCE_POOL_TIMEOUT_S", str(1000)))
+# Distance-pool worker count (each worker is single-threaded). Default = cpu_count()-4 (~20 here),
+# so more codes run concurrently across the larger per-code MILP budget.
+NUM_WORKERS: int = int(os.environ.get("PBB_NUM_WORKERS", str(max(1, (os.cpu_count() or 8) - 4))))
+# Whole-eval wall-clock budget (build all 7 lattices + distance + score). Sized for a ~40 min eval:
+# every code's MILP is capped at MILP_PER_CODE_CAP_S (2200 s) in the worker, and ~20 workers run the
+# slow (30,6)/(12,6) codes concurrently, so the whole eval lands ~37-39 min. Harness task.eval_time
+# MUST exceed this -- set run.json eval_time to ~00:45:00 (2700 s).
+EVAL_WALLCLOCK_BUDGET_S: float = float(os.environ.get("PBB_EVAL_WALLCLOCK_BUDGET_S", str(2400)))
+# Ceiling on the parallel distance phase. Set just above the per-code cap (2200 s) so every task
+# finishes on its own budget before this fires (no collect-and-drop overshoot in the normal case);
+# this is a backstop. Invariant: per_code_cap (2200) < pool_timeout (2300) < EVAL_WALLCLOCK (2400) < eval_time.
+DISTANCE_POOL_TIMEOUT_S: float = float(os.environ.get("PBB_DISTANCE_POOL_TIMEOUT_S", str(2300)))
 # Per-call wall-clock cap on the candidate's generate_candidates (build-phase backstop: a hung or
 # infinite generator becomes a clean per-lattice skip instead of a harness SIGKILL). Realistically
 # generate_candidates runs in seconds; this only fires on a pathological mutation.

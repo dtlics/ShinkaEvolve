@@ -38,10 +38,11 @@ live under ``private``; only the trust-adjusted view reaches the inner loop via
 
 RUNTIME: ~2-25 min depending on what the candidate proposes. The hash check is
 the workhorse (~3s/code at n=72, up to ~2min at n=216); MILP only fires for
-genuinely high-d codes or n=360. Distance runs in parallel across all
-lattice x top-k tasks via a spawn ProcessPoolExecutor (per-future isolation, so
-one ldpc C-extension segfault cannot sink the batch). Env knobs below tune the
-budget; defaults match config_noncss.yaml (1500 s evaluator timeout).
+genuinely high-d codes or n=360. Distance runs over a spawn ProcessPoolExecutor
+with the MILP tier decomposed PER LOGICAL (one job per (code, logical) so cores
+stay saturated), aggregated in the driver (_run_distance); BP-OSD runs in a
+separate pool so one ldpc C-extension segfault cannot sink the MILP batch. Env
+knobs below tune the budget; each worker is pinned to 1 thread (OMP_NUM_THREADS=1).
 
 Deps (shinka env): qldpc, galois, ldpc, scipy, sympy, numpy (see README).
 """
@@ -64,6 +65,14 @@ _TASK_DIR = os.path.dirname(os.path.abspath(__file__))
 if _TASK_DIR not in sys.path:
     sys.path.insert(0, _TASK_DIR)
 os.environ["PYTHONPATH"] = _TASK_DIR + os.pathsep + os.environ.get("PYTHONPATH", "")
+
+# Pin BLAS / OpenMP / ldpc to ONE thread PER PROCESS. The distance stage runs many worker
+# processes (the per-logical pool); if each worker's numpy/scipy/ldpc also fanned a single op
+# across all cores, N workers would oversubscribe (N x ~all-core threads thrash). One thread per
+# process => N workers use N cores cleanly. Spawn children inherit these via os.environ. MUST be
+# set BEFORE the first numpy/scipy/ldpc import below. Use setdefault so an explicit env wins.
+for _thr_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_thr_var, "1")
 
 from qcode_eval.pbb_code import build_pbb_code, get_pbb_params_fast
 from qcode_eval._noncss_distance_worker import distance_worker
@@ -95,18 +104,36 @@ MAX_DISTANCE_PER_LATTICE: int = int(os.environ.get("PBB_MAX_DIST_PER_LATTICE", "
 MAX_CANDIDATES_PER_LATTICE: int = int(os.environ.get("PBB_MAX_CANDIDATES_PER_LATTICE", "3000"))
 # BP-OSD trial budget handed to the worker (only used in the fallback path).
 NUM_TRIALS: int = int(os.environ.get("PBB_NUM_TRIALS", "1000"))
-# Distance-pool worker count (each worker is single-threaded). Default = cpu_count()-4 (~20 here),
-# so more codes run concurrently across the larger per-code MILP budget.
-NUM_WORKERS: int = int(os.environ.get("PBB_NUM_WORKERS", str(max(1, (os.cpu_count() or 8) - 4))))
-# Whole-eval wall-clock budget (build all 7 lattices + distance + score). Sized for a ~40 min eval:
-# every code's MILP is capped at MILP_PER_CODE_CAP_S (2200 s) in the worker, and ~20 workers run the
-# slow (30,6)/(12,6) codes concurrently, so the whole eval lands ~37-39 min. Harness task.eval_time
-# MUST exceed this -- set run.json eval_time to ~00:45:00 (2700 s).
-EVAL_WALLCLOCK_BUDGET_S: float = float(os.environ.get("PBB_EVAL_WALLCLOCK_BUDGET_S", str(2400)))
-# Ceiling on the parallel distance phase. Set just above the per-code cap (2200 s) so every task
-# finishes on its own budget before this fires (no collect-and-drop overshoot in the normal case);
-# this is a backstop. Invariant: per_code_cap (2200) < pool_timeout (2300) < EVAL_WALLCLOCK (2400) < eval_time.
-DISTANCE_POOL_TIMEOUT_S: float = float(os.environ.get("PBB_DISTANCE_POOL_TIMEOUT_S", str(2300)))
+# Distance-pool worker count (each worker is single-threaded HiGHS / BP-OSD). The
+# distance stage now decomposes per-LOGICAL, so the pool stays saturated even when
+# few codes survive the k-screen; leave 4 cores for the driver, the harness and the
+# OS (cpu-4 ~= 20 on this 24-core host). Override with PBB_NUM_WORKERS.
+NUM_WORKERS: int = int(os.environ.get("PBB_NUM_WORKERS", str(max(1, (os.cpu_count() or 5) - 4))))
+# Whole-eval wall-clock budget (50%-bumped from 1500). The harness task.eval_time MUST exceed
+# this (the shipped config uses 00:48:00 = 2880 s).
+EVAL_WALLCLOCK_BUDGET_S: float = float(os.environ.get("PBB_EVAL_WALLCLOCK_BUDGET_S", str(2250)))
+# Ceiling on the parallel distance phase (collect-and-drop on timeout), 50%-bumped from 1000. The
+# unit of work is ONE per-logical ILP solve (<= per-logical cap, <= 90 s at n=360). A
+# ProcessPoolExecutor cannot cancel an already-RUNNING worker, but the driver shuts the pool down
+# with cancel_futures=True, so the overshoot past this ceiling is bounded by ONE per-logical cap
+# (<= 90 s) plus a final BP-OSD pass (its own pool, also deadline-guarded). Invariant:
+#   pool_timeout + max_task  <  EVAL_WALLCLOCK_BUDGET_S  <  eval_time   (1500 + 90 < 2250 < 2880).
+DISTANCE_POOL_TIMEOUT_S: float = float(os.environ.get("PBB_DISTANCE_POOL_TIMEOUT_S", str(1500)))
+# Per-CODE MILP budget is measured as CPU-TIME (the SUM of that code's logical solve-times), NOT
+# wall-clock -- so a code is only charged for compute it actually used, never for time its logicals
+# spent QUEUED behind other codes in the shared pool (that wall-clock charge previously starved
+# slow codes under contention). Budget = min(2k * per_logical, MILP_PER_CODE_CAP_S): enough to
+# examine every one of the 2k logicals, capped so a pathological high-k code can't dominate.
+MILP_PER_CODE_CAP_S: float = float(os.environ.get("PBB_MILP_PER_CODE_CAP_S", str(1800)))
+
+
+def _per_logical_cap(n: int) -> int:
+    """Per-logical symplectic-MILP timeout (seconds), adaptive by code size (50%-bumped)."""
+    if n <= 108:
+        return 22
+    if n <= 216:
+        return 45
+    return 90
 # Per-call wall-clock cap on the candidate's generate_candidates (build-phase backstop: a hung or
 # infinite generator becomes a clean per-lattice skip instead of a harness SIGKILL). Realistically
 # generate_candidates runs in seconds; this only fires on a pathological mutation.
@@ -261,65 +288,245 @@ def _build_and_select(
     return per_lattice_top, per_lattice_rest, total, errors
 
 
-# --- Parallel 3-tier distance (spawn pool, per-future isolation) ----------------
+# --- Parallel 3-tier distance: per-LOGICAL MILP over a shared spawn pool ---------
 
 def _run_distance(tasks: list[tuple], num_workers: int, pool_timeout: float, deadline: float) -> list[dict]:
-    """Run distance_worker over all tasks in a spawn ProcessPoolExecutor.
+    """Certify distance for every code, decomposing the MILP tier per-LOGICAL.
 
-    spawn + individual futures so one worker dying (ldpc's BpOsdDecoder can
-    segfault on degenerate non-CSS matrices) does not sink the batch. On pool
-    TIMEOUT we collect-and-drop (keep what finished); on pool START failure we
-    fall back to sequential, wall-clock guarded by `deadline`.
+    Three phases over a SHARED spawn pool (plus a separate BP-OSD pool):
+
+      A. Hash, per CODE (parallel). ``hash_stage_worker``: EXACT codes (d<=6 at
+         n<=216 / d<=4 at n>216) short-circuit; survivors hand back their stabilizer
+         + logicals arrays.
+      B. MILP, per LOGICAL (parallel, same pool). One job per (code, logical). A
+         parent-side accumulator does min-over-logicals, all-optimal => milp_exact,
+         a w<=4 early-reject, and a per-CODE CPU-TIME budget = min(2k * per_logical,
+         MILP_PER_CODE_CAP_S) -- the SUM of that code's logical solve-times, so a code
+         is charged only for compute it used, never for time spent QUEUED (no
+         contention starvation). Hitting the budget cancels its still-QUEUED logical
+         futures. Round-robin-by-logical submission + a bounded in-flight window keep
+         every code covered and the queued-pickle memory small.
+      C. BP-OSD, per CODE (parallel, SEPARATE pool). Fallback for non-exact,
+         non-rejected codes -- isolated so an ldpc ``BpOsdDecoder`` segfault
+         (BrokenProcessPool) cannot poison in-flight MILP work.
+
+    Aggregation reproduces ``distance_worker``'s exactly-4 result-dict shapes
+    (hash exact_w{d} / milp_exact / milp+bposd / bposd); each code yields AT MOST
+    ONE result row. Collect-and-drop on the global cutoff (= min(deadline,
+    start+pool_timeout)). Falls back to the verbatim sequential ``distance_worker``
+    only if the shared pool fails catastrophically (e.g. spawn bootstrap error).
     """
     if not tasks:
         return []
 
-    import concurrent.futures
+    import concurrent.futures as cf
     import multiprocessing as mp
+    from collections import deque
+    from concurrent.futures.process import BrokenProcessPool
 
-    results: list[dict] = []
-    nw = max(1, min(num_workers, len(tasks)))
+    from qcode_eval._parallel_distance import (
+        hash_stage_worker, milp_logical_worker, bposd_stage_worker,
+        assemble_milp_exact_result, assemble_reject_result,
+    )
+
+    now = time.monotonic
+    cutoff = min(deadline, now() + pool_timeout)
+    nw = max(1, num_workers)
+    reject_w = MIN_RELEVANT_D - 1            # d <= 4 -> fom 0 -> reject
+
+    results_by_cid: dict[int, dict] = {}
+    accs: dict[int, dict] = {}               # cid -> accumulator
+    needs_bposd: list[int] = []              # cids that fall through to Phase C
+    pool_ok = True
+    ctx = mp.get_context("spawn")
+
+    pool = cf.ProcessPoolExecutor(max_workers=nw, mp_context=ctx)
     try:
-        ctx = mp.get_context("spawn")
-        with concurrent.futures.ProcessPoolExecutor(max_workers=nw, mp_context=ctx) as pool:
-            futures = {pool.submit(distance_worker, t): t for t in tasks}
-            collected: set = set()
-            try:
-                for fut in concurrent.futures.as_completed(futures, timeout=pool_timeout):
-                    collected.add(fut)
-                    try:
-                        results.append(fut.result())
-                    except Exception:
-                        pass  # individual worker failure -> drop that one task
-            except concurrent.futures.TimeoutError:
-                # Pool timed out. `collected` holds every future as_completed already yielded
-                # (result appended, or its exception swallowed) -> skip those to avoid re-handling.
-                # Keep any future that finished but was not yet yielded; cancel the rest. NOTE:
-                # cancel() only stops NOT-yet-started futures — an already-running worker is awaited
-                # by the `with` block's shutdown, so this can overshoot pool_timeout by up to one
-                # max single-task runtime (bounded against EVAL_WALLCLOCK_BUDGET_S by the constant).
-                for fut in futures:
-                    if fut in collected:
+        # ---------------- Phase A: hash, per code ----------------
+        hash_futs = {
+            pool.submit(hash_stage_worker, (cid, t[0], t[1], t[2], t[3], t[4], t[5])): cid
+            for cid, t in enumerate(tasks)
+        }
+        try:
+            for fut in cf.as_completed(hash_futs, timeout=max(0.1, cutoff - now())):
+                cid = hash_futs[fut]
+                try:
+                    out = fut.result()
+                except BrokenProcessPool:
+                    raise
+                except Exception:
+                    continue
+                tag = out[0]
+                if tag == "EXACT":
+                    results_by_cid[cid] = out[2]
+                elif tag == "NEEDS_MILP":
+                    _, _, base, stab, logicals = out
+                    num_logicals = int(logicals.shape[0])
+                    cap = _per_logical_cap(base["n"])
+                    if num_logicals == 0:
+                        # No logicals -> straight to BP-OSD (milp_worked=False).
+                        accs[cid] = {"base": base, "status": "needs_bposd",
+                                     "d_milp": base["n"], "milp_worked": False,
+                                     "num_trials": tasks[cid][6]}
+                        needs_bposd.append(cid)
+                    else:
+                        accs[cid] = {
+                            "base": base, "stab": stab, "logicals": logicals,
+                            "num_logicals": num_logicals, "n": base["n"], "k": base["k"],
+                            "tpl": cap,
+                            # CPU-time budget (sum of this code's solve-times), not wall-clock.
+                            "cpu_budget": min(num_logicals * cap, MILP_PER_CODE_CAP_S),
+                            "cpu_used": 0.0, "n_returned": 0, "n_optimal": 0,
+                            "d_best": base["n"], "any_found": False,
+                            "status": "pending", "num_trials": tasks[cid][6],
+                        }
+                # tag == "ERROR" -> drop the code
+        except cf.TimeoutError:
+            pass  # hash phase hit the cutoff -> drop unfinished hash codes
+        # Free pool capacity held by any still-pending hash jobs before Phase B.
+        for f in hash_futs:
+            if not f.done():
+                f.cancel()
+
+        # ---------------- Phase B: MILP, per logical ----------------
+        milp_accs = {cid: a for cid, a in accs.items() if a["status"] == "pending"}
+        if milp_accs and now() < cutoff:
+            cid_order = list(milp_accs.keys())
+            maxL = max(a["num_logicals"] for a in milp_accs.values())
+            job_queue: deque = deque()
+            for lidx in range(maxL):                       # round-robin by logical index
+                for cid in cid_order:
+                    if lidx < milp_accs[cid]["num_logicals"]:
+                        job_queue.append((cid, lidx))
+
+            window = max(1, 2 * nw)
+            inflight: dict = {}                            # future -> (cid, lidx)
+
+            def _cancel_code(cid: int) -> None:
+                for f in [f for f, (c, _l) in inflight.items() if c == cid]:
+                    if f.cancel():
+                        inflight.pop(f, None)
+
+            def _finalize(cid: int, a: dict) -> None:
+                if a["status"] != "pending":
+                    return
+                if a["n_optimal"] == a["num_logicals"]:
+                    a["status"] = "exact"
+                else:
+                    a["status"] = "needs_bposd"
+                    a["milp_worked"] = a["any_found"]
+                    a["d_milp"] = a["d_best"] if a["any_found"] else a["n"]
+                    needs_bposd.append(cid)
+
+            def _submit_next() -> None:
+                while job_queue and len(inflight) < window:
+                    cid, lidx = job_queue.popleft()
+                    a = milp_accs[cid]
+                    if a["status"] != "pending":
                         continue
+                    fut = pool.submit(
+                        milp_logical_worker,
+                        (cid, lidx, a["stab"], a["logicals"][lidx], a["tpl"]),
+                    )
+                    inflight[fut] = (cid, lidx)
+
+            _submit_next()
+            while inflight:
+                remaining = cutoff - now()
+                if remaining <= 0:
+                    break                                  # global cutoff -> drop still-pending codes
+                done, _ = cf.wait(list(inflight.keys()), timeout=remaining,
+                                  return_when=cf.FIRST_COMPLETED)
+                if not done:
+                    break                                  # hit cutoff
+                for fut in done:
+                    cid, lidx = inflight.pop(fut)
+                    a = milp_accs[cid]
+                    if a["status"] != "pending":
+                        continue                           # straggler for a finalized code
+                    try:
+                        _cid, _lidx, w, optimal, solve_s = fut.result()
+                    except BrokenProcessPool:
+                        raise
+                    except Exception:
+                        w, optimal, solve_s = None, False, 0.0
+                    a["n_returned"] += 1
+                    a["cpu_used"] += float(solve_s or 0.0)   # CPU-time, immune to queue-wait
+                    if w is not None:
+                        a["any_found"] = True
+                        if w < a["d_best"]:
+                            a["d_best"] = w
+                        if optimal:
+                            a["n_optimal"] += 1
+                    if w is not None and w <= reject_w:           # priority 1: early-reject d<=4
+                        a["status"] = "rejected"
+                        _cancel_code(cid)
+                    elif a["n_returned"] >= a["num_logicals"]:    # 2: every logical back
+                        _finalize(cid, a)
+                    elif a["cpu_used"] >= a["cpu_budget"]:        # 3: per-code CPU budget spent
+                        _finalize(cid, a)
+                        _cancel_code(cid)
+                _submit_next()
+
+            # Terminal Phase-B outcomes -> one row each.
+            for cid, a in milp_accs.items():
+                if a["status"] == "exact":
+                    results_by_cid[cid] = assemble_milp_exact_result(a["base"], a["d_best"], 0.0)
+                elif a["status"] == "rejected":
+                    results_by_cid[cid] = assemble_reject_result(a["base"], a["d_best"], 0.0)
+                # "pending" (dropped on cutoff) -> no row; "needs_bposd" -> Phase C
+    except Exception:
+        pool_ok = False                                    # spawn bootstrap / broken pool
+    finally:
+        # cancel_futures=True so a cutoff break does not await the whole pool queue;
+        # overshoot is bounded by the <= nw running solves (each <= per-logical cap).
+        pool.shutdown(wait=True, cancel_futures=True)
+
+    # ---------------- Phase C: BP-OSD fallback (SEPARATE pool) ----------------
+    if pool_ok and needs_bposd and now() < cutoff:
+        bposd_tasks = []
+        for cid in needs_bposd:
+            a = accs[cid]; t = tasks[cid]
+            bposd_tasks.append((cid, t[0], t[1], t[2], t[3], t[4], t[5],
+                                a["num_trials"], a["d_milp"], a["milp_worked"]))
+        bpool = cf.ProcessPoolExecutor(max_workers=nw, mp_context=ctx)
+        try:
+            bfuts = {bpool.submit(bposd_stage_worker, bt): bt[0] for bt in bposd_tasks}
+            try:
+                for fut in cf.as_completed(bfuts, timeout=max(0.1, cutoff - now())):
+                    try:
+                        cid, res = fut.result()
+                    except Exception:
+                        continue                           # one segfault/failure -> drop that code
+                    if res is not None:
+                        results_by_cid[cid] = res
+            except cf.TimeoutError:
+                for fut in bfuts:
                     if fut.done() and not fut.cancelled():
                         try:
-                            results.append(fut.result())
+                            cid, res = fut.result()
+                            if res is not None:
+                                results_by_cid[cid] = res
                         except Exception:
                             pass
-                    else:
-                        fut.cancel()
-    except Exception:
-        # Pool failed to start (e.g. spawn bootstrap error) -> sequential fallback, wall-clock
-        # guarded: drop the remaining tasks once `deadline` passes rather than running ~70 tasks
-        # (each up to ~370 s) serially and getting SIGKILLed by the harness.
-        for t in tasks:
-            if time.monotonic() > deadline:
+        except Exception:
+            pass                                           # pool broke -> drop remaining bposd codes
+        finally:
+            bpool.shutdown(wait=True, cancel_futures=True)
+
+    # ---- Sequential fallback ONLY if the shared pool failed catastrophically ----
+    if not pool_ok:
+        for cid, t in enumerate(tasks):
+            if cid in results_by_cid:
+                continue
+            if now() > deadline:
                 break
             try:
-                results.append(distance_worker(t))
+                results_by_cid[cid] = distance_worker(t)
             except Exception:
                 pass
-    return results
+
+    return list(results_by_cid.values())
 
 
 # --- Feedback / metrics assembly ------------------------------------------------

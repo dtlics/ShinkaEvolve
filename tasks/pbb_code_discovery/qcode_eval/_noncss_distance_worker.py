@@ -98,18 +98,12 @@ def distance_worker(task: tuple) -> dict:
     # Partial results are valid upper bounds (min over solved logicals).
     # early_stop=None iterates every logical, which is required when the goal
     # is to certify exactness rather than reject high-d candidates.
-    # per-logical doubled (15/30/60 -> 30/60/120); total = 2k*per_logical so every one of the 2k
-    # cosets gets its full per-logical budget (full coverage). Capped at MILP_PER_CODE_CAP_S so a
-    # single big code (e.g. (30,6): 2k*120 = 40 min) can't blow the ~40 min whole-eval budget;
-    # raise/lower this one number to trade eval duration vs (30,6) coverage.
-    MILP_PER_CODE_CAP_S = 2200
     if n <= 108:
-        milp_tpl = 30
+        milp_tpl, milp_total = 15, 90
     elif n <= 216:
-        milp_tpl = 60
+        milp_tpl, milp_total = 30, 180
     else:
-        milp_tpl = 120
-    milp_total = min(2 * k * milp_tpl, MILP_PER_CODE_CAP_S)
+        milp_tpl, milp_total = 60, 360
 
     try:
         from qcode_eval.distance_milp import compute_distance_milp_symplectic as _milp

@@ -57,8 +57,21 @@ Each certified candidate runs [qcode_eval/_noncss_distance_worker.py](qcode_eval
    `n > 216` (exact `d ≤ 4`). Ground truth; catches the low‑weight logicals BP‑OSD
    misses.
 2. **Symplectic MILP** (HiGHS via `scipy.optimize.milp`) for codes beyond the
-   hash range, with adaptive per‑logical timeouts (15–60 s). Partial results are
-   valid upper bounds (min over solved logicals).
+   hash range, with adaptive per‑logical timeouts (22–90 s). **Decomposed per
+   LOGICAL**: each code's `2k` logical ILP solves are fanned out as individual
+   jobs across a shared spawn pool (so cores stay busy throughout instead of one
+   worker grinding a code's logicals serially), then aggregated in the driver —
+   `d = min` over solved logicals (always a valid upper bound), `milp_exact` only
+   when *every* logical is proven optimal. A per‑code **CPU‑time** budget of
+   `min(2k × per‑logical, 1800 s)` (the *sum* of that code's solve‑times, so a code
+   is never charged for time its logicals spend queued behind others) and a
+   `weight ≤ 4` early‑reject cancel a code's still‑queued logical jobs. Each worker
+   is pinned to 1 thread (`OMP_NUM_THREADS=1`) so the pool doesn't oversubscribe.
+   This is an orchestration change only — the ILP formulation is byte‑faithful (see
+   `qcode_eval/_parallel_distance.py`). Net win: more EXACT certifications at
+   `n ≤ 216` (where MILP can prove optimality), and a tighter honest upper bound at
+   `n = 360` (incumbent‑only) that undercuts the discounted BP‑OSD overestimate via
+   `min(d_milp, d_bp)` — verified end‑to‑end to deflate BP‑OSD‑inflated FOM.
 3. **BP‑OSD fallback** — only if MILP yields nothing. It **overestimates** non‑CSS
    distance (it reports `d ≤ 10` for codes that are truly `d = 6`), so its bounds
    are **heavily discounted** (see trust filter).
@@ -143,11 +156,15 @@ the smoke test confirms this anchor.
 | [qcode_eval/](qcode_eval/) | **Vendored, frozen** construction + distance backbone (Apache‑2.0). Not evolved; candidates never touch it. |
 | [orchestrator_run.json](orchestrator_run.json) | Run‑config starter with an authored `task_sys_msg` + `objective_brief`. |
 
-`qcode_eval/` modules: `bb_code.py` (CSS base), `pbb_code.py` (PBB construction +
-GF(2) symplectic logicals), `distance_bposd_noncss.py` (hash‑exact check +
-achievable‑syndrome BP‑OSD), `distance_milp.py` (symplectic MILP),
-`_noncss_distance_worker.py` (the 3‑tier orchestration; a top‑level importable so
-the spawn pool can pickle it).
+`qcode_eval/` modules — **vendored/frozen** science: `bb_code.py` (CSS base),
+`pbb_code.py` (PBB construction + GF(2) symplectic logicals),
+`distance_bposd_noncss.py` (hash‑exact check + achievable‑syndrome BP‑OSD),
+`distance_milp.py` (symplectic MILP), `_noncss_distance_worker.py` (the per‑code
+3‑tier `distance_worker`, kept as the sequential fallback; top‑level importable so
+the spawn pool can pickle it). **Orchestration only (not vendored):**
+`_parallel_distance.py` (top‑level, spawn‑picklable per‑stage workers +
+result‑assembly helpers for the per‑logical MILP driver — byte‑compatible result
+dicts, verified by `_test_parallel_distance.py`).
 
 ## Dependencies
 
@@ -192,8 +209,13 @@ python orchestrator/harness/run_window.py --config <run>/run.json --until-decisi
 
 The default Campaign‑5 evaluation (all 7 lattices, 10 distance tasks/lattice) is
 ~4× slower than the CSS path — the price of exact non‑CSS distance certification,
-which the user accepts for the paper's true novelty. Each eval is deterministic
-(fixed BP‑OSD seeds, deterministic hash/MILP), so `num_runs=1`.
+which the user accepts for the paper's true novelty. Each eval's **scoring verdicts
+are deterministic** — the EXACT (hash / all‑logicals‑optimal MILP) and `d ≤ 4`‑reject
+outcomes that carry the score are reproducible (fixed BP‑OSD seeds, deterministic
+hash, deterministic ILP), so `num_runs=1`. The only scheduling‑dependent quantity is a
+*partial* MILP upper bound under pool contention (which logicals finished before the
+budget) — but it is always a valid upper bound and only ever feeds the trust‑discounted
+BP‑OSD branch, so it cannot inflate the score.
 
 ### Env knobs (defaults match `config_noncss.yaml`)
 
@@ -202,18 +224,24 @@ which the user accepts for the paper's true novelty. Each eval is deterministic
 | `PBB_LATTICES` | the 7 Campaign‑5 lattices | `"6,6;9,6;..."` — override for a quick run |
 | `PBB_MAX_DIST_PER_LATTICE` | `10` | diverse candidates certified per lattice |
 | `PBB_NUM_TRIALS` | `1000` | BP‑OSD trials (fallback path only) |
-| `PBB_NUM_WORKERS` | `min(cpu//2, 16)` | distance‑pool workers |
-| `PBB_EVAL_WALLCLOCK_BUDGET_S` | `1500` | whole‑eval budget (clean abort, no SIGKILL) |
-| `PBB_DISTANCE_POOL_TIMEOUT_S` | `1000` | distance‑pool ceiling (collect‑and‑drop on timeout) |
+| `PBB_NUM_WORKERS` | `max(1, cpu−4)` | shared hash+MILP (and BP‑OSD) pool workers (≈20 on a 24‑core host); each pinned to 1 thread |
+| `PBB_MILP_PER_CODE_CAP_S` | `1800` | hard cap on a code's MILP **CPU‑time** budget (`min(2k × per‑logical, cap)`, sum of solve‑times — not wall‑clock) |
+| `PBB_EVAL_WALLCLOCK_BUDGET_S` | `2250` | whole‑eval budget (clean abort, no SIGKILL) |
+| `PBB_DISTANCE_POOL_TIMEOUT_S` | `1500` | distance‑pool ceiling (collect‑and‑drop on timeout) |
 | `PBB_GENERATE_TIMEOUT_S` | `120` | per‑call cap on `generate_candidates` (build backstop) |
 
+Per‑logical caps (HiGHS `time_limit` per ILP solve): **22 / 45 / 90 s** for `n≤108 / ≤216 / >216`.
+
 **Budget invariant** (cf. cnot's M8): `pool_timeout + max_task < EVAL_WALLCLOCK_BUDGET_S
-< eval_time`. A `ProcessPoolExecutor` cannot cancel an already‑running worker, so the
-distance phase can overshoot `PBB_DISTANCE_POOL_TIMEOUT_S` by up to one max single‑task
-runtime (~370 s: the 360 s MILP budget at n=360). With the defaults:
-`1000 + 370 = 1370 < 1500 < 1920` (`eval_time = 00:32:00`), so the graceful abort always
-returns a clean score before the harness SIGKILLs. The sequential fallback (used only if the
-spawn pool fails to start) and the build loop are both wall‑clock guarded by the same deadline.
+< eval_time`. The unit of work is ONE per‑logical ILP solve (`max_task ≤ 90 s`, the n>216
+per‑logical cap), not a whole code. A `ProcessPoolExecutor` cannot cancel an already‑running
+worker, but the driver shuts the pool down with `cancel_futures=True`, so a cutoff break does
+not await the whole queue — the overshoot past `PBB_DISTANCE_POOL_TIMEOUT_S` is bounded by the
+`≤ nw` running solves (each `≤ 90 s`), plus a final BP‑OSD pass (its own pool, also
+deadline‑guarded). With the defaults: `1500 + 90 = 1590 < 2250 < 2880`
+(`eval_time = 00:48:00`), so the graceful abort always returns a clean score before the
+harness SIGKILLs. The sequential fallback (used only if the shared spawn pool fails to start)
+and the build loop are both wall‑clock guarded by the same deadline.
 
 ## Operational note (deviation from upstream, not the science)
 

@@ -18,30 +18,31 @@ task's initial code + evaluator, infer the goal, and author the system-message p
 statement (the goal, the hard constraints, the *shape* of the score; the leak-proof design
 lives in the EVALUATOR, with held-out numbers under `private` metrics — not the system
 message), plus an abstract runtime-efficiency caution (no specific numbers).
-When you decide a **discovery round** is warranted: write the query, triage the brief,
+When you decide a **discovery round** is warranted: write the query prompt, triage the brief,
 ground EACH triaged direction (up to 3), seed/ground islands, fold results in. These fire
-**whenever the flow demands them — there is no cadence to them.** (Terminology, anchored
+**whenever the flow demands them — there is no fixed cadence to them.** (Terminology, anchored
 here: a **discovery round** == a **DR round** == a single discovery pass via EXACTLY ONE OF
 **R1** = Azure deep research (`deep_research.py`) OR **R2** = the `subagents/archive-analyst.md`
-multi-agent read. "Azure DR" names R1 specifically; "discovery round / DR round" is the
-umbrella over R1+R2. There is no Azure-only meaning of "DR" at the concept level.)
+multi-agent read (is this subagent really created for DR? or it's just a deep look into the existing archive for framework code chagnes? I understood it as DR cause there was one time it is reported to have looked into the archive and came up with new direction ideas and had a refute subagent to validate each idea. but now looking into its docs I'm not so sure). "Azure DR" names R1 specifically; "discovery round / DR round" is the
+umbrella over R1+R2. There is no Azure-only meaning of "DR" at the concept level. it's a simple rule, if we mention Azure then it's Azure otherwise it's general term)
 
 **OUTER-LOOP / FRAMEWORK-AUDIT — improvement, NOT in the critical path.** Read the logs
 and history to judge whether the deterministic **framework code itself** is flawed, and
-rewrite the mutable strategy code when it is. The canonical case: a model that is never
+rewrite the mutable strategy code when it is. One example case: a model that is never
 being picked — is it *truly bad* (it ran enough and genuinely underperformed) or *locked
 out by a reward/selection flaw* (near-zero selection count but a positive reward the few
-times it ran)? The run continues without this role; it improves the framework over time.
+times it ran)? The run continues without this role, but it improves the framework over time.
+tapering cadency applies to both roles, it applies to the control-return, where the agent checks for both needs for the two hats.
 It runs on the **tapering control-return cadence** below: scrutinize the framework
 frequently early (the code is least proven), and less and less as it proves robust.
 
-## Two rules that make this work
+## Two rules that make this work (is it really the best way to construct/state in a skill as just logic less rules?)
 
 1. **The inner loop's LLM calls go to Azure, never to you.** Every per-window mutation, fix,
    repair, and meta call is made by a `scripts/` subroutine that calls Azure in
    background-poll mode. NEVER "simulate" the per-window loop in your own context — that would
    pay an agent turn (~100×) for a stateless API call and destroy the cost economics. Your
-   tokens are spent on control-return reasoning, the DR query, and two RARE, explicitly carved
+   tokens are spent on control-return reasoning, drafting the DR query prompt, and two RARE, explicitly carved
    exceptions: (i) running your OWN Claude multi-agent DISCOVERY analysis
    (`subagents/archive-analyst.md`, route R2) as a NARROW fallback to an Azure DR call (R1 is
    the near-always default; R2 is permitted only when, for the SAME question, an R1 DR already
@@ -51,9 +52,9 @@ frequently early (the code is least proven), and less and less as it proves robu
    structural pivot. Grounding (ii) is valid ONLY on a technique from an in-interval triaged
    R1/R2 discovery; both are one-off agent decisions on the taper, NOT the per-window loop.
 2. **Do not stop until a termination criterion is met.** A run is a long, consecutive
-   process; the healthiest run is many control-returns read with no intervention. Keep
+   process; the healthiest run is many control-returns read with no need for intervention. Keep
    launching the next cluster. Idleness is not done-ness — only the termination checklist
-   is (see Termination).
+   is (see Termination). Keep equipting the heartbeats when it's not terminated.
 
 ## Safety railguards (enforced in code — NOT strategy knobs you can weaken)
 
@@ -67,7 +68,7 @@ frequently early (the code is least proven), and less and less as it proves robu
   never silently zero the ledger and defeat the cap. The one accepted gap: a boot-time
   embedding cost logged before the first window (on no durable window/intervention/call
   line) is the only spend a recompute cannot recover.
-- **Per-call cost cap (~$10).** Every external LLM call (mutation / meta / DR / fix)
+- **Per-call cost cap (~$10).** Every external LLM call (mutation / meta / DR / fix / grounding)
   carries a per-call max-output-token cap sized so one call cannot exceed ~$10 (pro at its
   50k cap ≈ $9; others incl. `gpt-5.5` at 200k ≈ $6; DR at its 200k cap ≈ $8). This is a
   deliberate runaway guard — do not remove or shrink it.
@@ -91,7 +92,7 @@ This is the single source of truth; the rest of this doc expands each step.
    only for *mid-run* rewrites; FOUNDATION stays off-limits, never the evaluator), then RESTART
    warmup (it auto-resets the workspace) until the window is meaningful and the trace confirms
    it. Then make the S2 keep-or-discard call: `--accept-warmup` to KEEP the approved population
-   (fold it + its spend into the real run) or `--cleanup-warmup` to DISCARD and boot fresh.
+   (fold it + its spend into the real run) or `--cleanup-warmup` to DISCARD and boot fresh. I'd say it's always accept warmup, no such complications
    Warmup's narrow job: confirm the inner loop is mechanically sound (sampler → prompt →
    eval → novelty → record all wired correctly) on a FRESH archive. It cannot reproduce a
    flaw that only emerges with a populated archive — those surface on the real run's
@@ -100,29 +101,28 @@ This is the single source of truth; the rest of this doc expands each step.
 2. **ACTUAL RUN — event-driven; you are woken, you do not poll.** You launch a self-
    caffeinated window-cluster (`run_window.py --until-decision`, background-launched). The
    harness runs windows autonomously and **returns control by exiting** at the cluster
-   boundary; that exit re-invokes you — that exit-and-re-invoke IS the "wake". Initially
+   boundary; that exit re-invokes you — that exit-and-re-invoke IS the "wake". (that was the design but then we found if idle for too long, such background task will be killed, so we use heartbeat to keep "you" awake every a few minutes, but still, when it finishes it will wake you as well as designed) Initially
    control returns after every window; as your recent work tapers it returns less often.
    There is **no max-window cap** — a cluster is bounded only by the budget hard-stop, a
    termination criterion, and stagnation (which always returns control immediately).
    Recover from any kill with `--resume`, and while the cluster is backgrounded hold a short
    self-wake **heartbeat** (see "How you launch the inner loop") so the sandbox does not
-   idle-reclaim the run (keep the lid open / stay on AC; a clamshelled laptop hardware-sleeps
-   regardless).
+   idle-reclaim the run (like this for me to know not the agent doc, in the doc we should say user will know to keep lid open and AC on to avoid accidental hardware kills).
 3. **EACH WINDOW ENDS WITH AN AUTOMATIC META ROUND — run by the harness, not by you.**
    Deterministic code composes the meta prompt from the current archive + the live island
    list and calls the external LLM (default `azure-gpt-5.5` at medium effort). In one shot
-   it returns global directions + a failure caution + ONE differentiated direction per
+   it returns global directions (how is global directions used? maybe we don't need this and in the query prompt we can ask even for some directions that feel like global directions after reading the exisitng archive, the LLM should still categorize them into one or two (better no two for distinctiveness) islands like basically assign it to them) + some common eval failure caution + ONE differentiated list of directions (including what proved to work and what are conceptually promising in the opinion of the meta round LLM) per
    live island, auto-recorded as per-island briefs so islands evolve in different
    directions BY DEFAULT. Meta is NOT an orchestrator action and does NOT count as an
    intervention.
-4. **WHEN CONTROL RETURNS you do two checks on one shared rhythm:** (a) the **framework-
+4. **WHEN CONTROL RETURNS you do two checks (on one shared rhythm, avoid using fancy words like this):** (a) the **framework-
    audit check** (rewrite a mutable strategy file if a flaw is found), and (b) the **discovery
-   check** (run a discovery round — R1 by default, R2 as the narrow fallback — if the stall
+   check** if the archive seems short on fruitful directions (run a discovery round — R1 by default, R2 as the narrow fallback — if the stall
    looks algorithmic and warrants it). Both happen at every control-return. **HARD GATE: a
-   grounding (or any `spawn_island`) is INVALID without an in-interval triaged R1/R2 discovery
-   stub** — a stale stub from a prior interval does NOT satisfy it, and code fails closed when
-   none exists (DEC-7). Run the discovery + grounding BEFORE writing this return's
-   `control_return` row, then **record a work score** for what you just did — recorded AFTER
+   grounding (or any `spawn_island`) is INVALID without an in-interval (between clusters) triaged R1/R2 discovery
+   stub** — a stale stub from a prior interval does NOT satisfy it, (and code fails closed when
+   none exists (DEC-7), don't use this "fails closed" facny words, no idea what you mean, and what is DEC 7, pointless). Run the discovery + grounding BEFORE writing this return's
+   `control_return` row (what is "write the control return row"? and only run any if the checks deems helpful, and if it's framwork code audit change, please reason to a deeper level to make sure the changes are sound), then **record a work score** for what you just did — recorded AFTER
    acting (never let the score you intend to record influence what you choose to do, and so
    your own in-interval stub is strictly newer than the prior interval boundary, not this row).
 5. **THE TAPER (two-stage).** STAGE 1 — the **early phase**: for the first
@@ -132,10 +132,10 @@ This is the single source of truth; the rest of this doc expands each step.
    size — high recent work → keep checking every window; as low work persists the cluster grows
    (base_low, then doubling: 5 → 10 → 20 → 40 …) with no ceiling. The low-streak is counted FROM
    THE END OF THE EARLY PHASE, so the early per-window returns don't make the first steady cluster
-   jump (without that, 5 early low returns would launch a ~80-window cluster). The same cluster
+   jump (without that, 5 early low-intervention returns would launch a ~80-window cluster). The same cluster
    size is BOTH the framework-audit cadence AND the DR-check cadence — one shared rhythm. If you
    forget to record a work score the taper has no signal and conservatively wakes you every window
-   (and the harness prints a reminder). Set `cadence.early_phase_windows:0` to disable Stage 1.
+   (and the harness prints a reminder). Set `cadence.early_phase_windows:0` to disable Stage 1. I'm not sure if we should write about such ad-hoc fixed in the general teaching doc. and the tapering is guaranteed by code against the recorded score instead of just doc teaching right? and the streak resets once we encounter a heavy intervention, like we could probably at 40 already but one heavy intervention sets it back to 5. and no matter how long the cadency is, keep using heartbeat, it's important to prevent from processes getting killed.
 
 ## The work score (record it after every control-return)
 
@@ -152,9 +152,9 @@ work_discovery, work_grounding, work_score, intervened}`:
 - `work_grounding` — GROUNDING magnitude: 0 none, 1 combined into an existing program (= path (ii)
   SIMILAR: `archive_record` `parent_id`=closest, NO spawn), 2 a new-island root (= path (i) NOVEL:
   `archive_record` `parent_id`=null THEN `spawn_island.py`). Settable ONLY when `work_discovery>0`
-  THIS interval supplied the technique (grounding cannot be logged without the discovery it grounded).
+  the grounded tech is from the discovery of this between-cluster interval (grounding cannot be logged without the discovery it grounded).
 - `work_score` — `work_audit + work_discovery + work_grounding` (the scalar the taper reads
-  via `journal.recent_work_score`; `journal.work_low_streak` counts the recent low-work
+  via `journal.recent_work_score`; `journal.work_low_streak` (is the journal positions still fine after my session isolation changes?) counts the recent low-work
   returns the escalation uses).
 - `stagnation_flag` — copy this return's window-diagnostics value (the stall state NOW).
 - `intervened` — `work_audit>0 or work_discovery>0` (did you actually act this return?).
@@ -180,7 +180,7 @@ cluster boundary (no turn of yours per window). Background-launch it so the run 
 your turn ending and re-invokes you on exit; recover any kill with `--resume`. A fresh
 subprocess each call is how a deployed code rewrite takes effect — the next invocation
 imports the new file. (`--windows 1` runs exactly one bounded window; `--windows 1
---trace-steps` is the framework-audit MEASURE window — see the rewrite cycle.)
+--trace-steps` is the framework-audit MEASURE window — see the rewrite cycle.) this is cool, each framework code audit change is followed by just one window that the agent does a quick audit at the end and see if the framework changes are properly working, we should mention this in other parts of the docs as well.
 
 `run_window` self-caffeinates against host idle-sleep for its lifetime (auto-released on
 exit) — on macOS via `PreventUserIdleSystemSleep`, on Windows via
@@ -211,7 +211,7 @@ held alive for hours died the moment a long reasoning stretch lapsed the timer).
 heartbeat wake, RE-ARM THE NEXT TIMER FIRST — before the liveness check or any other work. Re-arm
 UNCONDITIONALLY: even on a wake that found nothing new, and *especially* right before a long
 reasoning/rewrite turn (arm the next timer immediately before you start thinking). Before ending
-ANY turn while a cluster is backgrounded, run the P0 self-check "is a live heartbeat pending?"
+ANY turn while a cluster is backgrounded, run the (why write P0 here? I don't see what it's referring to, and there's a lof of them stale stuff in the docs) self-check "is a live heartbeat pending?"
 (alongside "did I record a work score?"). Stop re-arming ONLY on `run_window`'s own clean-exit
 wake — a stagnation/taper return is followed by another launched cluster, which must be
 heartbeated again.
@@ -251,7 +251,7 @@ when a window stays "low" for `consecutive_required` windows — low = best-scor
 floor, so a small-but-real gain doesn't trip it; the floor is the opening-phase bar when
 the best score is ≈ 0). Carry `low_streak` → next config's `window_state.prior_low_streak`
 and bump `window_state.window_index` (or just pass `--resume`, which reads both from the
-journal).
+journal). I didn't check the details here
 
 ## Warmup (your first real job after authoring the goal)
 
@@ -275,22 +275,11 @@ it is one of the two **terminal** choices once the trace looks meaningful. Warmu
 `--iters`), NOT one — a single iteration can't surface the sampler-spread / bandit-collapse /
 brief-differentiation signals warmup exists to observe.
 
-**Keep vs discard — the S2 decision you make when the trace is clean.** Failed/abandoned
+**Keep vs discard — the S2 (what is this S2, clean all such unnecessary names) decision you make when the trace is clean.** Failed/abandoned
 warmup attempts are throwaway (the next `--warmup` auto-resets them). For the FINAL attempt you
-judge mechanically sound, you pick ONE of:
-- `--accept-warmup` — **KEEP** it: folds the warmup archive into the real `programs.sqlite` (the
-  real run then CONTINUES from that warmed, reviewed population instead of re-seeding from
-  scratch) and folds its spend into the real ledger as a durable `warmup_accepted` intervention
-  (so the budget cap counts the tokens already burned). It then cleans up the warmup workspace.
-  Run it **BEFORE** the first real window — it refuses if the real archive already exists (it
-  will not clobber a started run) and refuses an all-tombstoned warmup (nothing worth keeping).
-- `--cleanup-warmup` — **DISCARD** it: deletes the workspace and the real run boots from a fresh
-  seed. Use this when the warmed population isn't worth carrying (e.g. you only wanted to confirm
-  the mechanism). It reports the REAL removal result (L80): a Windows lock (an open sqlite
-  handle) makes it warn + return failure rather than falsely claim success — close inspectors
-  first.
+judge mechanically sound we just (no such unnecessary --cleanup-xxx tags) **KEEP** it: folds the warmup archive into the real `programs.sqlite` (the real run then CONTINUES from that warmed, reviewed population instead of re-seeding from scratch) and folds its spend into the real ledger as a durable `warmup_accepted` intervention (so the budget cap counts the tokens already burned). It then cleans up the warmup workspace. Run it **BEFORE** the first real window — it refuses if the real archive already exists (it will not overtake (don't use fancy words, just plain simple english) a started run) and refuses an all-tombstoned warmup (nothing worth keeping).
 
-Read the per-step trace after each warmup window and stop-correct-restart on a bad step.
+Read the per-step trace in the warmup window and stop-correct-restart on a bad step.
 Never fix the evaluator — if warmup fails because of the evaluator, STOP and report (the
 evaluator is foundation). Common flaw-signals (read off `steps.jsonl` + the window diag):
 
@@ -333,7 +322,7 @@ evaluator is foundation). Common flaw-signals (read off `steps.jsonl` + the wind
 - **A measure window with empty / NaN diagnostics or a non-zero exit** → the window
   crashed → treat as no-usable-data and revert (the rewrite cycle fails closed).
 
-## Boot: author the goal + objective
+## Boot: author the goal + objective (this should be integrated into the previous section)
 
 1. **Author `task_sys_msg` — your first real job.** Read the task's `initial.<ext>` and
    `evaluate.py`, then write a precise problem statement: the goal, the gate set / hard
@@ -364,7 +353,7 @@ evaluator is foundation). Common flaw-signals (read off `steps.jsonl` + the wind
    "available ops" field, which would duplicate this slot and confuse the model. It costs tokens
    only when authored and is byte-identical (`""`) when null. (The shinka-setup / shinka-convert
    skills carry the leak-proof-evaluator design.)
-3. **Tune the proposer `reasoning_effort` — you OWN this knob; never carry the shipped default
+3. (this knob is made aware from other sections of docs, not in this initialization part)**Tune the proposer `reasoning_effort` — you OWN this knob; never carry the shipped default
    just because it shipped or a run prompt said "keep defaults".** Thinking-heavy proposers are
    GOOD for reliability on hard/algorithmic tasks, but a cheap model at `medium` can emit
    10–35k reasoning tokens for a ~3k-token patch and wedge a single mutate call 50–90 min / a
@@ -406,7 +395,7 @@ redesign is a human's job between runs).
 **POLICY — freely rewritable, always through the rewrite cycle (validate → snapshot →
 deploy → measure → revert).** All `scripts/*.py` flagged MUTABLE in the subroutine table.
 
-## The concern map (change related code together, compatibly)
+## The concern map (change related code together, compatibly) (didn't check the deatils) (and I realize this skill is full of ## stuff, while I believe there's more structure to utilize, is this how to properly do a skill?)
 
 A problem usually lives across several files — where a signal is *generated* and
 everywhere it is *consumed*. Rewrite the whole concern as one atomic bundle so the pieces
@@ -466,7 +455,7 @@ lock-out less likely — but watch for it anyway. "Is it the model, or our frame
 the canonical judgment only the framework-audit role makes. `model_collapse` is surfaced
 for you to act on; the framework never auto-corrects it in steady-state.
 
-**Reward baseline is sign-aware and repair-aware (M23/M26).** `compute_reward` builds the
+**Reward baseline is sign-aware and repair-aware (M23/M26). (no M23 stuff, meaningless, and check this accuracy, and again they should be more structured, this is the reward knob, not sure if it's properly documented in other places like the concern map, but it's one of the knobs)** `compute_reward` builds the
 absolute reward against `max(parent_score, 0)` — the bandit shifts by `max(baseline, 0)` and
 asymmetric-clamps, so on a NEGATIVE-score task a correct-but-low candidate would otherwise
 collapse to the same `r=0` as a failure; the sign-aware baseline keeps it strictly above the
@@ -474,11 +463,11 @@ floor (positive-score tasks are byte-identical). And on a REPAIR gen the credite
 the nearest CORRECT ancestor's score (the last-good version), NOT the errored parent's ≈0 —
 so a routine bug-fix doesn't look like a full-score gain and blow out the bandit's `obs_max`
 (which would then normalize every normal delta to ≈0). The bandit GEOMETRY itself
-(`exploration_coef` / `cost_aware_coef` / `exponential_base`) is FOUNDATION-adjacent — tune it
+(`exploration_coef` / `cost_aware_coef` / `exponential_base`) is FOUNDATION-adjacent (what do you mean by this is foundation-ADJACENT? never use adjacent to confuse agents, and this reward part don't sound foundation to me, if the agent saw fixes are adding confusing scores, it can decide not to do that) — tune it
 via the levers + a calibration measure window; do NOT silently rewrite the geometry (M43 — a
 geometry change belongs in the end-of-run ending document, not a mid-run code rewrite).
 
-## Deep research (the discovery check on control-return)
+## Deep research (the discovery check on control-return) (my previous writings should clarify a lot about the content in this part)
 
 A **discovery round** is *discovery* (find SOTA), not *instantiation* (write the code). It
 is your decision at a control-return, on the same tapering rhythm as the framework-audit
@@ -831,11 +820,11 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
 | `deep_research.py` | R1 discovery — deep-research model (web-grounded directions); writes the `kind=dr` discovery stub with a `usable` bool | No (paid service) | **Yes (Azure DR)** |
 | `_azure.py` | shared Azure background-poll transport | No (foundation) | — |
 
-**Background-poll resilience (transport, FOUNDATION).** Every Azure bg call (`mutate`/`meta`/DR)
+**Background-poll resilience (transport, FOUNDATION). (check its accuracy and maybe make a note on the bahavior of bg+poll mode, when LLM is working, I believe the queries would get "queued" status, I want to teach the agent that such is expected, sth like "queued" doesn't mean it's stuck, per openai's doc, it seems both queued or in_progress state are possible before the completed status, double check this and see if we need fixes on the docs or codes, especially I heard " inner loop's background_model aborts a job that stays queued for >300s (MAX_QUEUED_WAIT)", which is not documented, nor my intention here)** Every Azure bg call (`mutate`/`meta`/DR)
 is bounded at TWO levels: a SHORT per-HTTP-request cap (`SHINKA_BG_HTTP_TIMEOUT_SEC`, 60s) wraps
 each submit/status-GET and RETRIES a hung request, and the LONG total-job wall
 (`SHINKA_BG_POLL_TIMEOUT_SEC` / `AZURE_DR_TIMEOUT_SEC`, 3600s) is a true monotonic deadline. So a
-wedged socket on one status GET can no longer ride the whole 1h wall (the prior ~1–2h hang); a
+wedged socket on one status GET can no longer ride the whole 1h wall (no need to leave confusing info); a
 genuinely-stuck job still bounds at the wall, then degrades cleanly (mutate → `applied:false`; DR →
 a degraded brief whose billed cost is captured). Don't rewrite the transport in a strategy rewrite.
 **And never manually kill a slow in-flight Azure bg call** (TaskStop / bash-kill) to end it sooner —
@@ -871,7 +860,7 @@ prompt scope) how to handle a pathologically slow call. (This is the Azure CALL 
   "window_state": {"window_index": 0, "prior_low_streak": 0} }
 ```
 
-`llm_models` set → the bandit picks per candidate; `enable_novelty` → the embedding gate.
+`llm_models` set → the bandit picks per candidate; `enable_novelty` → the embedding gate. (the novelty we had new changes like run embedding on the diff, so we nned to make those designs accurate if they appear somewhere else in docs)
 An `llm_models` entry may be `"model@effort"` (e.g. `"azure-gpt-5.4-pro@high"`); the bandit
 learns each (model, effort) arm separately. Only encode valid combos (pro rejects `low`).
 **Use per-arm effort deliberately to manage the reliability-vs-wall-time tradeoff** (thinking
@@ -887,7 +876,7 @@ work-score taper is uncapped (bounded by budget / termination / stagnation).
 ### Config levers — flip a knob before you rewrite code
 
 Many decisions that *look* like a code rewrite are already `evo.*` knobs. Prefer a knob
-(cheap, instant, no protocol) over rewriting a policy. EXCEPTION (S1): the `cadence.*` rows
+(cheap, instant, no protocol) over rewriting a policy. EXCEPTION: the `cadence.*` rows
 below (`early_phase_windows` / `base_low` / `low_threshold` / `max_windows_per_call` /
 `termination_streak`) are BOOT-ONLY — set them in run.json before the run; do NOT change the
 wake/termination cadence mid-run (cadence_policy.py is FOUNDATION).
@@ -921,7 +910,7 @@ wake/termination cadence mid-run (cadence_policy.py is FOUNDATION).
 | `meta_failures_first_frac` | 0.5 | how much of the meta context is recent failures vs top performers | failure-dominated window where the failure_note comes back vague → 0.75 |
 | `extra_guidance` | none | free text appended to the next window's mutation system prompt | nudge the search without a code rewrite |
 
-**Islands differentiate BY DEFAULT — in direction AND code (H1/H2).** The automatic
+**Islands differentiate BY DEFAULT — in direction AND code.** The automatic
 per-window meta round writes each live island a STRUCTURED brief (1–3 directions, each
 optionally tagged with the program that realizes it). `sample_parent` then samples ONE of
 that island's directions per generation and pulls the programs ASSIGNED to it as the
@@ -986,14 +975,6 @@ most-similar program (`most_similar_id`) + both scores + `max_similarity` + `n_c
 
 A threshold change is a config-LEVER flip (log it as `work_audit ≥ 1` on the work score) — a knob,
 not a code rewrite; the next relaunched cluster reads it.
-
-### Scalability — deferred
-
-Per-generation novelty is an O(N) cosine over CACHED embeddings of a size-capped archive
-with bounded per-island membership, so it's cheap and intentionally left as-is; evaluation
-is serial. Revisit only at a full inspection; the end-of-run document lists scalability as
-a standing future-fix candidate (trigger: `archive_size` raised enough to bottleneck
-novelty or serial eval).
 
 ## What never to do
 

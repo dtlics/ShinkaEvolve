@@ -7,11 +7,11 @@ is the only LLM backend.
 
 The inner loop (parent sampling → mutation → evaluation → archive update) runs at
 API-call speed against Azure. The orchestrator (you, via Claude Code) drives it
-one *window* at a time, reads diagnostics, and — when there is a need for
+one *cluster* at a time which might contain more than one *window*s, which contains a few goes of the inner loop, reads diagnostics, and — when there is a need for
 intervention, such as the logs/history demonstrating evidence of evolution flaws
 or the search stagnating — you can decide whether to initiate a Deep Research run
 to gain external knowledge about the SOTA of the task or a subtask; you can also
-rewrite the underlying **strategy code** via a design → change → validate →
+rewrite the underlying **strategy code** that's driving the whole framwork via a design → change → validate →
 deploy → measure → rollback protocol. See [`.claude/skills/shinka-orchestrator/SKILL.md`](.claude/skills/shinka-orchestrator/SKILL.md).
 
 ## What's here
@@ -21,7 +21,7 @@ deploy → measure → rollback protocol. See [`.claude/skills/shinka-orchestrat
   shinka-orchestrator/  SKILL.md (the outer-loop playbook — start here) +
                         subagents/ (debug-agent, archive-analyst, grounding-engineer)
   shinka-setup / shinka-convert / shinka-inspect   task authoring + inspection
-.claude/workflows/    repo automation workflows (repo-cleanup, audit-evolution-logic, …)
+.claude/workflows/    repo automation workflows (repo-cleanup, audit-evolution-logic, …) the workflows were written a while ago, not sure if it's still meaningful to keep in there, which might mislead future agents working on this repo, like when it deems a workflow similar should be run, it might get blinded by those stale workflows
 orchestrator/         the outer-loop framework code
   scripts/           JSON-contract subroutines — mutable strategy policies
                      (sample_parent, novelty_check, select_llm, compute_reward,
@@ -40,9 +40,9 @@ shinka/              slimmed framework source (Azure-only) — imported in-place
 configs/             orchestrator_run.default.json (run-config starter) + azure_default.yaml
 tasks/               user tasks (evaluate.py + initial.<ext>)
 examples/circle_packing/  reference task used by the smoke test
-scripts/test_azure.py     Azure (main-resource) deployment smoke test
+scripts/test_azure.py     Azure (main-resource) deployment smoke test these two should not be in scripts folder, put them somewhere tests live
 scripts/test_dr.py        deep-research resource (o3-deep-research) smoke test
-taxonomy.md               four-cell mutability map of the strategy files (HISTORICAL)
+taxonomy.md               four-cell mutability map of the strategy files (HISTORICAL) what does historical mean? stale?
 ```
 
 ## Quick start
@@ -50,7 +50,7 @@ taxonomy.md               four-cell mutability map of the strategy files (HISTOR
 ```bash
 conda activate shinka                 # python 3.11 (deps from pyproject)
 cp .env.example .env                  # fill in the two Azure resources' keys
-python scripts/test_azure.py          # smoke-test the main endpoint
+python scripts/test_azure.py          # smoke-test the main endpoint is test_azure cost efficient? it should be logged in previous runs
 
 # Run a task as the orchestrator (see .claude/skills/shinka-orchestrator/SKILL.md):
 python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
@@ -59,7 +59,7 @@ python orchestrator/harness/run_window.py --config <run>/run.json --until-decisi
 No `pip install` step: the orchestrator forces this repo root onto `sys.path`, so
 `import shinka` resolves to this tree. (`pip install -e .` is optional, only for
 importing `shinka` from outside the repo. You still need the deps from
-`pyproject.toml` in the env.)
+`pyproject.toml` in the env.) exactly what does it mean? I thought it's simple guide to say no need to pip install -e the shinka from otherplaces, just use the in repo part of shinka...
 
 Operating guide for AI agents (and humans): [CLAUDE.md](CLAUDE.md). The
 orchestrator playbook: [.claude/skills/shinka-orchestrator/SKILL.md](.claude/skills/shinka-orchestrator/SKILL.md).

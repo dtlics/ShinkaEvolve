@@ -144,12 +144,11 @@ The Azure/deployment/env details below are your toolbox for live runs.
 
 ## Two Azure resources, parallel structure
 
-The user runs **two separate Azure resources**: a main chat/reasoning endpoint and a deep-research endpoint. Both use the umbrella URL form (`https://<resource>.openai.azure.com`); each has its own key, project, and deployment set. The framework keeps them separable via distinct env-var pairs.
+A main chat/reasoning endpoint and a deep-research endpoint, kept separable via distinct env-var pairs (umbrella URL `https://<resource>.openai.azure.com`, each appends `/openai/v1`). **Both currently point at the westus resource `dtlics2000-4351-resource`**. Except for the pro model which only runs in East US 2: `client.py` routes `azure-gpt-5.4-pro` to the `AZURE_EASTUS2_*` env vars (endpoint/key/version → East US 2 resource `dtlics2000shinka`); every other model uses `AZURE_API_*` (westus).
 
 | | Main | Deep research |
 |---|---|---|
-| Resource | `dtlics2000shinka` | `dtlics2000-4351-resource` |
-| Region | East US 2 | westus |
+| Resource | `dtlics2000-4351-resource` (westus) | `dtlics2000-4351-resource` (westus) |
 | Endpoint env | `AZURE_API_ENDPOINT` | `AZURE_DR_ENDPOINT` |
 | Key env | `AZURE_OPENAI_API_KEY` | `AZURE_DR_API_KEY` |
 | API version | `AZURE_API_VERSION=preview` | `AZURE_DR_API_VERSION=preview` |
@@ -163,7 +162,7 @@ Both endpoints' base_url is built by appending `/openai/v1` to the bare resource
 
 | Shinka model id | Deployment name | Underlying model | Notes |
 |---|---|---|---|
-| `azure-gpt-5.4-pro` | `gpt-5.4-pro` | gpt-5.4-pro v2026-03-05 | $30/$180 per 1M. **Requires reasoning effort ≥ medium** (low rejected). |
+| `azure-gpt-5.4-pro` | `gpt-5.4-pro` | gpt-5.4-pro v2026-03-05 | $30/$180 per 1M. **Requires reasoning effort ≥ medium** (low rejected). **NOT on the active westus endpoint (2026-06-30) — East US 2 only.** |
 | `azure-gpt-5.5` | `gpt-5.5` | gpt-5.5 v2026-04-24 | $5/$30 per 1M. |
 | `azure-gpt-5.3-codex` | `gpt-5.3-codex` | gpt-5.3-codex v2026-02-24 | Coding-tuned, $1.75/$14 per 1M. |
 | `azure-gpt-5.4-mini` | `gpt-5.4-mini` | gpt-5.4-mini v2026-03-17 | Cheap workhorse, $0.75/$4.50 per 1M. |

@@ -17,11 +17,35 @@ load_shinka_dotenv()
 _SUPPORTED = ("openai", "azure_openai")
 
 
+# Shinka model ids deployed ONLY on the East US 2 resource. They route to the
+# AZURE_EASTUS2_* creds when those env vars are present; otherwise they fall back
+# to the default AZURE_API_* resource (backward-compatible).
+_EASTUS2_ONLY_MODELS = {"azure-gpt-5.4-pro"}
+
+
 def _build_azure_base_url() -> str:
     endpoint = os.getenv("AZURE_API_ENDPOINT")
     if not endpoint:
         raise ValueError("AZURE_API_ENDPOINT is required for Azure OpenAI models.")
     return endpoint.rstrip("/") + "/openai/v1"
+
+
+def _azure_creds_for(model_name: str) -> Tuple[str, str, str]:
+    """Return ``(api_key, api_version, base_url)`` for an Azure model. East-US-2-only
+    models (e.g. ``gpt-5.4-pro``) route to the ``AZURE_EASTUS2_*`` resource when those
+    env vars are set; every other model uses the default ``AZURE_API_*`` resource."""
+    base_id = model_name.split("@", 1)[0]
+    if base_id in _EASTUS2_ONLY_MODELS and os.getenv("AZURE_EASTUS2_ENDPOINT"):
+        return (
+            os.getenv("AZURE_EASTUS2_API_KEY"),
+            os.getenv("AZURE_EASTUS2_API_VERSION", "preview"),
+            os.getenv("AZURE_EASTUS2_ENDPOINT").rstrip("/") + "/openai/v1",
+        )
+    return (
+        os.getenv("AZURE_OPENAI_API_KEY"),
+        os.getenv("AZURE_API_VERSION", "preview"),
+        _build_azure_base_url(),
+    )
 
 
 def _unsupported(model_name: str, provider: str):
@@ -43,10 +67,11 @@ def get_client_llm(
     if provider == "openai":
         client = openai.OpenAI(timeout=TIMEOUT)
     elif provider == "azure_openai":
+        api_key, api_version, base_url = _azure_creds_for(model_name)
         client = openai.AzureOpenAI(
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version=os.getenv("AZURE_API_VERSION", "preview"),
-            base_url=_build_azure_base_url(),
+            api_key=api_key,
+            api_version=api_version,
+            base_url=base_url,
             timeout=TIMEOUT,
         )
     else:
@@ -68,10 +93,11 @@ def get_async_client_llm(
     if provider == "openai":
         client = openai.AsyncOpenAI(timeout=TIMEOUT)
     elif provider == "azure_openai":
+        api_key, api_version, base_url = _azure_creds_for(model_name)
         client = openai.AsyncAzureOpenAI(
-            api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            api_version=os.getenv("AZURE_API_VERSION", "preview"),
-            base_url=_build_azure_base_url(),
+            api_key=api_key,
+            api_version=api_version,
+            base_url=base_url,
             timeout=TIMEOUT,
         )
     else:

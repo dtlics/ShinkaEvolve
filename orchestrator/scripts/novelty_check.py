@@ -4,10 +4,11 @@ MUTABILITY: MUTABLE STRATEGY (cell A). The orchestrator MAY rewrite this file �
 the similarity threshold and accept/reject logic throttle diversity, a classic
 plateau knob. It embeds NO LLM call in this default port (shinka's optional
 LLM-as-judge is gated and rare; if a rewrite enables it, do not change response
-parsing — see taxonomy.md).
+parsing).
 
-This computes the near-duplicate decision: compare the candidate's code embedding
-against the (optionally island-filtered, non-tombstoned) correct archive by cosine
+This computes the near-duplicate decision: compare the candidate's embedding
+(the parent->candidate diff by default, computed upstream in run_window) against the
+(optionally island-filtered, non-tombstoned) correct archive by cosine
 similarity; ``accept=False`` when the max similarity ≥ ``code_embed_sim_threshold``
 (default 0.99 — a near-duplicate), and it also returns the most-similar program's id
 AND score so the CALLER can KEEP THE BETTER of the pair (H5): run_window evaluates a

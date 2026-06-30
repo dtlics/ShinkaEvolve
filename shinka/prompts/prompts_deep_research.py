@@ -6,10 +6,7 @@ control-return: it asks a research model (Azure ``o3-deep-research`` via the
 dedicated DR client) for concrete, code-applicable, *referenceable* techniques to
 try next, and the orchestrator triages the returned brief into the islands.
 
-This is NOT a multi-stage A→D pipeline. That pipeline (drift judge → novelty cache
-→ research → code grounding) was removed in the Azure-only prune; only this one
-prompt survives. The ``DR_STAGE_C_*`` names are kept for continuity with the call
-site — there are no other stages.
+This is a single web-grounded research call — there is no multi-stage pipeline.
 """
 
 from __future__ import annotations
@@ -17,10 +14,9 @@ from __future__ import annotations
 
 # --------------------------------------------------------------------
 # Deep research — concrete technique finder (Azure o3-deep-research).
-# Historically "Stage C"; the only DR prompt still in use.
 # --------------------------------------------------------------------
 
-DR_STAGE_C_SYS_MSG = """\
+DR_SYS_MSG = """\
 You are a research analyst helping an evolutionary code-optimization
 run find concrete, code-applicable techniques to try next.
 
@@ -49,7 +45,7 @@ Output a JSON object with this exact shape:
 Return 2 to 5 techniques. No prose outside the JSON object.
 """
 
-DR_STAGE_C_USER_MSG = """\
+DR_USER_MSG = """\
 Research question:
 {candidate_question}
 

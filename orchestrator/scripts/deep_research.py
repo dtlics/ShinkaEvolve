@@ -11,10 +11,10 @@ deliberate — it is the most expensive single action in the system. Before call
 the orchestrator runs the SKILL.md "pre-flight self-check": the QUERY must target
 GENERAL SOTA for the task/sub-task, never "reproduce a specific named paper" (that is
 the follow-up pro grounding run's job). The ``reference_snippet`` field below is
-requested by the IMMUTABLE Stage-C system prompt, NOT by your query — on a
+requested by the IMMUTABLE DR system prompt, NOT by your query — on a
 ``content_filter`` refusal, rewrite the QUERY shape, never retry the same one.
 
-This is the Stage-C call from shinka's DR pipeline, exposed standalone: it sends
+This is the single web-grounded DR call, exposed standalone: it sends
 the research question + program context to ``o3-deep-research`` (background mode +
 polling via ``run_dr_call``) and parses the returned techniques into a brief.
 Requires AZURE_DR_ENDPOINT + AZURE_DR_API_KEY (see CLAUDE.md). A ``mock`` mode is
@@ -116,14 +116,14 @@ def _parse_brief(text: str) -> List[Dict[str, Any]]:
 
 
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
-    from shinka.prompts import DR_STAGE_C_SYS_MSG, DR_STAGE_C_USER_MSG
+    from shinka.prompts import DR_SYS_MSG, DR_USER_MSG
 
     query = payload.get("query", "")
     program_context = payload.get("program_context", "")
     model = payload.get("model", "o3-deep-research")
 
-    system_msg = DR_STAGE_C_SYS_MSG
-    user_msg = DR_STAGE_C_USER_MSG.format(
+    system_msg = DR_SYS_MSG
+    user_msg = DR_USER_MSG.format(
         candidate_question=query, program_context=program_context
     )
 
@@ -161,7 +161,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
                 reasoning_effort=payload.get("reasoning_effort", "medium"),
                 max_tool_calls=int(payload.get("max_tool_calls", 20)),
                 background=bool(payload.get("background", True)),
-                call_metadata={"purpose": "dr_stage_c", "source": "orchestrator"},
+                call_metadata={"purpose": "deep_research", "source": "orchestrator"},
             )
         )
     except Exception as exc:

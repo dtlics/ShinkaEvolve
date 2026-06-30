@@ -29,8 +29,8 @@ from .prompts_init import INIT_SYSTEM_MSG, INIT_USER_MSG
 # the file + its re-exports are removed.
 from .prompts_novelty import NOVELTY_SYSTEM_MSG, NOVELTY_USER_MSG
 from .prompts_deep_research import (
-    DR_STAGE_C_SYS_MSG,
-    DR_STAGE_C_USER_MSG,
+    DR_SYS_MSG,
+    DR_USER_MSG,
 )
 
 __all__ = [
@@ -57,6 +57,6 @@ __all__ = [
     "NOVELTY_SYSTEM_MSG",
     "NOVELTY_USER_MSG",
     # Deep-research (DR) prompt — the single web-grounded research call
-    "DR_STAGE_C_SYS_MSG",
-    "DR_STAGE_C_USER_MSG",
+    "DR_SYS_MSG",
+    "DR_USER_MSG",
 ]

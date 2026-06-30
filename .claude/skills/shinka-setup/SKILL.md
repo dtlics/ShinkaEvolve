@@ -55,12 +55,14 @@ Invoke this skill when the user:
    `python orchestrator/harness/run_window.py --config <run>/run.json --until-decision`.
    The starter ships `task_sys_msg` as the sentinel `__UNSET_AUTHOR_AT_BOOT__` — the
    harness REFUSES to start until the orchestrator authors a real goal (the goal + hard
-   constraints). Leak-proofing is the EVALUATOR's job: held-out / gate-defining numbers go
-   under a `private` metrics dict (only `public` metrics reach the inner loop), and
-   `text_feedback` describes a failure without revealing a target — so any candidate that
-   passes and improves the metric is by construction good. Running this task means BEING the
-   orchestrator/outer-loop under that run loop (warmup → wake-per-taper cluster →
-   automatic per-window meta → framework-audit + DR checks → end-of-run archive).
+   constraints). Keep the evaluator from leaking the answer: held-out / gate-defining numbers
+   go under the `private` metrics dict (only `public` metrics + `text_feedback` reach the inner
+   loop). The thing to watch is a shortcut — if a value the evaluator SHOWS could tell the
+   evolution LLM how to game the metric rather than solve the real problem, STOP and ask the
+   user before continuing (rare here — this repo is for real scientific discovery). Otherwise
+   any candidate that passes and improves the metric is good. Running this task means BEING the
+   orchestrator/outer-loop under that run loop (warmup → wake-per-cluster → automatic per-window
+   meta → framework-audit + discovery checks → end-of-run archive).
 
 ## What is ShinkaEvolve?
 A framework developed by SakanaAI that combines LLMs with evolutionary algorithms to propose program mutations, that are then evaluated and archived. The goal is to optimize for performance and discover novel scientific insights. 
@@ -107,7 +109,7 @@ Rules:
 - `evaluate.py` stays the evaluator entrypoint.
 - Python candidates: prefer `run_shinka_eval` + `experiment_fn_name`.
 - Non-Python candidates: evaluate via `subprocess` and write `metrics.json` + `correct.json`.
-- Always set both `task.language` and a matching `task.init_program_path` in the run config (L4: the pruned `evo_config.*` keys are read by nothing; the live keys are `task.*` — see the shinka-orchestrator run.json schema).
+- Always set both `task.language` and a matching `task.init_program_path` in the run config (the live config keys are `task.*` — see the shinka-orchestrator run.json schema).
 
 ## Template: `initial.<ext>` (Python example)
 ```py

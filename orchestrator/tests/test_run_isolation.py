@@ -81,6 +81,39 @@ def test_stop_sentinel_target_match():
         assert run_window._stop_requested(rd, "A") is True
 
 
+def test_warmup_stop_resolves_to_parent_dir():
+    """Session-isolation fix: during warmup the live results_dir is redirected to the
+    <results_dir>/warmup subdir, but a `.stop` the agent writes to the PARENT results_dir must
+    still stop the warmup (not only at the warmup window's end). `_cli` captures the parent as
+    cfg['stop_dir'] BEFORE the redirect, and `main` resolves the stop target to it."""
+    with tempfile.TemporaryDirectory() as td:
+        parent = os.path.join(td, "results")
+        warm = os.path.join(parent, "warmup")
+        os.makedirs(warm)
+        # Emulate _cli's warmup setup: capture the parent as stop_dir, THEN redirect results_dir.
+        cfg = {"results_dir": parent, "run_id": "A"}
+        cfg["stop_dir"] = cfg["results_dir"]   # _cli, before the redirect
+        cfg["results_dir"] = warm              # _cli, the warmup redirect
+        # main's resolution (the actual one-liner in run_window.main):
+        stop_dir = cfg.get("stop_dir") or cfg["results_dir"]
+        assert stop_dir == parent
+        # A `.stop` the agent writes to the PARENT is honored against stop_dir.
+        Path(parent, ".stop").write_text(json.dumps({"target_run_id": "A"}))
+        assert run_window._stop_requested(stop_dir, "A") is True
+        # The OLD behavior (checking the redirected warmup subdir) would MISS it and leave it.
+        Path(parent, ".stop").write_text(json.dumps({"target_run_id": "A"}))
+        assert run_window._stop_requested(warm, "A") is False
+        assert Path(parent, ".stop").exists()
+
+
+def test_non_warmup_stop_dir_is_results_dir():
+    """A normal (non-warmup) run has no stop_dir override, so the stop target is just
+    results_dir — the session-isolation change is inert outside warmup."""
+    cfg = {"results_dir": os.path.join("some", "run"), "run_id": "A"}
+    stop_dir = cfg.get("stop_dir") or cfg["results_dir"]
+    assert stop_dir == cfg["results_dir"]
+
+
 def test_clear_stop_is_idempotent():
     with tempfile.TemporaryDirectory() as rd:
         run_window._clear_stop(rd)  # absent: no raise

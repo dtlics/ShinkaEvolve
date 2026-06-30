@@ -49,27 +49,17 @@ load_shinka_dotenv()
 logger = logging.getLogger(__name__)
 
 
-# DR runs can take ~10-30 minutes per call. The default client timeout
-# from the main path (3600s) is plenty; we surface ``DR_TIMEOUT`` here
-# for the BackgroundOpenAIResponsesModel's poll-wall cap so the user
-# can tighten it if they want shorter individual stage timeouts.
+# DR runs can take ~10-30 minutes per call. ``DR_TIMEOUT`` is the poll-wall cap
+# (the only time bound on a DR job) — the user can tighten it for shorter call
+# timeouts. ``queued`` and ``in_progress`` are both normal pre-completion states;
+# there is no separate "queued too long" abort, a stuck job simply bounds here.
 DR_TIMEOUT: float = float(os.environ.get("AZURE_DR_TIMEOUT_SEC", "3600.0"))  # 60 min:
 # with the web_search tool actually enabled, o3-deep-research routinely runs >30 min
 # (the old 1800s cap timed out mid-research with status still 'in_progress').
 
-# Initial backoff cadence. Polls start at 5s (DR jobs always need
-# more than that) and back off geometrically to 60s. The
-# BackgroundOpenAIResponsesModel uses a fixed interval; for DR we
-# accept that simpler model rather than implementing a separate
-# poll-with-backoff path here. 5s gives a tight handle on
-# completion latency without burning Azure rate limits.
+# Poll interval. Polls start at 5s (DR jobs always need more than that); 5s gives
+# a tight handle on completion latency without burning Azure rate limits.
 DR_POLL_INTERVAL_SEC: float = 5.0
-
-# Queue-stuck cap. If DR sits in ``queued`` (never moves to
-# ``in_progress``) past this, abort. DR jobs we've seen in practice
-# move into in_progress within a minute or two; 10 min gives plenty
-# of slack while still catching the "stuck forever" failure mode.
-DR_MAX_QUEUED_WAIT_SEC: float = 600.0
 
 
 # Env-var names we read. Constants here so the summarizer can

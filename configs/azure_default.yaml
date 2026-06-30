@@ -1,6 +1,6 @@
 # Azure model-list + bandit-kwargs REFERENCE for the run.json `evo.*` block.
 #
-# L84: the orchestrator (orchestrator/harness/run_window.py) reads run.json, NOT this YAML — this
+# The orchestrator (orchestrator/harness/run_window.py) reads run.json, NOT this YAML — this
 # is a copy-from reference only. ONLY the keys the orchestrator actually reads from `evo.*` are
 # kept here. PRUNED (read by nothing on the orchestrator path): `llm_kwargs`, `meta_llm_models`/
 # `meta_llm_kwargs`, `novelty_llm_models`/`novelty_llm_kwargs`, the bare `llm_dynamic_selection:

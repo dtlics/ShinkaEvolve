@@ -1054,8 +1054,10 @@ def test_meta_summarize_parsing():
 
 
 def test_meta_direction_sampling():
-    """WS2: per-gen sampling picks one direction by weight; compose prepends the
-    persistent failure caution; legacy meta_recommendations blob still works."""
+    """Weighted sampling of a brief's directions still works (used inside the meta round). The
+    per-gen composer no longer reads a global-directions channel: an island with no brief yet
+    just gets a neutral placeholder (the prompt still carries modes/inspirations/task), so
+    island differentiation rides entirely on the per-island briefs."""
     import random as _r
 
     sys.path.insert(0, str(_ORCH / "harness"))
@@ -1065,16 +1067,14 @@ def test_meta_direction_sampling():
     picks = {run_window._sample_meta_direction(dirs, _r.Random(i)) for i in range(20)}
     assert picks == {"A"}, picks  # zero-weight arm never chosen
 
-    evo = {"meta_directions": [{"text": "tryX", "weight": 1.0}],
-           "meta_failure_note": "watch runtime/timeouts", "seed": 0}
-    msg = run_window._compose_meta_for_gen(evo, 3)
-    # Carrier fix: _compose returns the DIRECTION only; the persistent failure
-    # caution now rides as its own always-on `failure_note` field, so it can't be
-    # clobbered by an island_brief or dropped on a cross/lit gen.
-    assert "tryX" in msg and "watch runtime/timeouts" not in msg, msg
-
-    assert run_window._compose_meta_for_gen({"meta_recommendations": "old blob"}, 0) == "old blob"
-    assert run_window._compose_meta_for_gen({}, 0) is None
+    # No global-directions channel: the composer returns a neutral placeholder regardless of
+    # evo, and the persistent failure caution rides as its own always-on `failure_note` field.
+    ph = run_window._compose_meta_for_gen(
+        {"meta_directions": [{"text": "tryX", "weight": 1.0}],
+         "meta_failure_note": "watch runtime/timeouts", "seed": 0}, 3)
+    assert "no explicit direction" in ph.lower(), ph
+    assert "tryX" not in ph and "watch runtime/timeouts" not in ph, ph
+    assert run_window._compose_meta_for_gen({}, 0) == ph  # same placeholder, no global needed
     return None
 
 
@@ -1565,7 +1565,7 @@ def test_skill_doc_teaches_run_loop_and_roles():
     for s in ("warmup", "work score", "taper", "control-return", "woken", "cluster",
               "automatic meta", "gpt-5.5", "per-island",
               "model_collapse", "never auto-corrected",
-              "snapshot_state", "fails closed",
+              "snapshot_state", "no evidence the rewrite is good",
               "ending document", "orchestrator/run_archive",
               "auto_meta", "meta_model", "repair_trigger_fraction",
               "validity_floor", "reward_validity_floor", "reward_on_reject",

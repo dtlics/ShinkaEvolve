@@ -11,21 +11,20 @@ framework tweak), the orchestrator calls THIS (cheap) or `deep_research.py`
 (expensive, web-grounded).
 
 Meta is the AUTOMATIC per-window round run by the HARNESS (not an orchestrator
-decision): after each window the harness calls this ONCE → global ``directions`` +
-a ``failure_note`` caution + ONE differentiated direction per live island
-(``island_directions``), auto-recorded as per-island briefs so islands evolve in
-DIFFERENT directions by default. It summarizes what the search has ALREADY tried
-(recent attempts, including failures). It is NOT the per-gen idea source — the
-per-gen choice is a weighted SAMPLE over the global directions (run_window samples
-one per mutation) plus the per-island brief for that island. Default model
-``azure-gpt-5.5`` at ``medium`` effort, mutable to a stronger model (e.g. pro@high).
+decision): after each window the harness calls this ONCE → a ``failure_note``
+caution + a differentiated direction list PER LIVE ISLAND (the ``islands`` block),
+auto-recorded as per-island briefs so islands evolve in DIFFERENT directions by
+default. Every direction is assigned to exactly one island — there is no separate
+global-directions channel. It summarizes what the search has ALREADY tried (recent
+attempts, including failures). It is NOT the per-gen idea source: each gen reads its
+island's brief, and an island with no brief yet gets a neutral placeholder. Default
+model ``azure-gpt-5.5`` at ``medium`` effort, mutable to a stronger model (e.g. pro@high).
 
-WS2/WS3 OUTPUT CONTRACT (changed from the old single-blob string):
-  * ``directions``    — a WEIGHTED list ``[{text, weight}]``. The orchestrator
-                        writes these into ``evo.meta_directions`` and run_window
-                        SAMPLES ONE per gen (weight = relative promise / "best
-                        shots"). This replaces the old global blob that was
-                        appended verbatim to every gen.
+OUTPUT CONTRACT:
+  * ``directions``    — kept for back-compat but no longer the search driver: the
+                        parser still accepts a top-level list if present, but the
+                        prompt asks the model to place every idea in an island
+                        instead (see ``islands``), so this is normally empty.
   * ``failure_note``  — a concise PROSE paragraph: what tended to cause failures
                         (e.g. runtime/timeout vs correctness) and what future
                         attempts should watch for. The orchestrator writes it to
@@ -107,9 +106,6 @@ _SYS = (
     "recent programs (id, score, ok/FAIL, a CODE preview, and the error of any failures). "
     "Produce STRICT JSON and nothing else:\n"
     '{{\n'
-    '  "directions": [ {{"text": "<one concrete, actionable GLOBAL direction — name the '
-    'technique/structure/parameters; do NOT write code>", "weight": <number 0..1, relative '
-    'promise>}}, ... up to {n} items ],\n'
     '  "failure_note": "<2-4 sentences of PROSE: what tended to cause the recent failures '
     '(e.g. runtime/timeout vs broken correctness) and what future attempts should be careful '
     'about. Lead with the dominant failure class and roughly how common it was (e.g. \'Most '
@@ -122,10 +118,11 @@ _SYS = (
     '... 1 to 3 per island ]}}, ... EXACTLY ONE entry per live island id ]\n'
     '}}\n'
     "Rules: make the islands explore genuinely DIFFERENT families/approaches from each other "
-    "and from prior recommendations. Within an island, LABEL a direction that is already "
-    "working by setting assigned_program_id to that island's existing program id; use null "
-    "for fresh ideas. Weight = your confidence it pays off; weights need not sum to 1. "
-    "Output ONLY the JSON object."
+    "and from prior recommendations. Assign EVERY direction to exactly ONE island (the "
+    "best-fitting one) — there is no separate global list, and never put the same idea on two "
+    "islands. Within an island, LABEL a direction that is already working by setting "
+    "assigned_program_id to that island's existing program id; use null for fresh ideas. "
+    "Weight = your confidence it pays off; weights need not sum to 1. Output ONLY the JSON object."
 )
 
 

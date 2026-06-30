@@ -150,7 +150,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # fix-retry when evo.fix_web_search is set). Only the bg (Azure/OpenAI) path
     # supports it; the legacy sync client ignores it.
     enable_web_search = bool(payload.get("enable_web_search", False))
-    call_metadata = {"purpose": "proposer", "model_name": model_name}
+    # Cost-ledger label. Defaults to "proposer" (the inner-loop mutation/fix call); a standalone
+    # between-cluster grounding call passes purpose="grounding" so its spend is separable.
+    call_metadata = {"purpose": payload.get("purpose", "proposer"), "model_name": model_name}
     if payload.get("run_id"):
         call_metadata["run_id"] = payload["run_id"]
     if payload.get("generation") is not None:

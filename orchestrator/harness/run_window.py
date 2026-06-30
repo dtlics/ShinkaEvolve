@@ -395,27 +395,18 @@ def _sample_patch_mode(patch_types, patch_type_probs, seed, exclude_fix=False) -
 
 
 def _compose_meta_for_gen(evo: Dict[str, Any], generation: int) -> Optional[str]:
-    """WS2/WS3: build THIS gen's meta DIRECTION only. With ``evo.meta_directions``
-    (the weighted list from meta_summarize), sample ONE direction by weight. Falls
-    back to the legacy single ``evo.meta_recommendations`` blob when no structured
-    directions are present (back-compat with older run.json files).
-
-    The persistent ``evo.meta_failure_note`` is NO LONGER embedded here — it rides
-    as its own always-on ``failure_note`` field (see ``_run_one_candidate`` /
-    ``_attempt_immediate_fixes``), so the caution is never clobbered by an
-    island_brief or dropped on a cross/lit/empty-direction gen (M1/M2/M3/M4)."""
-    meta_directions = evo.get("meta_directions")
-    if meta_directions:
-        seed = evo.get("seed")
-        rng = random.Random((int(seed) + int(generation)) if seed is not None else None)
-        chosen = _sample_meta_direction(meta_directions, rng)
-        if chosen:
-            # Point 4.1-B: the sampler's "# Direction for this attempt" header now carries the
-            # directive framing, so the raw direction text rides without the inline prefix
-            # (matching the island-brief channel, which arrives raw).
-            return chosen
-        return None
-    return evo.get("meta_recommendations")  # legacy global blob fallback
+    """The no-brief fallback direction for THIS gen. Island differentiation is driven by the
+    per-island brief (applied in sample_parent from the meta round's per-island output); an
+    island that has no brief YET — a brand-new island, or any island before the first meta
+    round — gets this neutral placeholder, which is enough because the mutation prompt still
+    carries its assigned modes, any inspirations, and the task objective. There is no separate
+    global-directions channel any more. (The persistent ``evo.meta_failure_note`` rides as its
+    own always-on ``failure_note`` field, not here, so the caution is never clobbered by an
+    island brief or dropped on a cross/empty gen.)"""
+    return (
+        "No explicit direction yet — follow the rest of the prompt: your assigned modes, "
+        "any inspirations shown, and the task objective."
+    )
 
 
 def _attempt_immediate_fixes(
@@ -1236,9 +1227,13 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     num_windows = max(1, int(cfg.get("windows", 1) or 1))  # G4: --windows 0 coerces to 1 (full-keyed diag, not a near-empty dict)
 
     os.makedirs(cfg["results_dir"], exist_ok=True)
+    # The cooperative .stop sentinel target — the run's results_dir, or its PARENT during warmup
+    # (cfg["stop_dir"], set by _cli before the warmup redirect) so a .stop the agent writes to the
+    # dir it naturally targets still stops a warmup, not only at the warmup window's end.
+    stop_dir = cfg.get("stop_dir") or cfg["results_dir"]
     # Clear any stale cooperative-stop sentinel left by a prior process generation, so a
     # crash-orphaned .stop cannot immediately stop this fresh/resumed run (a stop-loop).
-    _clear_stop(cfg["results_dir"])
+    _clear_stop(stop_dir)
     _boot_embed_cost = _bootstrap_initial(cfg)
 
     journal.init_run(cfg["results_dir"], _run_meta(cfg))
@@ -1248,11 +1243,11 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if _boot_embed_cost:
         journal.add_cost(cfg["results_dir"], _boot_embed_cost)
 
-    # M1: the global meta channel (evo.meta_directions / meta_failure_note) is written only into
-    # the in-memory cfg, so it is LOST at every cluster relaunch (every window of the early phase
-    # runs in a fresh process). Re-hydrate it from the last logged meta round so the failure_note
-    # (which rides into every gen) and the global directions (pre-brief / no-brief islands)
-    # survive a relaunch. Fill ONLY when empty; this window's meta round overwrites it.
+    # The persistent failure_note rides into every gen's prompt but lives only in the in-memory
+    # cfg, so it is LOST at every cluster relaunch (each early-phase window runs in a fresh
+    # process). Re-hydrate it from the last logged meta round so the caution survives a relaunch;
+    # this window's meta round overwrites it. (Island directions live per-island as briefs in the
+    # archive, read directly by the sampler — the rehydrated `directions` here is now inert.)
     if not evo.get("meta_directions") or not evo.get("meta_failure_note"):
         _mh = _common.recent_meta_output(cfg["results_dir"])
         if _mh.get("directions") and not evo.get("meta_directions"):
@@ -1266,6 +1261,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
     budget = cfg.get("budget_usd")
     run_id = cfg.get("run_id")  # for the cooperative .stop sentinel target match
+    _coop_stop = {"hit": False}  # set by the between-candidate stop check inside _one_window
     # F4: the self-contained strategy pointer — {target: hash} over all mutable
     # files, computed from the live scripts/. Stamped into every window so the log
     # pins the exact strategy version (all files) that produced each window.
@@ -1339,6 +1335,13 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 counters["iter_index"] = i
                 _run_one_candidate(cfg, next_gen + i, counters, repair=(repair_on and i == 0))
                 iters_run += 1
+                # Cooperative stop BETWEEN candidates (also honored mid-warmup via stop_dir):
+                # each candidate commits atomically before _run_one_candidate returns, so exiting
+                # here never half-writes the archive. The cluster loop reads _coop_stop and
+                # returns "cooperative_stop" (non-terminal — no finalize, no control_return row).
+                if _stop_requested(stop_dir, run_id):
+                    _coop_stop["hit"] = True
+                    break
         finally:
             try:
                 os.remove(_wact)
@@ -1629,9 +1632,10 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 last_diag["return_reason"] = "budget_exhausted"
                 break
             # Cooperative graceful stop: the agent asked this run to stop (e.g. for a
-            # framework-rewrite measure window). Exit between windows — no process kill.
-            if _stop_requested(cfg["results_dir"], run_id):
-                last_diag["return_reason"] = "stopped_by_user_request"
+            # framework-rewrite measure window). Honored between candidates (above) or at the
+            # window boundary — never a process kill.
+            if _coop_stop["hit"] or _stop_requested(stop_dir, run_id):
+                last_diag["return_reason"] = "cooperative_stop"
                 break
             decision = cadence_policy_script.main(
                 {
@@ -1662,8 +1666,8 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
             if last_diag.get("budget_hit"):
                 last_diag["return_reason"] = "budget_exhausted"
                 break
-            if _stop_requested(cfg["results_dir"], run_id):
-                last_diag["return_reason"] = "stopped_by_user_request"
+            if _coop_stop["hit"] or _stop_requested(stop_dir, run_id):
+                last_diag["return_reason"] = "cooperative_stop"
                 break
         last_diag.setdefault("return_reason", "windows_done")
 
@@ -1887,7 +1891,7 @@ def _absolutize_paths(cfg: Dict[str, Any], config_path: str) -> None:
 
 
 def _run_meta(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """The run.json meta passed to journal.init_run. Factored so the S2 accept-warmup fold can
+    """The run.json meta passed to journal.init_run. Factored so the accept-warmup fold can
     PRE-CREATE run.json with the SAME shape main() would — main()'s init_run is idempotent, so a
     pre-created run.json makes it a clean no-op with no config_digest drift."""
     evo = cfg.get("evo", {}) or {}
@@ -1912,11 +1916,11 @@ def _run_meta(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def accept_warmup(cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """S2 keep-approved fold-back: promote the orchestrator-APPROVED final warmup into the real
+    """Keep-approved fold-back: promote the orchestrator-APPROVED final warmup into the real
     run. Copies the warmup archive over the (still-absent) real db so the run CONTINUES from the
     warmed, reviewed population, and folds the warmup's spend into the real ledger as a DURABLE
     intervention (so the budget cap counts the tokens already burned). Failed/abandoned warmups
-    are never accepted — the next ``--warmup`` simply auto-resets them away (M30/M35).
+    are never accepted — the next ``--warmup`` simply auto-resets them away.
 
     Refuses (no-op, accepted:False) if there is no populated warmup archive, if the warmup
     archive has no LIVE rows, or if the real archive ALREADY exists (the real run has started —
@@ -1966,7 +1970,7 @@ def accept_warmup(cfg: Dict[str, Any]) -> Dict[str, Any]:
             {
                 "type": "warmup_accepted",
                 "cost": wcost,
-                "reason": "S2: folded the orchestrator-approved final warmup into the real run",
+                "reason": "folded the approved final warmup into the real run",
                 "outcome": f"copied {live} live program(s) + ${wcost:.4f} prior spend",
             },
         )
@@ -2019,8 +2023,8 @@ def _cli() -> None:
         help="WARMUP: run ONE window in a THROWAWAY workspace (<results_dir>/warmup — its "
              "own db + journal) with per-step tracing ON, so you can oversee one window "
              "step by step (read its journal/steps.jsonl), stop-correct-restart until it is "
-             "meaningful, then clean up — WITHOUT polluting the real run. Validates the "
-             "mechanism on a fresh archive. Clean up with --cleanup-warmup.",
+             "meaningful, then keep it — WITHOUT polluting the real run. Validates the "
+             "mechanism on a fresh archive. Keep it with --accept-warmup.",
     )
     ap.add_argument(
         "--trace-steps", action="store_true",
@@ -2029,16 +2033,12 @@ def _cli() -> None:
              "journal/steps.jsonl exists for you to read.",
     )
     ap.add_argument(
-        "--cleanup-warmup", action="store_true",
-        help="delete the <results_dir>/warmup throwaway workspace and exit.",
-    )
-    ap.add_argument(
         "--accept-warmup", action="store_true",
-        help="S2: KEEP the orchestrator-approved final warmup — fold its archive into the real "
-             "db (the run then CONTINUES from the warmed population) and its spend into the real "
-             "ledger, then clean up, and exit. Run this BEFORE the first real window; it refuses "
-             "if the real archive already exists. Failed warmups are NOT accepted (just rerun "
-             "--warmup, which auto-resets).",
+        help="KEEP the approved warmup — fold its archive into the real db (the run then "
+             "CONTINUES from the warmed population) and its spend into the real ledger, then "
+             "clean up, and exit. Run this BEFORE the first real window; it refuses if the real "
+             "archive already exists. A failed warmup is NOT accepted (just rerun --warmup, "
+             "which auto-resets).",
     )
     args = ap.parse_args()
     with open(args.config, encoding="utf-8") as f:
@@ -2047,11 +2047,9 @@ def _cli() -> None:
     # so two worktrees can never collide on a shared launch CWD (the load-bearing anchor for the
     # per-run lock below — distinct configs ⇒ distinct results_dir ⇒ distinct lock).
     _absolutize_paths(cfg, args.config)
-    if args.cleanup_warmup:
-        removed = cleanup_warmup(cfg["results_dir"])
-        sys.stdout.write(_common.dumps({"ok": True, "cleaned_warmup": removed}))
-        sys.stdout.flush()
-        return
+    # The cooperative .stop sentinel lives in the run's results_dir. Capture it BEFORE the warmup
+    # redirect below so a .stop the agent writes to the parent dir still stops a warmup.
+    cfg["stop_dir"] = cfg["results_dir"]
     if args.accept_warmup:
         res = accept_warmup(cfg)
         sys.stdout.write(_common.dumps(res))
@@ -2116,8 +2114,9 @@ def _cli() -> None:
         result["warmup_workspace"] = _warmup_dir
         sys.stderr.write(
             f"[warmup] ran in throwaway workspace {_warmup_dir}\n"
-            f"[warmup] read the per-step trace at {_warmup_dir}/journal/steps.jsonl; when "
-            f"satisfied, clean up with --cleanup-warmup (or rm -rf {_warmup_dir})\n"
+            f"[warmup] read the per-step trace at {_warmup_dir}/journal/steps.jsonl; rerun "
+            f"--warmup to restart (auto-resets), or --accept-warmup to keep it and start the "
+            f"real run\n"
         )
     sys.stdout.write(_common.dumps(result))
     sys.stdout.flush()

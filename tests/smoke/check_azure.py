@@ -1,7 +1,9 @@
-"""Smoke test: hits each Azure deployment with a tiny prompt, prints latency + cost.
+"""Smoke probe: hits each Azure deployment with a tiny prompt, prints latency + cost.
 
-Run from repo root:
-    conda run -n shinka python scripts/test_azure.py
+Manual credential / deployment check. It makes small PAID calls (a few cents, dominated by
+gpt-5.4-pro) and is NOT counted in any run's budget ledger. It lives outside the pytest
+testpaths and is not named ``test_*``, so pytest never collects it. Run from repo root:
+    conda run -n shinka python tests/smoke/check_azure.py
 """
 
 import time

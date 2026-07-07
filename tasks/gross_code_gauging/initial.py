@@ -1,72 +1,92 @@
 """
-ShinkaEvolve INITIAL PROGRAM  --  gauging measurement of the logical Xalpha on
-the gross code (Williamson & Yoder, arXiv:2410.02213, Appendix B).
+ShinkaEvolve INITIAL PROGRAM -- end-to-end gauging measurement of the logical
+X_alpha on the gross code (Williamson & Yoder, arXiv:2410.02213).
 
-GOAL. Measure the logical operator Xalpha on the [[144,12,12]] gross code by
-"gauging" it: put a graph G on the 12 qubits in Xalpha's support, add one
-ancilla qubit per edge, and deform the code. The deformed code must keep the
-full distance 12. You choose the EDGES of G.
+GOAL. Design the complete GAUGING GADGET that measures the weight-12 logical
+X_alpha of the [[144,12,12]] gross code, evaluated END-TO-END: the evaluator
+builds the deformed code from your graph, auto-schedules its syndrome
+extraction (generic Tanner-graph edge coloring -- depth follows YOUR check
+weights and degrees), runs the full measurement protocol (gauge-in -> R
+deformed rounds -> gauge-out) as a stim circuit under circuit-level
+depolarizing noise, decodes with BP+OSD, and MEASURES the protocol's error:
+the probability that the reported measurement outcome is wrong or that any of
+the other 11 logical qubits is corrupted.
 
-THE KEY STRUCTURE (this is the paper's beautiful result -- exploit it).
-The deformed-code distance is governed by the EXPANSION of the graph G. A
-low-weight logical operator lives on a SPARSE VERTEX CUT of G, so the distance
-is limited by G's worst (sparsest) cut, and the only way to raise the distance
-is to reinforce that cut with edges. Concretely: the 18 mandatory base edges
-leave G with a sharp bottleneck -- its sparsest cut is crossed by only 2 edges --
-and that is exactly why the base-only distance is 8, not 12. Every one of the
-paper's 4 extra edges crosses that bottleneck. (The y^0 / y^3 monomial blocks are
-NOT the bottleneck -- the base graph already connects them with 12 of its 18
-edges.) So this is a graph-expansion problem, not blind edge enumeration.
+WHAT YOU RETURN (the whole design space of the paper, not just edges):
+  propose_gadget() -> {"edges": [(u, v), ...], "rounds": R}
+  * labels 0..11 = the 12 data qubits in supp(X_alpha) -- the graph VERTICES.
+    Monomial map (paper App. B): 0:1, 1:x, 2:x^2, 3:x^3, 4:x^6, 5:x^7, 6:x^8,
+    7:x^9, 8:xy^3, 9:x^5y^3, 10:x^7y^3, 11:x^11y^3.
+  * labels 12..35 = OPTIONAL DUMMY VERTICES (paper Remark 2). A dummy carries
+    NO physical qubit; its Gauss-law check is A_v = prod of X on its incident
+    edge qubits. Dummies are how the paper builds Shor-style stars (Remark 12),
+    surgery grids (Remark 11), and the THICKENED / cellulated layer stacks
+    (Definition 3) that keep check weights low -- all expressible right here
+    as extra labels + edges. A dummy costs 1 check (its A_v ancilla), and each
+    edge costs 1 data qubit, so structure is never free -- it must pay for
+    itself through the measured error.
+  * every EDGE = one new data qubit (init |0>). Parallel edges allowed
+    (the paper's double-gross example is a multigraph); no self-loops.
+  * "rounds" R in [1, 24] = deformed-code syndrome rounds. The measurement
+    outcome is protected in TIME only by the R repeats of the A_v checks
+    (fault distance min(R, spatial)); more rounds also expose all 12 logical
+    qubits to more noise. The optimum is genuinely nontrivial: for a related
+    gross-code measurement, Cross et al. (arXiv:2407.18393) found R=7 < d=12
+    optimal at p=0.001.
 
-WHAT IS FIXED (done for you by the evaluator -- you cannot change it):
-  * the gross code and the logical Xalpha;
-  * the 12 VERTICES of G = the 12 qubits of Xalpha (the monomials of f);
-  * the 18 mandatory MATCHING edges (BASE_EDGES): connect g,d in f whenever they
-    share a Z-check (g = B^T_i B_j d). The evaluator always adds these.
-  * the deformed-code construction (Av/Bp checks) and the distance computation.
+VALIDITY (evaluator-enforced; violations score -100 with a named reason):
+  * all 12 support vertices + every used dummy in ONE connected component
+    (Theorem 1: connectivity is what makes the measurement measure X_alpha);
+  * labels in range, no self-loops, <= 60 edges, <= 24 dummies, R in [1,24];
+  * the deformed code must have k=11 (checked; automatic when connected).
 
-WHAT YOU EVOLVE: propose_extra_edges() -> a list of EXTRA edges added on top of
-the 18 matching edges. Each edge is an unordered pair (u, v) of vertices from
-VERTICES. Each extra edge costs exactly ONE ancilla qubit.
+WHAT THE EVALUATOR DERIVES FOR YOU (deterministic, same for every candidate):
+  A_v Gauss-law checks; original Z-checks routed through your graph by exact
+  minimum-weight T-joins; flux checks B_p on a minimum-weight cycle basis,
+  reduced by the BB Z-check redundancy (the paper's 22-edge graph yields
+  exactly its published 7 B_p: five triangles + two squares); the coloration
+  schedule; the protocol circuit, detectors and byproduct corrections.
 
-TOOLS PROVIDED (fixed, call them from propose_extra_edges):
-  * graph_adjacency(extra)  -> {vertex: set(neighbours)} of G = base + extra
-  * vertex_degrees(extra)   -> {vertex: degree}
-  * fiedler_value(extra)    -> algebraic connectivity (2nd Laplacian eigenvalue);
-                               higher = more expansion = (heuristically) higher distance
-  * sparsest_cut(extra)     -> (cut_side, conductance, n_crossing_edges): the WEAKEST
-                               cut of G (the bottleneck). Bridge it to raise the distance.
-The evaluator's text feedback ALSO reports, every step, your graph's weakest cut,
-its Fiedler value, and -- on a failure -- which vertices the limiting low-weight
-logical sits on (where the distance is pinched). Use these signals.
+SCORE (higher is better; Q = edge_qubits + A_v checks + B_p checks):
+  reliable   (error <= gate):  score = (41 - Q) + min(2, margin_decades)
+  unreliable (error >  gate):  score = -8 + margin_decades   (>= -30)
+  invalid spec: -100;  crash: -1000.
+  The reference design (the paper's 22-edge graph, Q=41, R=12) scores ~0..+2.
+  Saving an element while staying reliable is +1 per element. The margin
+  bonus is capped at +2, so reliability can never buy unlimited structure --
+  but falling below the gate costs everything, so the frontier is: SMALLEST
+  RELIABLE GADGET. Both halves are measured, not proxied.
 
-VALIDITY (enforced by the evaluator; a violation scores -1000):
-  * every edge is a pair of two DISTINCT vertices, both in VERTICES; no self-loops.
-  (Duplicate / parallel edges are allowed but only waste a qubit.)
+LEVERS THAT ACTUALLY MOVE THE MEASURED ERROR (all reported in feedback):
+  * expansion where it matters: a logical pinches on a sparse cut of the
+    graph; reinforce THAT cut (conductance/Fiedler are only heuristics);
+  * check weight & degree -> schedule depth -> idle noise: heavy routed
+    Z-checks and long flux cycles deepen every round for everyone. Dummy
+    vertices can shorten routings and chop long cycles (the paper's whole
+    reason for thickening);
+  * rounds R: timelike protection of the outcome vs total noise exposure;
+  * raw size: every edge/check is an element of Q AND another noise location.
 
-HARD CONSTRAINT: deformed-code distance must equal 12. Distance is estimated with
-a hardened BP+OSD UPPER bound (any near-optimal claim is re-verified, and the final
-winner is certified exactly with integer programming, as in the paper). IMPORTANT:
-graph conductance is only a PROXY for the true quantum distance -- the distance
-depends on the SPECIFIC logical operators, so the minimal edge set is subtler than
-max-conductance greedy. Combine the cut/expansion structure with the dx/dz +
-limiting-logical feedback to decide which edges actually matter.
+THE SEED below is the known-good flat design: the 18 matching edges (the
+paper's weight-1-deformation motif -- NOT forced, but a strong starting
+skeleton) + 6 sparsest-cut-greedy expansion edges, R=12, no dummies
+(Q=45, reliably ~4 elements above the reference; the paper's own 4
+expansion edges reach Q=41). Directions the seed does NOT explore: pruning
+expansion edges, replacing matching edges entirely, dummy-vertex structure
+(stars/layers/cellulation), asymmetric R, parallel edges.
 
-OBJECTIVE: minimise the ancilla qubits (extra edges) while KEEPING distance 12.
-SCORE (higher is better): a distance-12 graph scores 24 - total_qubits (total =
-18 + extra_edges). So 24 qubits -> 0, the paper's 22 qubits -> +2, every qubit
-saved past that is +1. Distance < 12 scores about -90; an invalid edge -1000.
-
-THE SEED returns the sparsest-cut-greedy graph at 6 extra edges (24 qubits, score
-0): a feasibility-verified distance-12 baseline that reinforces the bottleneck. It
-overspends -- the SAME greedy reaches distance 12 at just 4 edges (22 qubits, the
-paper's count), so dropping the 2 non-critical edges already scores +2. Pushing
-BELOW 22 (beating the paper, which did NOT prove 22 minimal) is the open frontier
-and needs a smarter edge choice than greedy.
-
-NOT YOUR JOB (handled downstream, as in the paper): once edges are fixed, a
-min-weight cycle basis keeps the code LDPC (degree <= 7); it changes neither the
-distance nor the qubit count, so only the edge SET matters here.
+TOOLS PROVIDED (fixed, callable from the EVOLVE-BLOCK):
+  graph_adjacency(edges)      {vertex: set(neighbors)}
+  vertex_degrees(edges)       {vertex: degree}
+  fiedler_value(edges)        algebraic connectivity (expansion proxy)
+  sparsest_cut(edges)         (side, conductance, n_crossing) weakest cut
+  preview_gadget(edges, R)    LOCAL structural preview mirroring the
+                              evaluator: element count Q, #B_p after
+                              redundancy reduction, max check weights/degree,
+                              schedule depths, worst routing, longest cycle.
+                              Costs milliseconds -- use it to screen designs
+                              BEFORE spending an evaluation. (Structure only;
+                              the measured error needs the real evaluation.)
 """
 
 import itertools
@@ -74,102 +94,260 @@ import numpy as np
 
 # ---- fixed problem data (must match the evaluator) ----
 L, M = 12, 6
+N = L * M
 def _idx(a, b): return (a % L) * M + (b % M)
-F_TERMS  = [(0,0),(1,0),(2,0),(3,0),(6,0),(7,0),(8,0),(9,0),(1,3),(5,3),(7,3),(11,3)]
-VERTICES = [_idx(a, b) for a, b in F_TERMS]                 # 12 L-qubit indices
-VERT_AB  = {_idx(a, b): (a, b) for a, b in F_TERMS}         # index -> (a,b) monomial
-_B   = [(0, 3), (2, 0), (1, 0)]                             # B = y^3 + x^2 + x
-_BT  = [((-c) % L, (-d) % M) for c, d in _B]
-_CONN = {((ci+cj) % L, (di+dj) % M) for ci, di in _BT for cj, dj in _B} - {(0, 0)}
-_FS  = set(F_TERMS)
-BASE_EDGES = sorted(                                        # the 18 forced edges
-    {frozenset((_idx(a, b), _idx((a+cc) % L, (b+dd) % M)))
-     for a, b in F_TERMS for cc, dd in _CONN
-     if ((a+cc) % L, (b+dd) % M) in _FS and ((a+cc) % L, (b+dd) % M) != (a, b)},
-    key=lambda e: sorted(e))
+F_TERMS = [(0,0),(1,0),(2,0),(3,0),(6,0),(7,0),(8,0),(9,0),(1,3),(5,3),(7,3),(11,3)]
+SUPPORT = [_idx(a, b) for a, b in F_TERMS]
+MAX_DUMMIES, MAX_EDGES, MAX_ROUNDS = 24, 60, 24
 
-# ---- fixed GRAPH PRIMITIVES on G = base + extra (call these from the EVOLVE-BLOCK) ----
-def graph_adjacency(extra):
-    """{vertex: set(neighbours)} for G = BASE_EDGES + extra."""
-    adj = {v: set() for v in VERTICES}
-    for e in list(BASE_EDGES) + [frozenset(p) for p in extra]:
-        u, w = tuple(e); adj[u].add(w); adj[w].add(u)
+_Bpoly  = [(0, 3), (2, 0), (1, 0)]
+_BTpoly = [((-c) % L, (-d) % M) for c, d in _Bpoly]
+_conn = {((ci + cj) % L, (di + dj) % M) for ci, di in _BTpoly for cj, dj in _Bpoly} - {(0, 0)}
+_fpos = {t: i for i, t in enumerate(F_TERMS)}
+MATCHING_EDGES = sorted({
+    (min(_fpos[(a, b)], _fpos[nb]), max(_fpos[(a, b)], _fpos[nb]))
+    for (a, b) in F_TERMS for (cc, dd) in _conn
+    for nb in [((a + cc) % L, (b + dd) % M)]
+    if nb in _fpos and nb != (a, b)
+})          # the 18 pairs of support vertices that share a Z-check
+
+def _build_hz():
+    _ATpoly = [((-c) % L, (-d) % M) for c, d in [(3, 0), (0, 2), (0, 1)]]
+    HZ = np.zeros((N, 2 * N), np.int8)
+    for a in range(L):
+        for b in range(M):
+            r = _idx(a, b)
+            for c, d in _BTpoly: HZ[r, _idx(a + c, b + d)] ^= 1
+            for c, d in _ATpoly: HZ[r, N + _idx(a + c, b + d)] ^= 1
+    return HZ
+_HZ0 = _build_hz()
+
+# ---- graph primitives over the gadget graph (support labels 0..11 + dummies) ----
+def _verts_of(edges):
+    dummies = sorted({x for e in edges for x in e if x >= 12})
+    return list(range(12)) + dummies
+
+def graph_adjacency(edges):
+    adj = {v: set() for v in _verts_of(edges)}
+    for (u, w) in edges:
+        adj[u].add(w); adj[w].add(u)
     return adj
 
-def vertex_degrees(extra):
-    """{vertex: degree} for G = BASE_EDGES + extra."""
-    adj = graph_adjacency(extra)
-    return {v: len(adj[v]) for v in VERTICES}
+def vertex_degrees(edges):
+    deg = {v: 0 for v in _verts_of(edges)}
+    for (u, w) in edges:
+        deg[u] += 1; deg[w] += 1
+    return deg
 
-def fiedler_value(extra):
-    """Algebraic connectivity (2nd-smallest Laplacian eigenvalue) of G; a proxy
-    for expansion -- higher tends to mean higher code distance."""
-    idx = {v: i for i, v in enumerate(VERTICES)}; nV = len(VERTICES)
-    Lap = np.zeros((nV, nV))
-    for e in list(BASE_EDGES) + [frozenset(p) for p in extra]:
-        u, w = tuple(e); i, j = idx[u], idx[w]
+def fiedler_value(edges):
+    verts = _verts_of(edges); pos = {v: i for i, v in enumerate(verts)}
+    Lap = np.zeros((len(verts), len(verts)))
+    for (u, w) in edges:
+        i, j = pos[u], pos[w]
         Lap[i, i] += 1; Lap[j, j] += 1; Lap[i, j] -= 1; Lap[j, i] -= 1
-    return float(sorted(np.linalg.eigvalsh(Lap))[1])
+    return float(sorted(np.linalg.eigvalsh(Lap))[1]) if len(verts) > 1 else 0.0
 
-def sparsest_cut(extra):
-    """Weakest cut of G = base + extra: returns (cut_side, conductance, n_crossing).
-    cut_side is the smaller side (sorted vertex ids); 12 vertices -> exact brute
-    force. This bottleneck is what limits the code distance -- bridge it."""
-    adj = graph_adjacency(extra); nV = len(VERTICES)
-    deg = {v: len(adj[v]) for v in VERTICES}; vol = sum(deg.values()); best = None
-    for r in range(1, nV // 2 + 1):
-        for S in itertools.combinations(VERTICES, r):
-            Sset = set(S)
-            cut = sum(1 for u in S for w in adj[u] if w not in Sset)
-            vS = sum(deg[u] for u in S); other = vol - vS
-            cond = cut / min(vS, other) if min(vS, other) > 0 else 9.0
-            if best is None or cond < best[0]: best = (cond, cut, sorted(S))
-    cond, cut, S = best
-    return S, cond, cut
+def sparsest_cut(edges):
+    """Weakest cut (exact for <= 14 vertices, Fiedler sweep beyond)."""
+    verts = _verts_of(edges); nV = len(verts); pos = {v: i for i, v in enumerate(verts)}
+    adj = {i: set() for i in range(nV)}
+    for (u, w) in edges:
+        adj[pos[u]].add(pos[w]); adj[pos[w]].add(pos[u])
+    deg = [len(adj[i]) for i in range(nV)]; vol = sum(deg); best = None
+    if nV <= 14:
+        for r in range(1, nV // 2 + 1):
+            for S in itertools.combinations(range(nV), r):
+                Ss = set(S)
+                cut = sum(1 for i in S for j in adj[i] if j not in Ss)
+                vS = sum(deg[i] for i in S); other = vol - vS
+                cond = cut / min(vS, other) if min(vS, other) > 0 else 9.0
+                if best is None or cond < best[0]:
+                    best = (cond, cut, sorted(verts[i] for i in S))
+    else:
+        Lap = np.zeros((nV, nV))
+        for (u, w) in edges:
+            i, j = pos[u], pos[w]
+            Lap[i, i] += 1; Lap[j, j] += 1; Lap[i, j] -= 1; Lap[j, i] -= 1
+        vec = np.linalg.eigh(Lap)[1][:, 1]; order = np.argsort(vec)
+        for cutpos in range(1, nV):
+            Ss = set(order[:cutpos].tolist())
+            cut = sum(1 for i in Ss for j in adj[i] if j not in Ss)
+            vS = sum(deg[i] for i in Ss); other = vol - vS
+            if min(vS, other) == 0: continue
+            cond = cut / min(vS, other)
+            if best is None or cond < best[0]:
+                best = (cond, cut, sorted(verts[i] for i in Ss))
+    cond, cut, side = best
+    return side, cond, cut
+
+# ---- local structural preview (mirrors the evaluator's derivations) ----
+def _paths(verts, edges):
+    adj = {v: [] for v in verts}
+    for j, (u, v) in enumerate(edges):
+        adj[u].append((v, j)); adj[v].append((u, j))
+    paths = {}
+    for s in verts:
+        prev = {s: None}; order = [s]; qi = 0
+        while qi < len(order):
+            x = order[qi]; qi += 1
+            for (y, j) in adj[x]:
+                if y not in prev:
+                    prev[y] = (x, j); order.append(y)
+        for t in verts:
+            if t in prev:
+                es = set(); x = t
+                while prev[x] is not None:
+                    px, j = prev[x]; es.add(j); x = px
+                paths[(s, t)] = frozenset(es)
+    return paths
+
+def _tjoin(T, paths):
+    T = list(T)
+    if not T: return frozenset()
+    def matchings(rem):
+        if not rem:
+            yield []; return
+        a = rem[0]
+        for i in range(1, len(rem)):
+            for m in matchings(rem[1:i] + rem[i + 1:]):
+                yield [(a, rem[i])] + m
+    best = None
+    for m in matchings(T):
+        es = set(); ok = True
+        for (a, b) in m:
+            if (a, b) not in paths: ok = False; break
+            es ^= set(paths[(a, b)])
+        if ok and (best is None or len(es) < len(best)):
+            best = es
+    return frozenset(best) if best is not None else None
+
+def _rank2(Mx):
+    Mx = Mx.copy() % 2; r = 0; rows, cols = Mx.shape
+    for c in range(cols):
+        piv = next((i for i in range(r, rows) if Mx[i, c]), None)
+        if piv is None: continue
+        Mx[[r, piv]] = Mx[[piv, r]]
+        for i in range(rows):
+            if i != r and Mx[i, c]: Mx[i] ^= Mx[r]
+        r += 1
+        if r == rows: break
+    return r
+
+def preview_gadget(edges, rounds=12):
+    """Structural preview of what the evaluator will build. Returns a dict
+    (or {'error': reason}). Milliseconds; no simulation."""
+    edges = [(min(int(u), int(v)), max(int(u), int(v))) for (u, v) in edges]
+    if any(u == v for (u, v) in edges): return {"error": "self-loop"}
+    if len(edges) > MAX_EDGES: return {"error": f">{MAX_EDGES} edges"}
+    verts = _verts_of(edges)
+    adj = graph_adjacency(edges)
+    seen, stack = set(), [0]
+    while stack:
+        x = stack.pop()
+        if x in seen: continue
+        seen.add(x); stack.extend(adj[x] - seen)
+    if set(verts) - seen:
+        return {"error": f"disconnected: {sorted(set(verts) - seen)}"}
+    E = len(edges); paths = _paths(verts, edges)
+    # routing of the 18 overlapping Z checks
+    route_w, edge_use = [], {}
+    for r in range(N):
+        T = [i for i in range(12) if _HZ0[r, SUPPORT[i]]]
+        if not T: continue
+        g = _tjoin(T, paths)
+        if g is None: return {"error": "routing failed"}
+        route_w.append(len(g))
+        for j in g: edge_use[j] = edge_use.get(j, 0) + 1
+    # min cycle basis (Horton-lite), then redundancy-reduced count:
+    dim = E - len(verts) + 1
+    cands = set()
+    for j, (x, y) in enumerate(edges):
+        for v in verts:
+            if (v, x) in paths and (v, y) in paths:
+                cset = set(paths[(v, x)]) ^ set(paths[(v, y)]); cset.add(j)
+                dd = {}
+                for k in cset:
+                    for w in edges[k]: dd[w] = dd.get(w, 0) + 1
+                if all(d % 2 == 0 for d in dd.values()):
+                    cands.add(frozenset(cset))
+    bp = {}
+    for j, e in enumerate(edges): bp.setdefault(e, []).append(j)
+    for js in bp.values():
+        for a, b in itertools.combinations(js, 2): cands.add(frozenset({a, b}))
+    basis, cur = [], np.zeros((0, E), np.int8)
+    for cset in sorted(cands, key=lambda c: (len(c), sorted(c))):
+        v = np.zeros(E, np.int8)
+        for j in cset: v[j] = 1
+        t = np.vstack([cur, v.reshape(1, -1)])
+        if _rank2(t) > cur.shape[0]:
+            cur = t; basis.append(cset)
+            if len(basis) == dim: break
+    # BB Z-check redundancy removes rank(HZ0)-deficit cycles; approximate the
+    # evaluator's exact reduction with the known constant for single-logical
+    # gauging of the gross code (4 redundant cycles; exact when all 18
+    # overlapping checks are routed):
+    n_bp = max(0, dim - 4)
+    n_av = len(verts)
+    # greedy-coloring depths (checks colored by (qubit, ancilla) conflicts):
+    depth_z = max([6 + w for w in route_w] + [len(c) for c in basis] + [6]) + 3
+    deg = vertex_degrees(edges)
+    depth_x = max(6, max(deg.values()) + 1) + 2
+    Q = E + n_av + n_bp
+    return {
+        "elements": Q, "edge_qubits": E, "av_checks": n_av, "bp_checks": n_bp,
+        "dummies": len(verts) - 12, "rounds": int(rounds),
+        "score_if_reliable": 41 - Q,
+        "wz_max_est": max([6 + w for w in route_w] + [max((len(c) for c in basis), default=0)]),
+        "route_w_max": max(route_w, default=0),
+        "cycle_w_max": max((len(c) for c in basis), default=0),
+        "max_degree": max(deg.values()),
+        "depth_x_est": depth_x, "depth_z_est": depth_z,
+        "fiedler": round(fiedler_value(edges), 3),
+        "sparsest_cut": sparsest_cut(edges),
+    }
 
 # EVOLVE-BLOCK-START
-def propose_extra_edges():
-    """Return a list of extra edges (u, v), with u, v in VERTICES.
+def propose_gadget():
+    """Return the gauging gadget spec: {"edges": [(u,v), ...], "rounds": R}.
 
-    Seed = SPARSEST-CUT GREEDY: repeatedly find G's weakest cut and add the cheapest
-    edge crossing it (lowest combined degree), NUM_EXTRA times. This reinforces the
-    expansion bottleneck that limits the distance -- the way the paper's edges do.
-    At NUM_EXTRA=6 it is a feasibility-verified distance-12 graph (24 qubits, score 0)
-    that OVERSPENDS: the same greedy holds distance 12 at 4 edges (22 qubits, +2), so
-    dropping the 2 non-critical edges already matches the paper. Beating 22 needs a
-    smarter choice than greedy (conductance is only a proxy for the true distance) --
-    use sparsest_cut()/fiedler_value()/vertex_degrees() with the evaluator's dx/dz +
-    cut + limiting-logical feedback to pick edges that the true distance actually needs.
+    SEED: the 18 matching edges (weight-1 deformation motif) + sparsest-cut
+    greedy expansion edges, no dummies, R=12. This is a reliably-measuring
+    flat graph at Q=45 (score ~ -4 + margin bonus); the reference design
+    reaches Q=41 with only 4 expansion edges, and NOTHING says 41 (or a flat,
+    dummy-free, R=12 graph) is optimal. Use preview_gadget() to screen
+    structural ideas cheaply, and the evaluator's measured-error feedback to
+    decide what the reliability can afford to lose.
     """
-    NUM_EXTRA = 6  # 24 qubits, score 0; 4 already suffice (22q, +2) -- prune, then go lower
-
-    extra = []
+    NUM_EXTRA = 6
+    edges = list(MATCHING_EDGES)
     for _ in range(NUM_EXTRA):
-        side, _cond, _ncross = sparsest_cut(extra)
-        adj = graph_adjacency(extra); deg = vertex_degrees(extra)
+        side, _cond, _ncross = sparsest_cut(edges)
+        adj = graph_adjacency(edges)
+        deg = vertex_degrees(edges)
         side_set = set(side)
-        outside = [w for w in VERTICES if w not in side_set]
+        outside = [w for w in _verts_of(edges) if w not in side_set]
         cands = sorted((deg[u] + deg[w], u, w)
                        for u in side for w in outside if w not in adj[u])
         if not cands:
             break
         _, u, w = cands[0]
-        extra.append((u, w))
-    return extra
+        edges.append((min(u, w), max(u, w)))
+    return {"edges": edges, "rounds": 12}
 # EVOLVE-BLOCK-END
 
 
 def run_experiment():
     """Fixed entry point called by evaluate.py (NOT evolved).
 
-    Returns the candidate's edge-proposing FUNCTION so the evaluator can call it
-    inside its own try/except (a crash -> score -1000) and then build + score the
-    deformed code with its own trusted functions. shinka's run_shinka_eval calls
-    this once with no kwargs (num_runs=1); aggregate_metrics_fn receives
-    [propose_extra_edges] and drives the build/distance/scoring itself.
+    Returns the candidate's gadget-proposing FUNCTION so the evaluator can
+    call it inside its own try/except (a crash -> score -1000) and then
+    build, schedule, simulate and score the protocol with its own trusted
+    code. shinka's run_shinka_eval calls this once with no kwargs.
     """
-    return propose_extra_edges
+    return propose_gadget
 
 
 if __name__ == "__main__":
-    print(run_experiment()())
+    spec = run_experiment()()
+    print(f"edges={len(spec['edges'])}, rounds={spec['rounds']}")
+    print(preview_gadget(spec["edges"], spec["rounds"]))

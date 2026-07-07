@@ -52,7 +52,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     parent_score = float(parent.get("combined_score", 0.0) or 0.0)
     improvement = score - parent_score
 
-    # C2: persist the per-eval runtime + a timed_out flag so a slow-but-correct (or
+    # Persist the per-eval runtime + a timed_out flag so a slow-but-correct (or
     # timed-out) candidate is VISIBLE to downstream prompt builders. construct_mutation_prompt
     # uses these (vs task.eval_time) to surface a bounded runtime-budget caution to the LLM so
     # future candidates finish within the budget. These are NUMERIC/boolean (not evaluator text),
@@ -77,7 +77,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "novelty_max_similarity": novelty.get("max_similarity"),
         "novelty_n_compared": novelty.get("n_compared"),
         "novelty_most_similar_id": novelty.get("most_similar_id"),
-        # runtime signals (C2) — runtime always recorded; timed_out only when True (compact)
+        # runtime signals — runtime always recorded; timed_out only when True (compact)
         "runtime_sec": (float(_runtime) if _runtime is not None else None),
         "timed_out": (True if ev.get("timed_out") else None),
     }

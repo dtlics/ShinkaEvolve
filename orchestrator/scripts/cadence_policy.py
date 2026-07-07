@@ -1,6 +1,6 @@
 """cadence_policy.py — decide WHEN the inner loop returns control to you.
 
-MUTABILITY: FOUNDATION — NOT orchestrator-rewritable (S1 ruling, 2026-06-13). The wake-decay
+MUTABILITY: FOUNDATION — NOT orchestrator-rewritable (owner ruling, 2026-06-13). The wake-decay
 schedule and run termination are part of the contract: an orchestrator must not be able to
 change how often it wakes or when its own run ends (it could inadvertently keep itself
 asleep/awake or extend its own run). It is therefore REMOVED from strategy_store.MUTABLE_TARGETS,

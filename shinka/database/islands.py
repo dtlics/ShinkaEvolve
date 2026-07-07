@@ -104,7 +104,7 @@ class DefaultIslandAssignmentStrategy(IslandStrategy):
 
         # Final fallback: assign to the LEAST-POPULATED island (not a random one) so
         # evicted-lineage rows with a NULL parent island don't lump onto one island
-        # and skew diversity (M13 edge). Defensive: any query issue falls back to 0.
+        # and skew diversity. Defensive: any query issue falls back to 0.
         try:
             self.cursor.execute(
                 "SELECT island_idx, COUNT(*) AS c FROM programs "
@@ -196,7 +196,7 @@ class CopyInitialProgramIslandStrategy(IslandStrategy):
 
         # Final fallback: assign to the LEAST-POPULATED island (not a random one) so
         # evicted-lineage rows with a NULL parent island don't lump onto one island
-        # and skew diversity (M13 edge). Defensive: any query issue falls back to 0.
+        # and skew diversity. Defensive: any query issue falls back to 0.
         try:
             self.cursor.execute(
                 "SELECT island_idx, COUNT(*) AS c FROM programs "
@@ -249,12 +249,12 @@ class ElitistMigrationStrategy(IslandMigrationStrategy):
         if num_islands < 2 or migration_rate <= 0:
             return False  # No migration needed
 
-        # M18: migrate over the ACTIVE island indices actually present in the archive, NOT
+        # Migrate over the ACTIVE island indices actually present in the archive, NOT
         # range(num_islands). spawn_new_island allocates indices >= the configured num_islands
-        # (and does NOT bump self.config.num_islands), so a dynamically spawned island was
-        # invisible to range(num_islands) — it could neither send nor receive migrants and stayed
-        # genetically isolated for the rest of the run. Keying on the real island_idx set fixes
-        # that AND naturally skips an evicted index (NULLed island_idx leaves the set).
+        # (and does NOT bump self.config.num_islands), so range(num_islands) would miss a
+        # dynamically spawned island — it could neither send nor receive migrants and would stay
+        # genetically isolated for the rest of the run. Keying on the real island_idx set covers
+        # spawned islands AND naturally skips an evicted index (NULLed island_idx leaves the set).
         self.cursor.execute(
             "SELECT DISTINCT island_idx FROM programs "
             "WHERE island_idx IS NOT NULL ORDER BY island_idx"
@@ -284,7 +284,7 @@ class ElitistMigrationStrategy(IslandMigrationStrategy):
             # Number of programs to migrate
             num_migrants = max(1, int(island_size * migration_rate))
 
-            # Select destination islands (all active except source) — M18: active set, not range
+            # Select destination islands (all active except source) — the active set, not range(num_islands)
             dest_islands = [i for i in active_islands if i != source_idx]
             if not dest_islands:
                 continue
@@ -1052,7 +1052,7 @@ class CombinedIslandManager:
         return len(ids)
 
     def retire_island(self, idx: int) -> int:
-        """M16: explicitly retire island ``idx`` on a policy decision, via the same
+        """Explicitly retire island ``idx`` on a policy decision, via the same
         NON-DESTRUCTIVE eviction used at the spawn cap (rows preserved + tombstoned, island_idx
         NULLed). PROTECTS island 0 (the seed lineage) and the global-best island so a retire can
         never orphan the seed or drop the best program. Returns the number of programs retired
@@ -1145,7 +1145,7 @@ class CombinedIslandManager:
             )
             return False
 
-        # Get the next island index, honoring config.max_islands (M13): the capped
+        # Get the next island index, honoring config.max_islands: the capped
         # allocator evicts the worst island at the cap (protecting island 0 + the
         # global best) instead of growing unbounded. No-op when max_islands<=0.
         new_island_idx = self.allocate_island_index_for_spawn()

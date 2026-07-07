@@ -11,7 +11,7 @@ This computes the near-duplicate decision: compare the candidate's embedding
 (optionally island-filtered, non-tombstoned) correct archive by cosine
 similarity; ``accept=False`` when the max similarity ≥ ``code_embed_sim_threshold``
 (default 0.99 — a near-duplicate), and it also returns the most-similar program's id
-AND score so the CALLER can KEEP THE BETTER of the pair (H5): run_window evaluates a
+AND score so the CALLER can KEEP THE BETTER of the pair: run_window evaluates a
 near-duplicate, compares scores, and either drops the worse newcomer or archives it
 and tombstones the worse incumbent. (This file only DECIDES near-duplication + surfaces
 the comparison data; the keep-better eviction is wired in run_window.) test_parity.py
@@ -30,7 +30,7 @@ INPUT (stdin JSON):
 
 OUTPUT (stdout JSON):
   { "ok": true, "accept": bool, "max_similarity": float,
-    "most_similar_id": str | null, "most_similar_score": float | null,  # H5: keep-the-better
+    "most_similar_id": str | null, "most_similar_score": float | null,  # for keep-the-better
     "n_compared": int }
 """
 
@@ -63,7 +63,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     if not cand:
         # No embedding to judge -> accept (matches shinka's "no embedding" skip).
-        # N6: include most_similar_score (None) so this early return honors the same
+        # Include most_similar_score (None) so this early return honors the same
         # OUTPUT contract as the main return — a caller that reads it for keep-the-better
         # gets a consistent shape on every path.
         return {"accept": True, "max_similarity": 0.0, "most_similar_id": None,
@@ -87,7 +87,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     for p in programs:
         if not p.get("correct"):
             continue
-        # H5: a tombstoned program (de-archived — e.g. EVICTED as the worse of a
+        # A tombstoned program (de-archived — e.g. EVICTED as the worse of a
         # near-duplicate pair by keep-the-better, or repair-removed) must NOT keep
         # blocking new candidates.
         if (p.get("metadata") or {}).get("repair_tombstoned") is True:
@@ -109,7 +109,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "accept": bool(accept),
         "max_similarity": max_sim,
         "most_similar_id": most_similar_id,
-        # H5: the incumbent's score so the caller can KEEP THE BETTER of a near-dup pair.
+        # The incumbent's score so the caller can KEEP THE BETTER of a near-dup pair.
         "most_similar_score": most_similar_score,
         "n_compared": n,
     }

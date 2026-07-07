@@ -21,20 +21,20 @@ INPUT (stdin JSON):
     "ancestor_inspirations": [ {same shape} ],  # FIX branch only: correct ancestors to learn from
     "meta_recommendations": str | null,
     "failure_note": str | null,      # persistent caution; ALWAYS rendered (never dropped)
-    "island_brief": str | null,      # per-island direction (H1)
+    "island_brief": str | null,      # per-island direction
     "brief_compose_mode": "replace" | "augment",  # how a brief combines with the global dir
     "task_sys_msg": str | null,
     "patch_types": ["diff","full","cross"],
     "patch_type_probs": [0.6,0.3,0.1],
     "language": "python",
-    "forced_patch_type": str | null, # D4: the patch MODE run_window sampled (diff/full/cross); null = sampler samples internally
-    "objective_brief": str | null,   # Point 4.3: orchestrator-authored objective/score-shape gloss (what we optimize + constraints)
+    "forced_patch_type": str | null, # the patch MODE run_window sampled (diff/full/cross); null = sampler samples internally
+    "objective_brief": str | null,   # orchestrator-authored objective/score-shape gloss (what we optimize + constraints)
     "inspiration_sort_order": "ascending",
     "extra_guidance": str | null,   # appended to the system prompt (rewrite lever)
-    "eval_budget_sec": float | null,    # C2: per-eval time budget (task.eval_time secs) for the runtime caution
-    "slow_caution_frac": 0.8,           # C2: runtime >= this*budget counts as "slow" (default 0.8)
-    "parent_runtime_sec": float | null, # C2 (immediate-fix only): the just-failed candidate's runtime
-    "parent_timed_out": bool | null,    # C2 (immediate-fix only): did the just-failed candidate time out
+    "eval_budget_sec": float | null,    # per-eval time budget (task.eval_time secs) for the runtime caution
+    "slow_caution_frac": 0.8,           # runtime >= this*budget counts as "slow" (default 0.8)
+    "parent_runtime_sec": float | null, # immediate-fix only: the just-failed candidate's runtime
+    "parent_timed_out": bool | null,    # immediate-fix only: did the just-failed candidate time out
     "seed": int | null
   }
 
@@ -84,7 +84,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         language=payload.get("language", "python"),
         patch_types=payload.get("patch_types"),
         patch_type_probs=payload.get("patch_type_probs"),
-        use_text_feedback=True,  # Point 5: spoil apparatus removed — evaluator feedback always fed
+        use_text_feedback=True,  # evaluator text feedback is ALWAYS fed to the inner loop (never gated)
         inspiration_sort_order=payload.get("inspiration_sort_order", "ascending"),
     )
 
@@ -103,7 +103,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         # brief_compose_mode (MUTABLE lever): "replace" (default) lets a per-island
         # brief stand in for the global direction (the FOUNDATION sampler's `prefer`
         # semantic); "augment" layers the brief ON TOP of the global direction. The
-        # composition is done HERE (mutable) rather than hardcoded in sampler.py (K7).
+        # composition is done HERE (mutable) rather than hardcoded in sampler.py.
         _meta_recs = payload.get("meta_recommendations")
         _island_brief = payload.get("island_brief")
         if (
@@ -130,7 +130,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     if extra:
         patch_sys = f"{patch_sys}\n\n# Additional guidance\n{extra}"
 
-    # C2 runtime-budget caution: if the parent, an inspiration, or (immediate-fix) the
+    # Runtime-budget caution: if the parent, an inspiration, or (immediate-fix) the
     # just-failed candidate ran close to the per-eval time budget — or was timed out —
     # surface a BOUNDED caution so the LLM keeps its synthesis within budget. This does NOT
     # penalize a slow-but-correct candidate (still archived/scored/rewarded normally); it only

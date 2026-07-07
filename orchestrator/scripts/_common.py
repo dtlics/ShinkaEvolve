@@ -206,7 +206,7 @@ def program_summary(
 
 
 def log_external_call(results_dir, kind, request, response, cost=0.0, summary=None):
-    """WS7: self-log an external LLM call (meta / deep_research) to the run journal,
+    """Self-log an external LLM call (meta / deep_research) to the run journal,
     so the prompt + raw output are persisted (never overwritten) and the cost folds
     into the ledger automatically — the orchestrator just passes ``results_dir``.
 
@@ -231,7 +231,7 @@ def log_external_call(results_dir, kind, request, response, cost=0.0, summary=No
 
 
 def _lazy_journal():
-    """Import the FOUNDATION journal via the sanctioned ../harness bridge (O11) — the
+    """Import the FOUNDATION journal via the sanctioned ../harness bridge — the
     same lazy path log_external_call uses, so a MUTABLE script may READ the journal
     without a hard scripts->harness import dependency. Returns the module or None."""
     try:
@@ -249,7 +249,7 @@ def _lazy_journal():
 
 
 def budget_remaining(results_dir, budget):
-    """D3 (O11): journal.budget_remaining via the lazy bridge. None when unavailable
+    """journal.budget_remaining via the lazy bridge. None when unavailable
     (caller treats None as 'unknown' and does not skip)."""
     if not results_dir or budget is None:
         return None
@@ -261,7 +261,7 @@ def budget_remaining(results_dir, budget):
 
 
 def recent_meta_directions(results_dir, k=3):
-    """F3: direction texts from the last ``k`` meta calls (so a meta round can
+    """Direction texts from the last ``k`` meta calls (so a meta round can
     auto-populate prior_recommendations and avoid re-proposing duplicates). Best-effort
     → [] when unavailable."""
     if not results_dir:
@@ -283,7 +283,7 @@ def recent_meta_directions(results_dir, k=3):
 
 
 def recent_meta_output(results_dir):
-    """M1: the LAST logged meta round's global output {directions, failure_note} from
+    """The LAST logged meta round's global output {directions, failure_note} from
     journal/calls — so a fresh cluster process can RE-HYDRATE evo.meta_directions /
     evo.meta_failure_note (the in-memory-only global channel that is otherwise lost at every
     relaunch — i.e. every window of the failure-heavy early phase). Best-effort -> {}."""

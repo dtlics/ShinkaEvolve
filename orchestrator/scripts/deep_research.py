@@ -5,7 +5,7 @@ Do NOT rewrite this. It wraps shinka's ``o3-deep-research`` path (a separate
 Azure resource, ~$5/call). The orchestrator is free to *call* it and *interpret*
 its output, but must not change its body. Per the SKILL.md: call it at problem
 onset (to seed the initial program / island count / prompt) and at stuck-
-stagnation moments (L43 — per SKILL.md: after a meta round AND at least one cheaper move have
+stagnation moments (per SKILL.md: after a meta round AND at least one cheaper move have
 not moved the best score; there is no fixed "N rewrites" threshold). Be
 deliberate — it is the most expensive single action in the system. Before calling,
 the orchestrator runs the SKILL.md "pre-flight self-check": the QUERY must target
@@ -27,10 +27,10 @@ INPUT (stdin JSON):
     "model": "o3-deep-research",
     "reasoning_effort": "medium",
     "max_tool_calls": 20,
-    "results_dir": str | null,       # WS7: if set, self-log the full call + fold cost into the ledger
-    "budget_usd": float | null,      # D3: with results_dir, pre-flight-skip when budget can't cover dr_estimated_cost_usd
-    "dr_estimated_cost_usd": 5.0,    # D3 pre-flight estimate
-    "search_surcharge_usd": 0.30,    # D6: web-search cost guard (conservative over-estimate)
+    "results_dir": str | null,       # if set, self-log the full call + fold cost into the ledger
+    "budget_usd": float | null,      # with results_dir, pre-flight-skip when budget can't cover dr_estimated_cost_usd
+    "dr_estimated_cost_usd": 5.0,    # pre-flight estimate
+    "search_surcharge_usd": 0.30,    # web-search cost guard (conservative over-estimate)
     "mock": false, "mock_text": str | null
   }
 
@@ -40,7 +40,7 @@ OUTPUT (stdout JSON):
     "brief": [ {idea, rationale, reference_source, reference_snippet, gotchas} ],
     "raw_text": str, "cost": float, "model": str
   }
-  On a REFUSED/FAILED call (P7-T6): { "refused": true, "degraded": true,
+  On a REFUSED/FAILED call: { "refused": true, "degraded": true,
     "reason": "content_filter" | "dr_failed:<...>", "brief": [], "cost": <billed> } —
     the query is preserved in the journal; RESHAPE the query, never re-fire the same one.
 """
@@ -74,10 +74,10 @@ def _parse_brief(text: str) -> List[Dict[str, Any]]:
             return _extract(json.loads(candidate))
         except json.JSONDecodeError:
             pass
-        # M6: trim from the end in CANDIDATE-relative coordinates (candidate is blob[start:],
-        # rebased to 0) — NOT the blob-coordinate `start`. The old `range(..., start, -1)` was
-        # EMPTY whenever the leading prose was longer than the JSON, so a billed brief that
-        # contained usable techniques was silently parsed to [].
+        # Trim from the end in CANDIDATE-relative coordinates (candidate is blob[start:],
+        # rebased to 0) — NOT the blob-coordinate `start`. A range bounded below by the
+        # blob-coordinate `start` would be EMPTY whenever the leading prose is longer than
+        # the JSON, silently parsing a billed brief with usable techniques to [].
         for end in range(len(candidate), 0, -1):
             try:
                 return _extract(json.loads(candidate[:end]))
@@ -92,9 +92,9 @@ def _parse_brief(text: str) -> List[Dict[str, Any]]:
             return data
         return None
 
-    # L45: try EACH fenced block (the techniques JSON may sit in a SECOND ``` fence after a
-    # non-JSON code sample — the old first-fence-wins missed it), then the unfenced text; take
-    # the first that yields items.
+    # Try EACH fenced block (the techniques JSON may sit in a SECOND ``` fence after a
+    # non-JSON code sample, which a first-fence-wins scan would miss), then the unfenced
+    # text; take the first that yields items.
     for blob in re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL) + [text]:
         items = _items_from(blob)
         if not items:
@@ -131,7 +131,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         text = payload.get("mock_text", "") or "[]"
         return {"brief": _parse_brief(text), "raw_text": text, "cost": 0.0, "model": model}
 
-    # D3 (H5b, opt-in): budget pre-flight — DR is the single most expensive action (~$5).
+    # Opt-in budget pre-flight — DR is the single most expensive action (~$5).
     # Only fires if the agent threads budget_usd (an opt-in guard, NOT an autonomous
     # guarantee — the harness never calls DR). Skip the spend when budget can't cover it.
     _rd, _bud = payload.get("results_dir"), payload.get("budget_usd")
@@ -148,7 +148,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # web-search surcharge (the DR model runs web_search internally; not in token usage).
     search_surcharge = float(payload.get("search_surcharge_usd", 0.30))
     try:
-        # L40: construct the DR client INSIDE the try so a missing AZURE_DR_* env (RuntimeError)
+        # Construct the DR client INSIDE the try so a missing AZURE_DR_* env (RuntimeError)
         # returns the documented degraded `refused` envelope instead of escaping main() as an
         # ok:false crash that bypasses the orchestrator's refused-handling and journals nothing.
         client, _base = get_dr_async_client()
@@ -165,14 +165,14 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             )
         )
     except Exception as exc:
-        # P7-T6: a refused/failed DR call must NOT crash the orchestrator. Classify the
+        # A refused/failed DR call must NOT crash the orchestrator. Classify the
         # reason, fold the billed cost (the transport attached err.cost) into the ledger
         # so the spend isn't lost, and return a DEGRADED result with the query preserved
         # so the agent can RESHAPE the query — a content_filter refusal almost always
         # means a "reproduce paper X" framing; never re-fire the same query shape.
         _txt = str(exc).lower()
         reason = ("content_filter" if ("content_filter" in _txt or "content filter" in _txt)
-                  else "dr_env_missing" if "azure_dr" in _txt  # L40: missing AZURE_DR_* creds
+                  else "dr_env_missing" if "azure_dr" in _txt  # missing AZURE_DR_* creds
                   else f"dr_failed:{exc}")
         _billed = float(getattr(exc, "cost", 0.0) or 0.0)
         _submitted = bool(getattr(exc, "submitted", False))
@@ -181,8 +181,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             # terminal failure/timeout. usage is typically None on failure, so token cost is
             # 0 — floor the spend at the search surcharge so the ledger reflects that Azure
             # billed us, then add any reported token cost on top. (A content_filter REFUSAL at
-            # submit time is NOT `submitted` → it correctly stays free.) This is the fix for
-            # "the framework doesn't know it's being billed" on a failed DR call.
+            # submit time is NOT `submitted` → it correctly stays free.) Without this floor
+            # the ledger would never learn that a failed DR call was billed.
             _billed = max(_billed, 0.0) + search_surcharge
         elif _billed > 0:
             _billed += search_surcharge
@@ -192,28 +192,28 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
              "reasoning_effort": payload.get("reasoning_effort", "medium")},
             {"refused": True, "reason": reason, "error": str(exc),
              "error_code": getattr(exc, "error_code", None),
-             # DEC-7: usable goes into the LOGGED stub the gate reads (not just the return).
+             # The grounding gate reads the LOGGED stub, so `usable` must live there (not just the return).
              "usable": False},
             cost=_billed, summary=f"DR refused/failed: {reason}",
         )
         return {"brief": [], "raw_text": "", "cost": _billed, "model": model,
                 "refused": True, "degraded": True, "reason": reason,
-                # DEC-7: refused/failed R1 discovery stub is never usable by the gate.
+                # A refused/failed R1 discovery stub is never usable by the grounding gate.
                 "usable": False,
                 "error_code": getattr(exc, "error_code", None)}
     cost = float(token_cost) + search_surcharge
     brief = _parse_brief(text)
-    # WS7: persist the FULL DR call (query + program_context + raw output) to the
-    # journal and fold cost into the ledger when results_dir is set. This is the fix
-    # for round-1's lost prompt — the query no longer lives only in an ephemeral
-    # runner script that the next call can overwrite.
+    # Persist the FULL DR call (query + program_context + raw output) to the
+    # journal and fold cost into the ledger when results_dir is set, so the query
+    # is durably recorded instead of living only in an ephemeral runner script
+    # that the next call could overwrite.
     _common.log_external_call(
         payload.get("results_dir"), "dr",
         {"query": query, "program_context": program_context, "model": model,
          "reasoning_effort": payload.get("reasoning_effort", "medium")},
         {"brief": brief, "raw_text": text, "token_cost": float(token_cost),
          "search_surcharge": search_surcharge,
-         # DEC-7: usable lives in the LOGGED stub so journal.discovery_in_interval can
+         # `usable` lives in the LOGGED stub so journal.discovery_in_interval can
          # screen an empty-brief DR (usable=False) — not only on the return envelope.
          "usable": bool(brief)},
         cost=cost,
@@ -223,7 +223,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "brief": brief, "raw_text": text,
         "cost": cost, "token_cost": float(token_cost),
         "search_surcharge": search_surcharge, "model": model,
-        # DEC-7: this kind="dr" call row is the R1 discovery stub the grounding gate
+        # This kind="dr" call row is the R1 discovery stub the grounding gate
         # reads (journal.discovery_in_interval); usable iff >=1 direction was returned.
         "usable": bool(brief),
     }

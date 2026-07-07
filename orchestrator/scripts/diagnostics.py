@@ -22,18 +22,18 @@ INPUT (stdin JSON): db_path/db_config/embedding_model + the per-window fields th
 OUTPUT (stdout JSON, "ok": true): window_index, iters_completed, best_score_start,
   best_score_end, delta, J_score (INFORMATIONAL only — rollback uses rollback_decision),
   threshold, strategy_fingerprint, novelty_acceptance_rate (NULL when no novelty events),
-  novelty_rejected_cost, novelty_kept_better (M34: near-dup floods), novelty_idle_count (L17),
-  novelty_evict_fail_count (M34), embed_failures (M29: >0 ⇒ novelty gate was blind),
+  novelty_rejected_cost, novelty_kept_better (near-dup floods), novelty_idle_count,
+  novelty_evict_fail_count, embed_failures (>0 ⇒ novelty gate was blind),
   novelty_sim_histogram (per-window max-similarity bins over real comparisons — where the
   near-dup mass sits, for tuning code_embed_sim_threshold; {} when no comparisons),
-  evaluation_failure_rate (post-repair), eval_total (H4: 0 ⇒ nothing
+  evaluation_failure_rate (post-repair), eval_total (0 ⇒ nothing
   evaluated), fix_rate, fix_success_rate, needs_fix_rate, llm_bandit_weights,
-  llm_bandit_counts (run-cumulative), llm_bandit_window_counts (THIS window — H5, rollback arm 4a),
+  llm_bandit_counts (run-cumulative), llm_bandit_window_counts (THIS window — read by rollback arm 4a),
   island_health [{id, best, diversity, stagnation_count, count}], stagnation_flag,
   low_streak, exhausted_retry_slots, exhausted_retry_count, apply_exhausted_count,
   apply_failure_rate, timeout_count, wrong_answer_count, errored_fraction (cumulative, over
   LIVE non-tombstoned programs, subtracting only repair-removed INCORRECT tombstones from the
-  numerator — a CORRECT keep-the-better evictee is NOT double-counted — H3; distinct from the
+  numerator — a CORRECT keep-the-better evictee is NOT double-counted; distinct from the
   per-window evaluation_failure_rate),
   model_collapse {top_arm, top_share, n_arms_active, collapsed} (counts-share, SURFACED
   for the framework-audit check, never auto-corrected in steady-state), repair_mode_on,
@@ -105,7 +105,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "best_score_start": best_start,
             "best_score_end": best_end,
             "window_size": window_size,
-            "tau": payload.get("tau"),  # M27: default None (NOT 0.0) so the detector's 1e-3 abs_floor fallback engages when stagnation_abs_floor is omitted; literal 0.0 would shadow it
+            "tau": payload.get("tau"),  # default None (NOT 0.0) so the detector's 1e-3 abs_floor fallback engages when stagnation_abs_floor is omitted; literal 0.0 would shadow it
             "stagnation_abs_floor": payload.get("stagnation_abs_floor"),
             "stagnation_rel_frac": payload.get("stagnation_rel_frac"),
             "prior_low_streak": payload.get("prior_low_streak", 0),
@@ -116,9 +116,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     accepts = int(payload.get("novelty_accepts", 0) or 0)
     rejects = int(payload.get("novelty_rejects", 0) or 0)
     nov_total = accepts + rejects
-    # O10/K15: None when NO novelty events occurred (UNKNOWN), so rollback_decision
-    # doesn't mistake "no data" for "perfectly diverse" (the F13 flood-detection
-    # inversion). A real rate only when there were events.
+    # None when NO novelty events occurred (UNKNOWN), so rollback_decision doesn't
+    # mistake "no data" for "perfectly diverse" and invert its flood detection.
+    # A real rate only when there were events.
     novelty_acceptance_rate = (accepts / nov_total) if nov_total else None
 
     eval_total = int(payload.get("eval_total", 0) or 0)
@@ -128,7 +128,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     iters = int(payload.get("iters_completed", 0) or 0)
     fix_count = int(payload.get("fix_count", 0) or 0)
     fix_rate = (fix_count / iters) if iters else 0.0
-    # WS1: with the IMMEDIATE-fix mechanism, fix_count = repair attempts made this
+    # With the IMMEDIATE-fix mechanism, fix_count = repair attempts made this
     # window and fix_success = attempts that recovered correctness. fix_success_rate
     # tells the orchestrator whether fixes actually WORK (SKILL ladder rung 5: a high
     # fix_rate with a low fix_success_rate => rewrite the fix concern). None when no
@@ -136,14 +136,14 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     fix_success = int(payload.get("fix_success", 0) or 0)
     fix_success_rate = (fix_success / fix_count) if fix_count else None
 
-    # M9: needs_fix parents (sampled INCORRECT parents routed to repair mode) are
+    # needs_fix parents (sampled INCORRECT parents routed to repair mode) are
     # counted separately from immediate-fix ATTEMPTS, so fix_success_rate stays a
     # coherent "immediate repairs that worked / immediate attempts" for ladder rung 5.
     needs_fix_count = int(payload.get("needs_fix_count", 0) or 0)
     needs_fix_rate = (needs_fix_count / iters) if iters else 0.0
 
     # Island health. The metric DEFINITION lives in the MUTABLE island_policy
-    # (F10) so the orchestrator can later evolve "diversity"/"stagnation_count"
+    # so the orchestrator can later evolve "diversity"/"stagnation_count"
     # beyond the toy count default — the sensor (this file) just calls it, the
     # same way it delegates J/flag to the mutable stagnation_detector.
     island_health = island_policy.island_health(
@@ -153,13 +153,13 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         embedding_model=embedding_model,
     )
 
-    # P2-T3: errored_fraction over ALL NON-tombstoned programs (errored programs are
+    # errored_fraction over ALL NON-tombstoned programs (errored programs are
     # never archived). Tombstoned (repair-removed) programs are EXCLUDED from both
     # numerator and denominator so the repair latch RELEASES once they are removed.
     total_progs = int(summary.get("total", 0) or 0)
     correct_progs = int(summary.get("correct", 0) or 0)
     tombstoned = int(summary.get("tombstoned_count", 0) or 0)
-    # H3: subtract from the errored numerator ONLY the INCORRECT (repair-removed) tombstones.
+    # Subtract from the errored numerator ONLY the INCORRECT (repair-removed) tombstones.
     # A CORRECT keep-the-better evictee is already excluded by (total-correct), so subtracting
     # the FULL tombstoned count double-subtracts it and pins errored_fraction LOW (the repair
     # latch then under-fires on a near-dup-heavy run). Fall back to tombstoned_count when the
@@ -170,8 +170,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         max(0, (total_progs - correct_progs) - err_tomb) / live_total
     ) if live_total else 0.0
 
-    # Failure-type echoes (counters CREATED by run_window: apply_exhausted [P1-T1],
-    # timeout/wrong [P2-T4]). apply_failure_rate is over attempted-or-apply-failed
+    # Failure-type echoes (counters CREATED by run_window: apply_exhausted,
+    # timeout/wrong). apply_failure_rate is over attempted-or-apply-failed
     # slots — distinct from evaluation_failure_rate (post-repair, over EVALUATED slots).
     apply_exhausted_count = int(payload.get("apply_exhausted", 0) or 0)
     timeout_count = int(payload.get("timeout_count", 0) or 0)
@@ -197,7 +197,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "strategy_fingerprint": payload.get("strategy_fingerprint", {}),
         "novelty_acceptance_rate": novelty_acceptance_rate,
         "novelty_rejected_cost": float(payload.get("novelty_rejected_cost", 0.0) or 0.0),
-        # M34/L17/M29: novelty observability — surface an H2-style near-dup flood
+        # Novelty observability — surface a near-dup flood
         # (novelty_kept_better), an idle gate (novelty_idle_count), a failed eviction
         # (novelty_evict_fail_count), and a BLIND gate (embed_failures > 0 ⇒ embedding
         # failed, so the novelty gate was off for those slots — distinct from "no events").
@@ -210,13 +210,13 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         # orchestrator can tune code_embed_sim_threshold. {} when novelty had no comparisons.
         "novelty_sim_histogram": payload.get("novelty_sim_histogram", {}) or {},
         "evaluation_failure_rate": evaluation_failure_rate,
-        "eval_total": eval_total,  # H4: distinguishes "evaluated and all passed" from "nothing evaluated"
+        "eval_total": eval_total,  # distinguishes "evaluated and all passed" from "nothing evaluated"
         "fix_rate": fix_rate,
         "fix_success_rate": fix_success_rate,
         "needs_fix_rate": needs_fix_rate,
         "llm_bandit_weights": payload.get("llm_bandit_weights", {}),
         "llm_bandit_counts": payload.get("llm_bandit_counts", {}),
-        # H5: THIS window's submitted counts, the source rollback arm 4a reads (the cumulative
+        # THIS window's submitted counts, the source rollback arm 4a reads (the cumulative
         # llm_bandit_counts above stays for the steady-state model_collapse sensor).
         "llm_bandit_window_counts": payload.get("llm_bandit_window_counts", {}),
         "island_health": island_health,
@@ -224,7 +224,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "low_streak": stag["low_streak"],
         "exhausted_retry_slots": payload.get("exhausted_retry_slots", []),
         "exhausted_retry_count": int(payload.get("exhausted_retry_count", 0) or 0),
-        # P2-T3 failure-type + structural sensor fields.
+        # Failure-type + structural sensor fields.
         "apply_exhausted_count": apply_exhausted_count,
         "apply_failure_rate": apply_failure_rate,
         "timeout_count": timeout_count,
@@ -234,7 +234,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "repair_mode_on": repair_mode_on,
         "repair_fail_count": int(payload.get("repair_fail_count", 0) or 0),
         "repair_tombstoned_count": int(payload.get("repair_tombstoned_count", 0) or 0),
-        # echo the active trigger metric (was threaded in but never emitted/read).
+        # Echo the active trigger metric so downstream readers see which metric was in force.
         "trigger_metric": payload.get("trigger_metric", "hybrid"),
         "total_programs": summary.get("total"),
         "correct_programs": summary.get("correct"),

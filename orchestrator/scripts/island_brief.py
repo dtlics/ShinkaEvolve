@@ -7,7 +7,7 @@ per-island idea, or to ground a deep-research brief in a fresh island). It embed
 NO LLM call — it just persists the text the orchestrator (or meta round) produced.
 
 The per-island brief is the mechanism that keeps islands genuinely DIFFERENTIATED
-rather than all evolving under one global direction (audit finding H1). It is read
+rather than all evolving under one global direction. It is read
 back per island by ``archive_query`` (``query_type="island_brief"``) and rendered
 into that island's mutation prompt by ``construct_mutation_prompt`` /
 ``sampler.sample`` (preferred over, or augmenting, the global direction per

@@ -24,9 +24,9 @@ from .prompts_fix import (
     format_error_output_section,
 )
 from .prompts_init import INIT_SYSTEM_MSG, INIT_USER_MSG
-# L20: prompts_meta.py (META_STEP1/2/3) was DEAD — the orchestrator's meta round
-# (orchestrator/scripts/meta_summarize.py) builds its own prompts and never imported these;
-# the file + its re-exports are removed.
+# There is deliberately no prompts_meta module here: the orchestrator's meta round
+# (orchestrator/scripts/meta_summarize.py) builds its own prompts and imports nothing
+# from this package.
 from .prompts_novelty import NOVELTY_SYSTEM_MSG, NOVELTY_USER_MSG
 from .prompts_deep_research import (
     DR_SYS_MSG,

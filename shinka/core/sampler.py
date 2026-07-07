@@ -105,7 +105,7 @@ class PromptSampler:
             len(archive_inspirations) == 0 and len(top_k_inspirations) == 0
         )
         if forced_patch_type is not None:
-            # D4: run_window samples the patch MODE first (diff/full/cross/fix; fix is routed
+            # run_window samples the patch MODE first (diff/full/cross/fix; fix is routed
             # via sample_fix and never reaches here) and forces the chosen mode so the parent
             # can be conditioned on it. Honor cross-suppression.
             patch_type = forced_patch_type
@@ -126,7 +126,7 @@ class PromptSampler:
             _probs = [p / _s for p in _w] if _s > 0 else [1.0 / len(_types)] * len(_types)
             patch_type = np.random.choice(_types, p=_probs)
 
-        # Point 4.1/4.4: exactly ONE of these goes in the SYSTEM turn of a non-cross gen — a
+        # Exactly ONE of these goes in the SYSTEM turn of a non-cross gen — a
         # DIRECTIVE direction header when a direction was sampled (treat it as the goal, not an
         # optional suggestion), else the expert/creative preamble so a no-direction gen still
         # invents from expert knowledge even though task_sys_msg replaced BASE_SYSTEM_MSG.
@@ -151,7 +151,7 @@ class PromptSampler:
         # The persistent failure caution rides into EVERY generation — rendered
         # independently of patch_type and of any per-gen direction/island_brief, so
         # it is never dropped on a cross gen, when an island_brief replaced the
-        # direction, or when no direction was sampled (M1/M2/M3/M4).
+        # direction, or when no direction was sampled.
         if failure_note not in (None, "", "none") and str(failure_note).strip():
             sys_msg += "\n\n# Known failure modes to avoid"
             sys_msg += (
@@ -196,7 +196,7 @@ class PromptSampler:
                 parent.text_feedback
             )
 
-        # Point 4.3: prepend the orchestrator-authored objective gloss to the raw numbers.
+        # Prepend the orchestrator-authored objective gloss to the raw numbers.
         # objective_brief None => "" => byte-identical to the legacy metric slot.
         metric_block = objective_section(objective_brief) + perf_str(
             parent.combined_score, parent.public_metrics
@@ -271,12 +271,12 @@ class PromptSampler:
 
         sys_msg += FIX_SYS_FORMAT.format(language=self.language)
 
-        # Point 4.3: keep a repair on-task by rendering the objective gloss in the fix SYSTEM
+        # Keep a repair on-task by rendering the objective gloss in the fix SYSTEM
         # message (FIX_ITER_MSG has no metric slot). None => no change.
         if objective_brief and str(objective_brief).strip():
             sys_msg += "\n\n" + objective_section(objective_brief).rstrip()
 
-        # M4: the persistent failure caution rides into fix-mode prompts too, so a
+        # The persistent failure caution rides into fix-mode prompts too, so a
         # repair does not reintroduce a known failure class.
         if failure_note not in (None, "", "none") and str(failure_note).strip():
             sys_msg += "\n\n# Known failure modes to avoid\n"

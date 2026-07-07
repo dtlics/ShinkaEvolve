@@ -34,17 +34,17 @@ INPUT (stdin JSON):
   {
     "parent_code": str,
     "patch_sys": str, "patch_msg": str, "patch_type": "diff"|"full"|"cross"|"fix",
-    #   ("fix" is a full-code repair reply -> routed to the FULL applier, H1)
+    #   ("fix" is a full-code repair reply -> routed to the FULL applier)
     "patch_dir": str, "language": "python",
     "model_name": str,                       # azure-* etc.
     "reasoning_effort": "medium" | null,     # for reasoning models
-    "enable_web_search": false,              # WS4: attach web_search_preview (DR-ref grounding / fix)
+    "enable_web_search": false,              # attach web_search_preview (DR-ref grounding / fix)
     "max_attempts": 3,
     "mock": false, "mock_code": str|null, "mock_patch": str|null, "mock_cost": 0.0,
     "run_id": str|null, "generation": int|null, "verbose": false,
     "purpose": "proposer",      # cost-ledger label; a standalone grounding call passes
                                 #   e.g. "grounding" so its spend is separable
-    "results_dir": str|null     # WS7 standalone self-log: with a non-proposer purpose
+    "results_dir": str|null     # standalone self-log: with a non-proposer purpose
                                 #   set, the terminal outcome (success OR failure — a
                                 #   failed call may still be billed) is persisted via
                                 #   journal.log_call and its cost folded into the run
@@ -92,9 +92,9 @@ def _apply(patch_type, patch_str, original, patch_dir, language, verbose) -> Tup
     from shinka.edit.apply_diff import apply_diff_patch
     from shinka.edit.apply_full import apply_full_patch
 
-    # H1: "fix" replies are FULL-CODE (FIX_SYS_FORMAT emits a ```{language}``` fence,
+    # "fix" replies are FULL-CODE (FIX_SYS_FORMAT emits a ```{language}``` fence,
     # identical in shape to a full rewrite), so they must route to the full applier.
-    # Routing "fix" to apply_diff_patch made every repair a paid no-op (its
+    # Routing "fix" to apply_diff_patch would make every repair a paid no-op (its
     # SEARCH/REPLACE regex never matches a full-code reply) -> applied=False always.
     func = apply_full_patch if patch_type in ("full", "cross", "fix") else apply_diff_patch
     return func(
@@ -139,7 +139,7 @@ def _mock(payload, parent_code, patch_type, patch_dir, language, verbose) -> Dic
 
 
 def _self_log_standalone(payload: Dict[str, Any], result: Dict[str, Any]) -> None:
-    """Standalone-call self-logging (WS7 parity with meta_summarize / deep_research):
+    """Standalone-call self-logging (parity with meta_summarize / deep_research):
     when the ORCHESTRATOR runs this script directly between clusters (a grounding, or
     any other non-proposer purpose) and threads ``results_dir``, persist the FULL call
     (the prompt/config actually sent + the raw model output + applied/refusal state)
@@ -213,7 +213,7 @@ def _mutate(payload: Dict[str, Any]) -> Dict[str, Any]:
     model_name = payload["model_name"]
     reasoning_effort = payload.get("reasoning_effort")
     max_attempts = int(payload.get("max_attempts", 3))
-    # WS4: web search is OFF unless the caller opts in (DR-reference grounding /
+    # Web search is OFF unless the caller opts in (DR-reference grounding /
     # fix-retry when evo.fix_web_search is set). Only the bg (Azure/OpenAI) path
     # supports it; the legacy sync client ignores it.
     enable_web_search = bool(payload.get("enable_web_search", False))
@@ -246,7 +246,7 @@ def _mutate(payload: Dict[str, Any]) -> Dict[str, Any]:
                 transport = "background"
             except Exception as exc:
                 last_error = f"transport error: {exc}"
-                # H2: a failed/capped Azure call may still be BILLED — fold the cost the
+                # A failed/capped Azure call may still be BILLED — fold the cost the
                 # transport attached to the exception so the ledger doesn't drop it.
                 total_cost += float(getattr(exc, "cost", 0.0) or 0.0)
                 break

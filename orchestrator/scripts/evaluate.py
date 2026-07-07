@@ -4,7 +4,7 @@ MUTABILITY: IMMUTABLE PLUMBING. Do not modify as part of a strategy rewrite.
 This is the evaluation primitive — the score it returns is ground truth that
 everything downstream depends on. It embeds NO LLM call.
 
-Ground-truth guarantee (H13): the candidate's ``results_dir`` is WIPED before every
+Ground-truth guarantee: the candidate's ``results_dir`` is WIPED before every
 eval, so a result-less death (timeout SIGKILL / crash / a late grandchild write) yields
 an empty dir — ``load_results`` then returns correct=false and the timeout/crash
 synthesis fires — rather than reading a reused gen dir's stale metrics/correct as this
@@ -105,16 +105,16 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     if _root not in _pp.split(_os.pathsep):
         _os.environ["PYTHONPATH"] = _root + (_os.pathsep + _pp if _pp else "")
 
-    # H13: pre-clean the candidate's results_dir BEFORE the eval runs, so a RESULT-LESS
-    # death (timeout SIGKILL, crash, or a late conda-grandchild write — M47) can never let
+    # Pre-clean the candidate's results_dir BEFORE the eval runs, so a RESULT-LESS
+    # death (timeout SIGKILL, crash, or a late conda-grandchild write) can never let
     # load_results below read a PRIOR occupant's stale metrics.json/correct.json as THIS
     # candidate's ground truth. Generation numbers ARE reused (novelty-drop / apply-exhausted
     # slots archive no row; a strategy revert rewinds the DB but not the on-disk gen dirs),
     # so a reused gen dir can still hold a predecessor's files; a stale correct=true would
-    # otherwise BOTH fabricate a score (line ~147) AND suppress the timeout/crash synthesis
+    # otherwise BOTH fabricate a score AND suppress the timeout/crash synthesis below
     # (gated on `not correct`). Scope: results_dir ONLY (the gen_dir/results subdir) — the
     # candidate program lives in the PARENT gen_dir/main.<ext> and is untouched, and the
-    # parent gen_dir survives for L11's monotonic-generation disk scan.
+    # parent gen_dir survives for the harness's monotonic-generation disk scan.
     import shutil as _shutil
 
     _shutil.rmtree(results_dir, ignore_errors=True)

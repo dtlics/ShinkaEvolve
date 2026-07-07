@@ -1,6 +1,6 @@
 """smoke_test.py — end-to-end acceptance gate for the orchestrator stack.
 
-Runs the full EvoX-style protocol OFFLINE (mocked LLM + mocked scores, no Azure
+Runs the full evolutionary run protocol OFFLINE (mocked LLM + mocked scores, no Azure
 keys, no spend), simulating the orchestrator's window-level decisions
 deterministically so we test the *mechanics*, not Claude's judgment:
 
@@ -214,7 +214,7 @@ def run_live_smoke() -> dict:
     """Real circle_packing, 5 iters, mock-free. Needs Azure keys. Best-effort."""
     raise NotImplementedError(
         "Live smoke runs real LLM mutations against circle_packing; wire model_name "
-        "+ Azure env and set mock.enabled=False. Deferred to Phase 8 hardening."
+        "+ Azure env and set mock.enabled=False."
     )
 
 

@@ -1,6 +1,6 @@
 """test_run_isolation.py — per-run / cross-worktree isolation primitives.
 
-Covers the elegant fix for the cross-session run_window kill + double-writer:
+Covers the guards against a cross-session run_window kill + double-writer:
 the OS run-lock (identity/liveness/co-tenancy), the cooperative .stop sentinel,
 and config-dir path anchoring. These are unit tests of the run_window primitives
 (no Azure, no real window) — the full launch path acquires the lock in _cli().
@@ -82,7 +82,7 @@ def test_stop_sentinel_target_match():
 
 
 def test_warmup_stop_resolves_to_parent_dir():
-    """Session-isolation fix: during warmup the live results_dir is redirected to the
+    """Session isolation: during warmup the live results_dir is redirected to the
     <results_dir>/warmup subdir, but a `.stop` the agent writes to the PARENT results_dir must
     still stop the warmup (not only at the warmup window's end). `_cli` captures the parent as
     cfg['stop_dir'] BEFORE the redirect, and `main` resolves the stop target to it."""
@@ -100,7 +100,7 @@ def test_warmup_stop_resolves_to_parent_dir():
         # A `.stop` the agent writes to the PARENT is honored against stop_dir.
         Path(parent, ".stop").write_text(json.dumps({"target_run_id": "A"}))
         assert run_window._stop_requested(stop_dir, "A") is True
-        # The OLD behavior (checking the redirected warmup subdir) would MISS it and leave it.
+        # Checking the redirected warmup subdir instead would MISS it and leave it.
         Path(parent, ".stop").write_text(json.dumps({"target_run_id": "A"}))
         assert run_window._stop_requested(warm, "A") is False
         assert Path(parent, ".stop").exists()
@@ -108,7 +108,7 @@ def test_warmup_stop_resolves_to_parent_dir():
 
 def test_non_warmup_stop_dir_is_results_dir():
     """A normal (non-warmup) run has no stop_dir override, so the stop target is just
-    results_dir — the session-isolation change is inert outside warmup."""
+    results_dir — the stop_dir indirection is inert outside warmup."""
     cfg = {"results_dir": os.path.join("some", "run"), "run_id": "A"}
     stop_dir = cfg.get("stop_dir") or cfg["results_dir"]
     assert stop_dir == cfg["results_dir"]
@@ -123,7 +123,7 @@ def test_clear_stop_is_idempotent():
 
 
 def test_accept_warmup_blocked_by_parent_lock():
-    """Lock reorder: _cli takes ONE exclusive lock on the PARENT results_dir before ANY
+    """_cli takes ONE exclusive lock on the PARENT results_dir before ANY
     branch (accept-warmup included), so an --accept-warmup launched while another
     process-equivalent (a live warmup / real run) holds the lock dies at acquire time —
     accept_warmup is never reached and the real db is never created. After the holder
@@ -170,10 +170,10 @@ def test_accept_warmup_blocked_by_parent_lock():
 
 
 def test_warmup_cleanup_under_parent_lock():
-    """Lock reorder: the warmup subdir no longer carries its own .run.lock — the single
-    lock lives at the PARENT <results_dir>/.run.lock. cleanup_warmup therefore succeeds
+    """The warmup subdir carries no .run.lock of its own — the single lock lives at
+    the PARENT <results_dir>/.run.lock. cleanup_warmup therefore succeeds
     while the parent lock is HELD (nothing inside the warmup dir is locked, even a stale
-    warmup-local .run.lock left by the old design), and the parent's lock file survives
+    warmup-local .run.lock leftover), and the parent's lock file survives
     the cleanup."""
     with tempfile.TemporaryDirectory() as td:
         rd = os.path.join(td, "results")
@@ -182,7 +182,7 @@ def test_warmup_cleanup_under_parent_lock():
             warm = os.path.join(rd, "warmup")
             os.makedirs(os.path.join(warm, "journal"))
             Path(warm, "programs.sqlite").write_bytes(b"x")
-            # a STALE warmup-local lock file from the old design must not block cleanup
+            # a STALE warmup-local lock file must not block cleanup
             Path(warm, ".run.lock").write_bytes(b"")
             assert run_window.cleanup_warmup(rd) is True
             assert not os.path.isdir(warm)
@@ -199,10 +199,10 @@ def test_warmup_cleanup_under_parent_lock():
 
 
 def test_cli_lock_ordering_source():
-    """Pin the _cli lock ordering the reorder established: exactly ONE acquire_run_lock
+    """Pin the _cli lock ordering: exactly ONE acquire_run_lock
     call, placed AFTER stop_dir capture and BEFORE the accept-warmup early-return and the
     warmup cleanup/redirect — so every _cli mode is serialized under the parent lock and
-    the old pre-main() acquisition (which left warmup/accept unguarded) cannot silently
+    a pre-main() acquisition (which would leave warmup/accept unguarded) cannot silently
     come back."""
     import inspect
 

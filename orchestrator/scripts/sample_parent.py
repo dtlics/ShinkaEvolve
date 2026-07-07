@@ -19,11 +19,11 @@ num_archive_inspirations, num_top_k_inspirations, num_islands.
 INPUT (stdin JSON):
   {
     "db_path": str, "db_config": {..}, "embedding_model": str,
-    "island_idx": int | null,     # null => auto-select per config.island_selection_strategy (N8: default uniform among initialized islands; proportional/weighted otherwise)
-    "parent_id": str | null,      # H9: PIN this archived-correct program as the parent (its island drives the pool); for the COMBINE/grounding run. Invalid pin => fall back to normal sampling.
+    "island_idx": int | null,     # null => auto-select per config.island_selection_strategy (default uniform among initialized islands; proportional/weighted otherwise)
+    "parent_id": str | null,      # PIN this archived-correct program as the parent (its island drives the pool); for the COMBINE/grounding run. Invalid pin => fall back to normal sampling.
     "seed": int | null,           # for deterministic sampling (tests/parity)
-    "validity_floor": float | null,  # O6 lever: floor VALID parents' scores; null = inert
-    "select": "errored" | null,   # P5 repair mode: pick an ERRORED parent to fix in place
+    "validity_floor": float | null,  # lever: floor VALID parents' scores; null = inert
+    "select": "errored" | null,   # repair mode: pick an ERRORED parent to fix in place
                                   #   (no inspirations, needs_fix=True); skips tombstoned +
                                   #   attempt-cap-reached rows. null = normal selection.
     "repair_attempt_cap": int,    # default 2; an errored parent past the cap is not picked
@@ -45,7 +45,7 @@ OUTPUT (stdout JSON):
     "archive_inspiration_ids": [str],
     "top_k_inspiration_ids": [str],
     "needs_fix": bool,            # true if the chosen parent is incorrect (fix mode)
-    "sampled_direction": str | null,  # H1: per-gen direction drawn from the island's
+    "sampled_direction": str | null,  # per-gen direction drawn from the island's
                                       #     structured brief (null pre-brief / repair / bootstrap)
     "n_candidates": int,
     "selection_probs": [float]    # parallel to the weighted pool (debug/parity)
@@ -74,7 +74,7 @@ def _stable_sigmoid(x: float) -> float:
 
 
 def _is_tombstoned(p) -> bool:
-    """True if a program was repair-tombstoned (removed from the sampling pool, P5)."""
+    """True if a program was repair-tombstoned (removed from the sampling pool)."""
     return (getattr(p, "metadata", None) or {}).get("repair_tombstoned") is True
 
 
@@ -90,7 +90,7 @@ def _median(xs: List[float]) -> float:
 def _finite_score(x: Any) -> float:
     """Coerce a program score to a finite float (NaN / inf / None → 0.0). Defensive: a
     resumed / foreign / shared archive could carry a non-finite score that would otherwise
-    NaN the whole weighted-probability vector (P10-T2)."""
+    NaN the whole weighted-probability vector."""
     try:
         v = float(x)
     except (TypeError, ValueError):
@@ -116,8 +116,8 @@ def _weighted_probs(scores: List[float], children: List[int], lam: float) -> Lis
 
 
 def _select_island(archived_correct, islands, config, rng):
-    """Pick an island per ``config.island_selection_strategy`` (M11). Default
-    "uniform"/"equal" reproduces the prior hardcoded uniform draw (and parity).
+    """Pick an island per ``config.island_selection_strategy``. Default
+    "uniform"/"equal" is a plain uniform draw (and preserves parity).
     "proportional" weights by island population; "weighted" by island best-fitness."""
     if not islands:
         return None
@@ -149,7 +149,7 @@ def _select_island(archived_correct, islands, config, rng):
 
 
 def _load_island_directions(config, embedding_model, island_idx):
-    """H1: read the island's latest meta brief and return its structured directions
+    """Read the island's latest meta brief and return its structured directions
     [{text, weight, assigned_program_ids}], or [] (pre-brief or parse failure). This is
     what flips inspiration selection from score-ranked to DIRECTION-ORIENTED."""
     if island_idx is None:
@@ -199,7 +199,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     finally:
         db.close()
 
-    # P5-T3: REPAIR-mode selection. When the harness latches repair mode it asks for an
+    # REPAIR-mode selection. When the harness latches repair mode it asks for an
     # ERRORED parent to fix IN PLACE (no inspirations — the repair prompt uses the
     # program's OWN failure). Skip tombstoned (already-removed) rows and rows that have
     # used up their repair attempts. If the errored pool is empty, fall through to the
@@ -217,7 +217,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 "parent_id": parent.id,
                 "island_idx": getattr(parent, "island_idx", None),
-                "sampled_island_idx": getattr(parent, "island_idx", None),  # M10: repair stays on the parent's island
+                "sampled_island_idx": getattr(parent, "island_idx", None),  # repair stays on the parent's island
                 "archive_inspiration_ids": [],
                 "top_k_inspiration_ids": [],
                 "needs_fix": True,
@@ -232,17 +232,16 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Bootstrap / fix fallback: no correct archived programs yet.
     if not archived_correct:
         # Prefer the best correct program; else the earliest program (the seed).
-        # L14: exclude tombstoned rows from the correct pool too. The old comment claimed
-        # "correct programs are never tombstoned" — FALSE since keep-the-better tombstones a
-        # CORRECT incumbent (H3/H5), so a dead correct row could otherwise be re-seeded here.
+        # Exclude tombstoned rows from the correct pool too: correct programs CAN be
+        # tombstoned (keep-the-better novelty eviction tombstones the WORSE of a correct
+        # near-dup pair), so a dead correct row could otherwise be re-seeded here.
         correct = [p for p in programs
                    if getattr(p, "correct", False) and not _is_tombstoned(p)]
         live_incorrect = [p for p in programs if not _is_tombstoned(p)]
         if correct:
-            # M8: _finite_score so a stored None/NaN combined_score can't raise (None vs
-            # float) — the bootstrap/pre-brief sorts used RAW scores while the main weighted
-            # path already guards with _finite_score (an unguarded NaN/None crashed the slot
-            # and made --resume a crash-loop).
+            # _finite_score so a stored None/NaN combined_score can't raise (None vs
+            # float). The main weighted path guards its scores the same way; an unguarded
+            # NaN/None here would crash the slot and turn --resume into a crash-loop.
             parent = max(correct, key=lambda p: _finite_score(getattr(p, "combined_score", 0.0)))
             needs_fix = False
         elif live_incorrect:
@@ -253,7 +252,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "parent_id": parent.id,
             "island_idx": getattr(parent, "island_idx", None),
-            "sampled_island_idx": getattr(parent, "island_idx", None),  # M10: child on the parent's island
+            "sampled_island_idx": getattr(parent, "island_idx", None),  # child on the parent's island
             "archive_inspiration_ids": [],
             "top_k_inspiration_ids": [],
             "needs_fix": bool(needs_fix),
@@ -261,8 +260,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "selection_probs": [],
         }
 
-    # H9: explicit PARENT PIN for the COMBINE / grounding run — land a DR technique on the
-    # CLOSEST existing program (SKILL DR triage / S9 "merge at the original entry"). A valid
+    # Explicit PARENT PIN for the COMBINE / grounding run — land a DR technique on the
+    # CLOSEST existing program (the discovery-triage "combine into the closest program" path,
+    # which merges at the original entry instead of spawning a new island). A valid
     # archived-correct parent_id is selected DIRECTLY (its island drives the pool +
     # inspirations), skipping the sigmoid draw; an unknown/incorrect pin falls back to normal
     # sampling with a stderr warning (never crash the window on a stale pin).
@@ -276,19 +276,19 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             print(f"[sample_parent] parent_id pin {_pin_id!r} is not an archived-correct "
                   f"program — falling back to normal sampling", file=_sys.stderr)
 
-    # Island selection (MUTABLE-LEVER, M11): honor config.island_selection_strategy
-    # instead of a hardcoded uniform draw. Default "uniform" reproduces today's
-    # behavior (+ the WeightedSamplingStrategy parity).
+    # Island selection (MUTABLE-LEVER): honor config.island_selection_strategy
+    # instead of a hardcoded uniform draw. Default "uniform" is the plain uniform
+    # draw (and preserves the WeightedSamplingStrategy parity).
     islands = sorted({getattr(p, "island_idx", 0) for p in archived_correct})
     island_idx = payload.get("island_idx")
     if _pinned is not None:
-        island_idx = getattr(_pinned, "island_idx", island_idx)  # H9: the pin's island drives the pool
+        island_idx = getattr(_pinned, "island_idx", island_idx)  # the pin's island drives the pool
     if island_idx is None:
         island_idx = _select_island(archived_correct, islands, config, rng)
 
-    # enforce_island_separation (MUTABLE-LEVER, M11): default True keeps the
-    # same-island pool (today's behavior); False enables cross-island
-    # cross-pollination of parents + inspirations.
+    # enforce_island_separation (MUTABLE-LEVER): default True keeps the
+    # same-island pool; False enables cross-island cross-pollination of
+    # parents + inspirations.
     enforce_sep = bool(getattr(config, "enforce_island_separation", True))
     if enforce_sep:
         pool = [p for p in archived_correct if getattr(p, "island_idx", None) == island_idx]
@@ -298,7 +298,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         pool = archived_correct
 
     scores = [_finite_score(getattr(p, "combined_score", 0.0)) for p in pool]
-    # MUTABLE-LEVER (O6 — parent-selection score scale): clamp VALID parents'
+    # MUTABLE-LEVER (parent-selection score scale): clamp VALID parents'
     # scores to a floor so valid-but-no-gain candidates stay selectable above the
     # bottom of the pool. Default None = inert (preserves WeightedSamplingStrategy
     # parity). The bandit REWARD scale has its own separate `reward_validity_floor`.
@@ -309,10 +309,10 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     lam = float(getattr(config, "parent_selection_lambda", 10.0))
     probs = _weighted_probs(scores, children, lam)
 
-    # Sample a parent by the weighted probabilities — or use the H9 pin when given.
+    # Sample a parent by the weighted probabilities — or use the explicit pin when given.
     parent = _pinned if _pinned is not None else rng.choices(pool, weights=probs, k=1)[0]
 
-    # M10: the CHILD belongs to its PARENT's island (that is where the new genotype lives in the
+    # The CHILD belongs to its PARENT's island (that is where the new genotype lives in the
     # population structure), which can DIFFER from the abstractly-selected island_idx when
     # enforce_island_separation=False (cross-island: the parent is drawn from ALL islands) or when
     # an empty selected island fell back to the full archive. Re-key island_idx to the parent's
@@ -324,7 +324,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     if _parent_island is not None:
         island_idx = _parent_island
 
-    # Inspirations (H1): DIRECTION-ORIENTED when this island has a STRUCTURED meta brief —
+    # Inspirations: DIRECTION-ORIENTED when this island has a STRUCTURED meta brief —
     # sample ONE of its directions and use the programs ASSIGNED to it as the exemplars
     # (else just the direction text). Pre-brief, fall through to the score-ranked default
     # below (byte-identical to before → WeightedSamplingStrategy parity preserved).
@@ -361,18 +361,18 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             archive_insp = [p.id for p in picked[top_k_n:]]
         else:
             # Top-k by score (excluding parent) + a couple of elites.
-            ranked = sorted(pool, key=lambda p: _finite_score(getattr(p, "combined_score", 0.0)), reverse=True)  # M8: NaN/None-safe
+            ranked = sorted(pool, key=lambda p: _finite_score(getattr(p, "combined_score", 0.0)), reverse=True)  # NaN/None-safe
             top_k = [p.id for p in ranked if p.id != parent.id][:top_k_n]
             elite_pool = [p for p in ranked if p.id != parent.id and p.id not in top_k]
             archive_insp = [p.id for p in elite_pool[:arch_n]]
 
     return {
         "parent_id": parent.id,
-        "island_idx": island_idx,                  # M10: the child's ACTUAL island (parent's)
-        "sampled_island_idx": sampled_island_idx,  # M10: the originally-selected island (provenance)
+        "island_idx": island_idx,                  # the child's ACTUAL island (parent's)
+        "sampled_island_idx": sampled_island_idx,  # the originally-selected island (provenance)
         "archive_inspiration_ids": archive_insp,
         "top_k_inspiration_ids": top_k,
-        "sampled_direction": sampled_direction,  # H1: per-gen direction text for the prompt
+        "sampled_direction": sampled_direction,  # per-gen direction text for the prompt
         "needs_fix": False,
         "n_candidates": len(pool),
         "selection_probs": probs,

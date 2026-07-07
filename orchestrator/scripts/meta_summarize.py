@@ -36,7 +36,7 @@ OUTPUT CONTRACT:
                         ``evo.meta_failure_note`` and run_window feeds it forward
                         into EVERY gen (a persistent caution).
 
-WS3 GUARANTEE (meta must SEE failures): if ``recent_programs`` is not supplied but
+GUARANTEE (meta must SEE failures): if ``recent_programs`` is not supplied but
 ``db_path`` is, meta SELF-GATHERS recent attempts from the archive — explicitly
 including recent FAILURES (via archive_query ``recent_failures``) plus the current
 top performers. So meta can't silently miss the failure signal regardless of what
@@ -65,7 +65,7 @@ INPUT (stdin JSON):
     "meta_code_preview_chars": 1200,  # per-program code preview cap (0 disables)
     "prior_recommendations": str | null,
     "max_recommendations": 5,
-    "results_dir": str | null,   # WS7: if set, self-log the full call + fold cost into the ledger
+    "results_dir": str | null,   # if set, self-log the full call + fold cost into the ledger
     "mock": false, "mock_text": str | null,
     "run_id": str | null
   }
@@ -76,7 +76,7 @@ OUTPUT (stdout JSON):
     "failure_note": str,
     "island_directions": [ {"island_idx": int, "text": str} ],  # headline dir per island (derived; back-compat)
     "islands": [ {"island_idx": int, "directions": [ {"text": str, "weight": float,
-                  "assigned_program_ids": [str]} ]} ],  # rich per-island output (H1/M13 mapping)
+                  "assigned_program_ids": [str]} ]} ],  # rich per-island direction→program mapping
     "recommendations": str,   # legacy joined string (logging / back-compat)
     "cost": float, "model": str
   }
@@ -101,7 +101,7 @@ except ImportError:
 # Show only the MAJOR failure reason — the first line of the traceback / the
 # "EvaluationTerminated: ... time limit ..." banner is enough for meta to classify
 # timeout vs correctness. Understanding a full traceback would cost far more tokens
-# than the signal is worth (user direction, WS3).
+# than the signal is worth (user direction).
 _ERR_CHARS = 160
 
 
@@ -133,7 +133,7 @@ _SYS = (
 
 
 def _gather_recent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """WS3: self-gather recent attempts (failures FIRST, then top performers) from
+    """Self-gather recent attempts (failures FIRST, then top performers) from
     the archive so meta always sees the failure signal. Falls back to an explicit
     ``recent_programs`` if the caller supplied one, or [] if no db is reachable."""
     explicit = payload.get("recent_programs")
@@ -147,21 +147,21 @@ def _gather_recent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     # Depth knob (orchestrator lever): run_window passes meta_n_recent; the legacy
     # n_recent key still wins over the default so old callers keep working.
     n_recent = int(payload.get("meta_n_recent", payload.get("n_recent", 32)) or 32)
-    # F4 (mutable knob): how much of the context is recent FAILURES vs top performers.
-    # Default 0.5 reproduces today's even split; raise toward 0.75 when failures
+    # Mutable knob: how much of the context is recent FAILURES vs top performers.
+    # Default 0.5 is an even split; raise toward 0.75 when failures
     # dominate and the distilled failure_note keeps coming back vague.
     frac = min(max(float(payload.get("meta_failures_first_frac", 0.5) or 0.5), 0.0), 1.0)
     n_fail = max(1, int(round(n_recent * frac)))
     n_top = max(1, n_recent - n_fail)
     base = {"db_path": db_path, "db_config": db_config, "embedding_model": embedding_model,
             "include_metadata": True,
-            # H11: give meta the actual CODE (capped) so directions are code-grounded and
+            # Give meta the actual CODE (capped) so directions are code-grounded and
             # it can ASSIGN a direction to the program that realizes it. code_preview_chars
             # (mutable knob) bounds the token cost; 0 disables the code preview.
             "code_preview_chars": int(payload.get("meta_code_preview_chars", 1200) or 0)}
     out: List[Dict[str, Any]] = []
     seen = set()
-    try:  # recent FAILURES first — the signal WS3 must not miss.
+    try:  # recent FAILURES first — the signal meta must never miss.
         fails = archive_query.main({**base, "query_type": "recent_failures", "n": n_fail})["result"]
         for p in fails:
             if p.get("id") not in seen:
@@ -217,7 +217,7 @@ def _build_user_msg(payload: Dict[str, Any], recents: List[Dict[str, Any]],
             f"```\n{(best.get('code') or '')[:4000]}\n```"
         )
     def _err_reason(p):
-        # M7: a format_exc() traceback's FIRST line is the generic banner; the real
+        # A format_exc() traceback's FIRST line is the generic banner; the real
         # exception is the LAST line. Synthesized reasons (timeouts, domain failures) put
         # the reason on the first line, so only swap to the last when it's the banner.
         e = p.get("error_traceback") or ""
@@ -239,7 +239,7 @@ def _build_user_msg(payload: Dict[str, Any], recents: List[Dict[str, Any]],
             head += f"\n    ```\n{code}\n    ```"
         return head
 
-    # H11/M13: render recent attempts GROUPED PER ISLAND (id + score + CODE preview), so meta
+    # Render recent attempts GROUPED PER ISLAND (id + score + CODE preview), so meta
     # sees what each island actually did and can give it a DISTINCT direction AND assign a
     # direction to an existing program id it already realizes.
     islands = payload.get("islands") or []
@@ -341,7 +341,7 @@ def _parse_meta(text: str, max_n: int) -> Dict[str, Any]:
                 txt = str(d.get("text") or "").strip()
                 if txt:
                     island_directions.append({"island_idx": idx, "text": txt})
-        # M13/H11: the richer per-island output — each island gets 1-3 directions, each
+        # The richer per-island output — each island gets 1-3 directions, each
         # optionally ASSIGNED to an existing program id it realizes (the mapping the sampler
         # consumes). assigned_program_id (singular) is normalized to a list; a hallucinated
         # id is harmless (the sampler intersects it with the live pool).
@@ -393,9 +393,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     n = int(payload.get("max_recommendations", 5))
     model = payload.get("model_name", "azure-gpt-5.5")
     effort = payload.get("reasoning_effort") or "medium"  # default medium (pro rejects "low")
-    # H7: meta does NOT parse a "model@effort" arm id (only the bandit's _parse_arm does), so a
-    # value like "azure-gpt-5.4-pro@high" resolved to a NONEXISTENT deployment and silently
-    # degraded EVERY meta round (no briefs/directions written, the only trace a calls.jsonl
+    # Meta does NOT parse a "model@effort" arm id (only the bandit's _parse_arm does), so a
+    # value like "azure-gpt-5.4-pro@high" would resolve to a NONEXISTENT deployment and silently
+    # degrade EVERY meta round (no briefs/directions written, the only trace a calls.jsonl
     # line). Split it here — BEFORE the mock branch — so both the two-knob form and a habitual
     # @-suffix work. (The canonical config is evo.meta_model + evo.meta_reasoning_effort.)
     if isinstance(model, str) and "@" in model:
@@ -415,7 +415,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "model": model,
         }
 
-    # D3 (H5b, opt-in): budget pre-flight — only fires if the agent threads budget_usd
+    # Opt-in budget pre-flight — only fires if the agent threads budget_usd
     # (the harness never calls meta; this is agent-invoked, so it is an opt-in guard, not
     # an autonomous guarantee). Skip the spend when the remaining budget can't cover it.
     _rd, _bud = payload.get("results_dir"), payload.get("budget_usd")
@@ -426,7 +426,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             return {"directions": [], "failure_note": None, "island_directions": [],
                     "islands": [], "recommendations": "", "cost": 0.0, "model": model,
                     "skipped": "budget", "budget_remaining": _rem, "estimated_cost": _est}
-    # F3: auto-populate prior_recommendations from recent meta calls so meta doesn't
+    # Auto-populate prior_recommendations from recent meta calls so meta doesn't
     # re-propose directions it already gave (an explicit caller value always wins).
     if not payload.get("prior_recommendations") and _rd:
         _prior = _common.recent_meta_directions(_rd, k=3)
@@ -450,7 +450,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             call_metadata=call_metadata,
         )
     except Exception as exc:
-        # H2: meta transport failure must not CRASH the orchestrator. Log the (billed)
+        # Meta transport failure must not CRASH the orchestrator. Log the (billed)
         # cost the transport attached and return a GRACEFUL degraded result with a
         # discriminator so the agent can tell "meta crashed" from "meta found nothing".
         _cost = float(getattr(exc, "cost", 0.0) or 0.0)
@@ -468,7 +468,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # Legacy joined string — handy for logging and for any caller that still wants
     # a single blob (back-compat); the structured fields are the real output.
     joined = "\n".join(f"{i+1}. {d['text']}" for i, d in enumerate(parsed["directions"]))
-    # WS7: persist the full call (prompt + raw output) + fold cost into the ledger
+    # Persist the full call (prompt + raw output) + fold cost into the ledger
     # when results_dir is provided — automatic, never-overwritten, no manual step.
     _common.log_external_call(
         payload.get("results_dir"), "meta",

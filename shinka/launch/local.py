@@ -72,13 +72,13 @@ def _stream_output(pipe, file_handle, verbose_prefix=None):
 
 
 def kill_process_tree(process) -> None:
-    """M47: kill the WHOLE eval process tree, not just the direct child.
+    """Kill the WHOLE eval process tree, not just the direct child.
 
     With ``task.conda_env`` the real evaluator runs as a GRANDCHILD of ``conda run``
     (the Popen child is the conda shim). A plain ``process.kill()`` SIGKILLs only the
     shim, leaving the grandchild python running — it burns CPU past the time limit and
     can write metrics.json/correct.json LATE into a reused gen dir, which a later eval
-    would read as stale ground truth (the M47 -> H13 feed). psutil walks the tree by
+    would read as stale ground truth. psutil walks the tree by
     ppid and is cross-platform (already a dependency here); fall back to a plain kill
     if psutil is unavailable. Best-effort: never raises."""
     pid = getattr(process, "pid", None)
@@ -212,7 +212,7 @@ def monitor(
                 logger.info(
                     f"Process {process.pid} exceeded timeout of {timeout}. Killing."
                 )
-            kill_process_tree(process)  # M47: kill the conda grandchild too, not just the shim
+            kill_process_tree(process)  # kill the conda grandchild too, not just the shim
             break
 
         if verbose:

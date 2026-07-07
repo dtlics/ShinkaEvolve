@@ -26,7 +26,7 @@ INPUT (stdin JSON):
     "seed": int | null,
     # update mode:
     "arm": str, "reward": float | null, "baseline": float | null, "cost": float | null,
-    "cost_only": false               # C0: record cost without a reward update (reject path)
+    "cost_only": false               # record cost without a reward update (reject path)
   }
 
 OUTPUT (stdout JSON):
@@ -34,7 +34,7 @@ OUTPUT (stdout JSON):
   update:  { "ok": true, "updated": true }
   weights: { "ok": true, "weights": {model: prob}, "counts": {model: {...}}, "models": [str] }
            # read-only snapshot of the posterior + per-arm tallies for diagnostics
-           # (no selection, no update, no state write) — fixes the dead
+           # (no selection, no update, no state write) — this is what feeds the
            # llm_bandit_weights sensor.
 """
 
@@ -52,18 +52,19 @@ except ImportError:
 def _make_bandit(models: List[str], bandit_kwargs: Dict[str, Any], state_path, seed=None):
     from shinka.llm import AsymmetricUCB
 
-    # L74: forward the seed to the bandit's INSTANCE rng — the global np.random.seed in main
-    # does NOT govern bandit.select_llm's draw, so arm selection was irreproducible despite
-    # evo.seed. bandit_kwargs wins if it carries its own seed.
+    # Forward the seed to the bandit's INSTANCE rng — the global np.random.seed in main
+    # does NOT govern bandit.select_llm's draw, so without this the arm selection would be
+    # irreproducible despite evo.seed. bandit_kwargs wins if it carries its own seed.
     bandit = AsymmetricUCB(arm_names=list(models), **{"seed": seed, **(bandit_kwargs or {})})
     was_reset = False
     if state_path and os.path.exists(state_path):
         try:
             bandit.load_state(state_path)
         except Exception as exc:
-            # M25: a present-but-unloadable state (corrupt/truncated/incompatible) is DISCARDED.
-            # Signal it (was a silent `pass`, indistinguishable from a cold start) so the caller
-            # surfaces a reset instead of the agent seeing near-zero counts with no reason.
+            # A present-but-unloadable state (corrupt/truncated/incompatible) is DISCARDED.
+            # Signal it — swallowing it silently would be indistinguishable from a cold
+            # start — so the caller surfaces a reset instead of the agent seeing
+            # near-zero counts with no reason.
             was_reset = True
             import sys as _sys
 
@@ -85,7 +86,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     bandit, _bandit_reset = _make_bandit(models, bandit_kwargs, state_path, seed=seed)
 
-    # L75: sanitize the subset/explore pool against the KNOWN arm names so a typo or a missing
+    # Sanitize the subset/explore pool against the KNOWN arm names so a typo or a missing
     # @effort suffix (the exact recovery levers SKILL recommends for a starved arm) DROPS the
     # unknown entries with a warning instead of raising an unhandled ValueError that aborts the
     # whole cluster at the first slot of the relaunch.
@@ -128,10 +129,10 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     if mode == "update":
         arm = payload["arm"]
-        # C0: cost_only records the arm's spend WITHOUT a reward update — used for a
+        # cost_only records the arm's spend WITHOUT a reward update — used for a
         # novelty-rejected slot (real spend, no quality signal), so the arm is not
-        # spuriously penalized yet its cost is not undercounted (the cheap-arm
-        # entrenchment driver H3 named). Without cost_only, reward=None imputes worst.
+        # spuriously penalized yet its cost is not undercounted (undercounting would
+        # entrench the cheap arm). Without cost_only, reward=None imputes worst.
         if not payload.get("cost_only"):
             reward = payload.get("reward")
             baseline = payload.get("baseline")
@@ -168,7 +169,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "model_name": model_name,
         "probs": [float(p) for p in np.asarray(probs, dtype=float).tolist()],
         "models": models,
-        "bandit_state_reset": _bandit_reset,  # M25: True if a corrupt state file was discarded
+        "bandit_state_reset": _bandit_reset,  # True if a corrupt state file was discarded
     }
 
 

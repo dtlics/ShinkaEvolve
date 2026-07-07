@@ -136,7 +136,7 @@ def get_dr_async_client(
 
 def _usage_cost(response: Any, model: str) -> float:
     """Best-effort token cost from response.usage × pricing.csv (0.0 if unavailable).
-    Shared by the success path AND the failure raises (P7-T6) so a DR call that burned
+    Shared by the success path AND the failure raises, so a DR call that burned
     tokens but then failed terminally still reports its billed cost to the ledger."""
     usage = getattr(response, "usage", None)
     if usage is None:
@@ -188,14 +188,15 @@ async def run_dr_call(
     keeps the connection lifetime short, matching the long-running
     inference characteristic of DR.
 
-    Returns ``(text, cost_estimate)``. L41: DR IS priced (pricing.csv prices o3-deep-research
+    Returns ``(text, cost_estimate)``. DR IS priced (pricing.csv prices o3-deep-research
     at 10/40 per 1M; _usage_cost computes it) — ``cost`` is the usage-derived token cost (0.0
     only when usage is absent, e.g. a failed job). The caller (deep_research.py) logs it to
     journal/calls via log_external_call (NOT a meta_briefs.cost column — that is the per-island
     META round's cost, a different concern).
 
-    On poll timeout (now best-effort CANCELLED, L46) or terminal-but-failed status, raises so the
-    caller can surface a placeholder brief instead of crashing.
+    On poll timeout (after best-effort CANCELLING the abandoned background job) or
+    terminal-but-failed status, raises so the caller can surface a placeholder brief
+    instead of crashing.
     """
     import asyncio
 
@@ -234,9 +235,9 @@ async def run_dr_call(
     terminal = {"completed", "failed", "incomplete", "cancelled", "expired"}
     # TWO-LEVEL timeout (matches the main bg transport). poll_timeout_sec is the TOTAL job
     # wall, enforced as a true monotonic DEADLINE; each status GET is capped at the SHORT
-    # per_request_timeout_sec and a hung GET is RETRIED, not abandoned. (The old loop used a
-    # summed-interval `elapsed += poll_interval_sec` clock, so a slow/hung retrieve() drifted
-    # the wall arbitrarily late.)
+    # per_request_timeout_sec and a hung GET is RETRIED, not abandoned. (A summed-interval
+    # `elapsed += poll_interval_sec` clock would let a slow/hung retrieve() drift the wall
+    # arbitrarily late — hence the deadline.)
     _deadline = time.monotonic() + poll_timeout_sec
     while last_status not in terminal:
         remaining = _deadline - time.monotonic()
@@ -247,11 +248,11 @@ async def run_dr_call(
                 f"after {poll_timeout_sec:.1f}s (wall)"
                 + (f" error.code={_code!r}" if _code else "")
             )
-            _err.cost = _usage_cost(response, model)  # P7-T6: bill what was spent
+            _err.cost = _usage_cost(response, model)  # bill what was spent
             _err.submitted = True
             _err.error_code = _code
             _err.error_message = _msg
-            # L46: best-effort CANCEL the abandoned background job before raising. Otherwise it
+            # Best-effort CANCEL the abandoned background job before raising. Otherwise it
             # keeps running server-side (a single DR job fires many large reasoning+search calls
             # for 30-60 min) and keeps BILLING + consuming the quota-constrained o3-deep-research
             # deployment (this repo's CONFIRMED failure mode). Never let a cancel failure mask
@@ -288,7 +289,7 @@ async def run_dr_call(
             + (f" error.message={_msg!r}" if _msg else "")
             + (f" incomplete_details.reason={_inc!r}" if _inc else "")
         )
-        _err.cost = _usage_cost(response, model)  # P7-T6: bill what was spent before failing
+        _err.cost = _usage_cost(response, model)  # bill what was spent before failing
         _err.submitted = True
         _err.error_code = _code
         _err.error_message = _msg
@@ -329,6 +330,5 @@ async def run_dr_call(
     return text, cost
 
 
-# L41: the dead DeepResearchModel class was removed — it had ZERO importers, and the active DR
-# path is run_dr_call()/get_dr_async_client() above. Its docstring referenced a nonexistent
-# DeepResearchSummarizer and a wrong 30-min wall (the real DR_TIMEOUT is 60 min).
+# The active DR path is run_dr_call() + get_dr_async_client() above; there is deliberately
+# no model-class wrapper in this module.

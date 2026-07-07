@@ -7,12 +7,12 @@ per-island generations-since-best-improved → island spawn, a different thing).
 
 Two distinct quantities:
   * J = Δ / √W — a monotone, continuous progress scalar (Δ = best-score gain over
-    the window; √W normalizes for window length). This REPLACES the earlier
-    EvoX `Δ·log1p(s_start)/√W` form, whose `log1p(s_start)` scale term was
+    the window; √W normalizes for window length). Deliberately NO score-scale
+    term: a `Δ·log1p(s_start)/√W` form's `log1p(s_start)` factor is
     discontinuous and non-monotonic around s_start=0 (for the same Δ, J could
-    collapse ~200× the instant the score went positive) and dominated Δ on
-    small-score tasks — making J useless for cross-window comparison (was F16).
-    Rollback no longer keys on J (see ``rollback_decision.py``); J is now purely
+    collapse ~200× the instant the score went positive) and dominates Δ on
+    small-score tasks — making J useless for cross-window comparison.
+    Rollback does not key on J (see ``rollback_decision.py``); J is purely
     an informational progress reading.
   * The intervention TRIGGER is a **hybrid threshold**: a window is "low" when
 
@@ -21,9 +21,9 @@ Two distinct quantities:
     The ``rel_frac`` term makes the trigger SCALE-FREE once a score exists
     (equivalent to "relative improvement < rel_frac"), while ``abs_floor`` gives
     a sensible absolute bar during the opening phase when s_start ≈ 0 (where a
-    pure relative test would divide by ~0). This fixes the old `Δ < τ=0.05`
-    default that flagged stagnation even on a window that tripled the score
-    (gains here are ~0.01 ≪ 0.05) — was F12.
+    pure relative test would divide by ~0). A fixed absolute bar (e.g. Δ < 0.05)
+    would instead flag stagnation even on a window that tripled the score of a
+    small-score task (typical gains here are ~0.01 ≪ 0.05).
 
 Stagnation fires when the trigger is "low" for ``consecutive_required`` (default
 2) consecutive windows — demand-driven, not on a fixed schedule.
@@ -107,7 +107,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         "threshold": threshold,
         "abs_floor": abs_floor,
         "rel_frac": rel_frac,
-        "tau": abs_floor,  # back-compat echo (now == abs_floor)
+        "tau": abs_floor,  # back-compat echo (equals abs_floor)
         "trigger_metric": "hybrid",
         "formula": "J = Δ/√W; trigger low when Δ ≤ max(abs_floor, rel_frac·max(s_start,0))",
     }

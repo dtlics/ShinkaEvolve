@@ -1,4 +1,4 @@
-"""test_improvements.py — tests for the second-round improvements.
+"""test_improvements.py — unit tests for the orchestrator framework invariants.
 
 Covers: compute_reward (scoring concern, generation half), record_policy (memory
 concern), the run journal hierarchy, and concern-bundle deploy/rollback. The
@@ -85,7 +85,7 @@ def test_journal_roundtrip():
 
 
 def test_journal_ledger_durability():
-    """P0-T1: a truncated/corrupt run.json is repaired on read by recomputing
+    """A truncated/corrupt run.json is repaired on read by recomputing
     total_cost from the durable streams — the budget cap is never silently zeroed.
     Writes are atomic (no leftover .tmp)."""
     import json as _json
@@ -212,7 +212,7 @@ def test_cadence_policy():
 
 
 def test_work_score_readers():
-    """P4-T1: journal readers that drive the taper (recent_work_score / recent_work_axes
+    """Journal readers that drive the taper (recent_work_score / recent_work_axes
     / work_low_streak)."""
     import tempfile
 
@@ -222,7 +222,7 @@ def test_work_score_readers():
         journal.init_run(td, {"run_id": "w"})
         assert journal.recent_work_score(td) is None  # none recorded yet
         assert journal.work_low_streak(td) == 0
-        # DEC-6: the discovery axis is split into work_discovery + work_grounding; the
+        # The discovery axis is split into work_discovery + work_grounding; the
         # taper scalar is still work_audit + work_discovery + work_grounding.
         journal.append_intervention(td, {"type": "audit", "work_audit": 3, "work_discovery": 0,
                                          "work_grounding": 0, "work_score": 3})
@@ -272,8 +272,8 @@ def test_budget_hardstop():
         assert d["return_reason"] == "budget_exhausted", d["return_reason"]
         # ledger tracked spend; we never ran unbounded
         assert journal.total_cost(rd) >= 2.5
-        # M18: overshoot is bounded by ONE full slot (here one mock mutation, no embed),
-        # not unbounded — the upper bound, not just the lower bound the old test checked.
+        # overshoot is bounded by ONE full slot (here one mock mutation, no embed),
+        # not unbounded — this is the upper bound, paired with the lower bound above.
         assert journal.total_cost(rd) <= 2.5 + 1.0 + 1e-6, journal.total_cost(rd)
         # intervention cost lands in the same ledger
         journal.append_intervention(rd, {"type": "deep_research", "cost": 5.0})
@@ -282,7 +282,7 @@ def test_budget_hardstop():
 
 
 def test_apply_exhausted_truthful_recording():
-    """P1-T1 (F-INNER-1): an apply-exhausted slot (mutate returns applied=False) is a
+    """An apply-exhausted slot (mutate returns applied=False) is a
     TRUE failed attempt — the model's cost is charged cost-only to the bandit, NO
     reward, NOTHING archived (never a fabricated parent-copy duplicate), surfaced via
     the exhausted-retry signals."""
@@ -347,7 +347,7 @@ def test_apply_exhausted_truthful_recording():
 
 
 def test_diagnostics_sensor_fields():
-    """P2-T3: errored_fraction (tombstoned EXCLUDED so it can release), apply/timeout/
+    """Diagnostics sensors: errored_fraction (tombstoned EXCLUDED so it can release), apply/timeout/
     wrong echoes + apply_failure_rate, the counts-based model_collapse flag; the dead
     current_strategy_hash echo is gone."""
     sys.path.insert(0, str(_ORCH / "scripts"))
@@ -377,9 +377,9 @@ def test_diagnostics_sensor_fields():
         diag.archive_query.main = _summary(5, 3, tomb=2)  # tombstoned excluded → releases
         assert diag.main(dict(base))["errored_fraction"] == 0.0
 
-        # H3: a CORRECT keep-the-better evictee (errored_tombstoned_count=0 of 1 tombstone)
+        # a CORRECT keep-the-better evictee (errored_tombstoned_count=0 of 1 tombstone)
         # must NOT be subtracted from the errored numerator. 10 progs / 6 correct (one the
-        # evictee) / 4 errored → 4/9, NOT the double-subtracted 3/9 the old formula gave.
+        # evictee) / 4 errored → 4/9, NOT a double-subtracted 3/9.
         diag.archive_query.main = _summary(10, 6, tomb=1, err_tomb=0)
         assert abs(diag.main(dict(base))["errored_fraction"] - (4 / 9)) < 1e-9, \
             diag.main(dict(base))["errored_fraction"]
@@ -399,7 +399,7 @@ def test_diagnostics_sensor_fields():
         assert out5["apply_exhausted_count"] == 2
         assert out5["timeout_count"] == 1 and out5["wrong_answer_count"] == 3
         assert abs(out5["apply_failure_rate"] - 2 / 7) < 1e-9
-        # H4/H5 additive fields present; M34/L17/M29 novelty observability echoed.
+        # additive sensor fields present; novelty observability counters echoed.
         assert out5["eval_total"] == 5 and "llm_bandit_window_counts" in out5
         o6 = diag.main({**base, "novelty_kept_better": 4, "novelty_idle_count": 2,
                         "embed_failures": 1, "novelty_evict_fail_count": 0})
@@ -412,7 +412,7 @@ def test_diagnostics_sensor_fields():
 
 
 def test_warmup_trace_and_cleanup():
-    """P2-T2: per-step tracing writes journal/steps.jsonl (sampler → prompt → llm_output
+    """Per-step tracing writes journal/steps.jsonl (sampler → prompt → llm_output
     → eval → framework_decision) ONLY when on; cleanup_warmup removes the throwaway
     workspace idempotently."""
     import tempfile
@@ -458,7 +458,7 @@ def test_warmup_trace_and_cleanup():
 
 
 def test_meta_island_directions():
-    """P3-T1: meta returns one distinct island_directions entry per island, drops a
+    """Meta returns one distinct island_directions entry per island, drops a
     malformed entry without crashing, and defaults to gpt-5.5."""
     sys.path.insert(0, str(_ORCH / "scripts"))
     import meta_summarize
@@ -481,7 +481,7 @@ def test_meta_island_directions():
 
 
 def test_auto_meta_per_window():
-    """P3-T2: the harness runs an automatic per-window meta round, folds its cost into
+    """The harness runs an automatic per-window meta round, folds its cost into
     the ledger, and auto-records ONE per-island brief; auto_meta=False skips the whole
     round; a meta failure never crashes the window."""
     import tempfile
@@ -526,7 +526,7 @@ def test_auto_meta_per_window():
                 "embedding_model": "text-embedding-3-small",
                 "query_type": "island_brief", "island_idx": 0})["result"]
             assert (brief or {}).get("content") == "island0 dir", brief
-            # M14: meta health is on the returned diag; island 0 got a brief.
+            # meta health is on the returned diag; island 0 got a brief.
             assert d["meta_health"]["status"] == "ok", d["meta_health"]
             assert 0 in d["meta_health"]["islands_written"], d["meta_health"]
 
@@ -548,14 +548,14 @@ def test_auto_meta_per_window():
         with tempfile.TemporaryDirectory() as td:
             d = run_window.main(_cfg(os.path.join(td, "run"), True))
             assert d.get("ok") is True  # a meta failure never crashes the window
-            assert d["meta_health"]["status"] == "crashed", d["meta_health"]  # M14
+            assert d["meta_health"]["status"] == "crashed", d["meta_health"]
     finally:
         run_window.meta_summarize_script.main = orig_meta
     return None
 
 
 def test_repair_mode_lifecycle():
-    """P5 (T1/T2/T3/T4): repair mode turns ON at >=20% errored; a FAILED repair appends
+    """Repair mode turns ON at >=20% errored; a FAILED repair appends
     to the errored PARENT (no new child) and tombstones it after the attempt cap;
     tombstoning EXCLUDES it from errored_fraction so the mode RELEASES."""
     import tempfile
@@ -611,7 +611,7 @@ def test_repair_mode_lifecycle():
 
 
 def test_boot_guard():
-    """P6-T1: the harness refuses to start (spending NOTHING) when task_sys_msg is unset
+    """The harness refuses to start (spending NOTHING) when task_sys_msg is unset
     / placeholder; require_sys_msg=false downgrades to a warning; the starters ship the
     sentinel."""
     import tempfile
@@ -664,7 +664,7 @@ def test_boot_guard():
 def test_fix_prompt_reads_only_metadata_channels():
     """Contract: the fix prompt's error section comes ONLY from the parent's
     stdout_log/stderr_log metadata channels — marker present when populated, absent when
-    blank. (Point 5 removed the spoil gate; evaluator feedback is always fed.)"""
+    blank. (There is no spoil gate; evaluator feedback is always fed.)"""
     sys.path.insert(0, str(_ORCH / "scripts"))
     import construct_mutation_prompt as cmp
 
@@ -681,8 +681,8 @@ def test_fix_prompt_reads_only_metadata_channels():
     return None
 
 
-def test_c2_runtime_budget_caution():
-    """C2: record_policy persists runtime_sec/timed_out; construct_mutation_prompt surfaces a
+def test_runtime_budget_caution():
+    """record_policy persists runtime_sec/timed_out; construct_mutation_prompt surfaces a
     BOUNDED runtime-budget caution (both branches) when a parent/inspiration is slow or timed
     out vs the per-eval budget — numeric/boolean only (never evaluator text)."""
     sys.path.insert(0, str(_ORCH / "scripts"))
@@ -731,7 +731,7 @@ def test_c2_runtime_budget_caution():
 
 
 def test_snapshot_restore_state():
-    """P7-T1: restore_state is a FULL rewind of archive + bandit, but the cost LEDGER is
+    """restore_state is a FULL rewind of archive + bandit, but the cost LEDGER is
     PRESERVED at the live value (never rewound) so a revert can't be used to exceed budget."""
     import glob
     import json as _json
@@ -771,7 +771,8 @@ def test_snapshot_restore_state():
 
 
 def test_rollback_fail_closed_and_collapse():
-    """P7-T2: fail CLOSED on no-data / NaN measure; P7-T3: counts-share collapse."""
+    """The rollback decision fails CLOSED on a no-data / NaN measure, and fires on a
+    counts-share bandit collapse."""
     sys.path.insert(0, str(_ORCH / "harness"))
     import rollback_decision as rb
 
@@ -788,16 +789,17 @@ def test_rollback_fail_closed_and_collapse():
     assert r["regressed"] is True and any("collapse" in x for x in r["reasons"])
     assert rb.decide(prior, dict(prior))["regressed"] is False  # balanced arms → no collapse
 
-    # H4: a ZERO-EVALUATION measure window (every slot apply-exhausted) reports
+    # a ZERO-EVALUATION measure window (every slot apply-exhausted) reports
     # evaluation_failure_rate 0.0 PRESENT but apply_failure_rate 1.0 → must fail closed.
     zero_eval = {"delta": 0.0, "best_score_end": 0.0, "evaluation_failure_rate": 0.0,
                  "eval_total": 0, "apply_failure_rate": 1.0}
     assert rb.decide({}, zero_eval)["regressed"] is True, "zero-eval window must fail closed"
-    # a window with SOME evals (apply_failure_rate < 1.0) is NOT caught by the H4 guard
+    # a window with SOME evals (apply_failure_rate < 1.0) is NOT caught by the zero-eval guard
     assert rb.decide(flat, {**flat, "apply_failure_rate": 0.3, "eval_total": 7})["regressed"] is False
 
-    # H5: a per-window collapse must fire arm 4a even when the run-CUMULATIVE counts are
-    # balanced (the cumulative total can't move the share mid-run; per-window can).
+    # a per-window collapse must fire the bandit-collapse counts-share check even when the
+    # run-CUMULATIVE counts are balanced (the cumulative total can't move the share mid-run;
+    # per-window can).
     prior2 = {**flat, "llm_bandit_counts": {"a": {"submitted": 500}, "b": {"submitted": 500}},
               "llm_bandit_window_counts": {"a": {"submitted": 5}, "b": {"submitted": 5}}}
     coll2 = {**flat, "llm_bandit_counts": {"a": {"submitted": 509}, "b": {"submitted": 501}},
@@ -809,7 +811,7 @@ def test_rollback_fail_closed_and_collapse():
 
 
 def test_validate_select_llm_all_modes():
-    """P7-T5: validate_strategy smokes select+weights+update on the real select_llm.py."""
+    """validate_strategy smokes select+weights+update on the real select_llm.py."""
     sys.path.insert(0, str(_ORCH / "harness"))
     import validate_strategy as vs
 
@@ -820,7 +822,7 @@ def test_validate_select_llm_all_modes():
 
 
 def test_dr_refusal_graceful():
-    """P7-T6: a refused/failed DR call returns a DEGRADED result (no crash) with a reason."""
+    """A refused/failed DR call returns a DEGRADED result (no crash) with a reason."""
     sys.path.insert(0, str(_ORCH / "scripts"))
     import deep_research
     import shinka.llm.agent.dr_client as drc
@@ -848,7 +850,7 @@ def test_dr_refusal_graceful():
 
 
 def test_deploy_bundle_rejected_guard():
-    """P7-T4: deploy_bundle refuses a candidate hash a prior bundle outcome REJECTED."""
+    """deploy_bundle refuses a candidate hash a prior bundle outcome REJECTED."""
     import importlib
     import tempfile
 
@@ -883,13 +885,13 @@ def test_deploy_bundle_rejected_guard():
 
 
 def test_per_call_cost_cap():
-    """P7-T7: the per-call max-output-token cap (the deliberate ~$10 guard) is pinned."""
+    """The per-call max-output-token cap (the deliberate ~$10 guard) is pinned."""
     sys.path.insert(0, str(_ORCH / "scripts"))
     import _azure
 
     assert _azure._resolve_max_output_tokens("azure-gpt-5.5") == 200_000
     assert _azure._resolve_max_output_tokens("azure-gpt-5.4-pro") == 50_000
-    # P7-T7: DR carries its OWN per-call cap (≈$8 at 200k); verify the default is pinned.
+    # DR carries its OWN per-call cap (≈$8 at 200k); verify the default is pinned.
     import inspect as _inspect
 
     import shinka.llm.agent.dr_client as drc
@@ -902,7 +904,7 @@ def test_per_call_cost_cap():
 
 
 def test_nonfinite_score_guards():
-    """P10-T1/T2: a non-finite candidate score → failed-attempt reward (no NaN poisons
+    """A non-finite candidate score → failed-attempt reward (no NaN poisons
     the bandit); negative finite scores are supported; the parent sampler's weighted
     probabilities are never NaN even with a non-finite score in the pool."""
     import math as _m
@@ -928,7 +930,7 @@ def test_nonfinite_score_guards():
 
 
 def test_end_of_run_summary_and_archive():
-    """P8-T1: ending summary carries the future-fixes header (not 'J trajectory');
+    """Ending summary carries the future-fixes header (not 'J trajectory');
     finalize_run flips status; archive_run copies the COMPACT subset (excl call blobs);
     None-defaulting never crashes; .gitignore carries the archive dir."""
     import json as _json
@@ -975,7 +977,7 @@ def test_end_of_run_summary_and_archive():
 
 
 def test_immediate_fix():
-    """WS1: an eval failure is repaired in-place by re-prompting the same model,
+    """An eval failure is repaired in-place by re-prompting the same model,
     up to fix_retry_budget; fix_success counts only a RECOVERED candidate; the
     budget railguard stops a fix attempt we can't afford."""
     import tempfile
@@ -1035,7 +1037,7 @@ def test_immediate_fix():
 
 
 def test_meta_summarize_parsing():
-    """WS2/WS3: meta returns weighted directions + a failure_note; a non-JSON reply
+    """Meta returns weighted directions + a failure_note; a non-JSON reply
     degrades to a single direction rather than crashing."""
     import meta_summarize
 
@@ -1093,7 +1095,7 @@ def test_meta_direction_sampling():
 
 
 def test_call_logging():
-    """WS7: log_call persists a never-overwritten detail file + compact pointer,
+    """log_call persists a never-overwritten detail file + compact pointer,
     folds cost into the ledger, and reads back; _common.log_external_call self-logs
     and no-ops cleanly when results_dir is falsy."""
     import tempfile
@@ -1190,7 +1192,7 @@ def test_capped_island_spawn():
 
 
 def test_parse_arm():
-    """WS6: a bandit arm id 'model@effort' splits into (model, effort); a bare model
+    """A bandit arm id 'model@effort' splits into (model, effort); a bare model
     falls back to the run default effort."""
     sys.path.insert(0, str(_ORCH / "harness"))
     import run_window
@@ -1203,7 +1205,7 @@ def test_parse_arm():
 
 
 def test_bg_call_tools_and_caps():
-    """WS4: _bg_call attaches the web_search_preview tool + max_output_tokens to the
+    """_bg_call attaches the web_search_preview tool + max_output_tokens to the
     Responses create() call only when asked; both absent otherwise."""
     import asyncio
 
@@ -1247,7 +1249,7 @@ def test_bg_call_tools_and_caps():
 
 
 def test_wrap_eval_honors_correct_flag():
-    """Phase 1 (1A.1): run_shinka_eval honors an explicit metrics['correct'] is
+    """run_shinka_eval honors an explicit metrics['correct'] is
     False (a DOMAIN failure with a finite, non-NaN score) and surfaces its
     text_feedback; omitting `correct` preserves today's behavior (correct=True
     at score 0). Reverting the wrap_eval honoring makes this fail."""
@@ -1283,7 +1285,7 @@ def test_wrap_eval_honors_correct_flag():
 
 
 def test_cnot_evaluator_emits_correct_flag():
-    """Phase 1 (1A.3): the cnot aggregate_fn emits correct=False on its fast
+    """The cnot aggregate_fn emits correct=False on its fast
     (no-baseline) failure return sites. Imported by path to avoid the
     evaluate.py name clash with orchestrator/scripts/evaluate.py."""
     import pytest
@@ -1302,7 +1304,7 @@ def test_cnot_evaluator_emits_correct_flag():
 
 
 def test_failure_note_always_rendered():
-    """Phase 2/6 carrier (M1/M2/M3/M4): the persistent failure_note rides into the
+    """The persistent failure_note rides into the
     prompt regardless of patch_type — including `cross` (which skips the per-gen
     direction) and when an island_brief replaced the direction. Reverting the
     sampler failure_note field makes this fail."""
@@ -1322,27 +1324,27 @@ def test_failure_note_always_rendered():
     })
     assert out["patch_type"] == "diff" and note in out["patch_sys"], out["patch_type"]
 
-    # cross SKIPS the per-gen direction, but the failure_note must STILL ride (M1).
+    # cross SKIPS the per-gen direction, but the failure_note must STILL ride.
     out2 = cmp.main({
         "parent": parent, "archive_inspirations": insp, "top_k_inspirations": top,
         "meta_recommendations": "try a greedy pass", "failure_note": note,
         "patch_types": ["cross"], "patch_type_probs": [1.0], "seed": 0,
     })
     assert out2["patch_type"] == "cross", out2["patch_type"]
-    assert note in out2["patch_sys"], "failure_note dropped on cross (M1)"
+    assert note in out2["patch_sys"], "failure_note dropped on cross"
 
-    # island_brief replaces the direction; failure_note still present (M3).
+    # island_brief replaces the direction; failure_note still present.
     out3 = cmp.main({
         "parent": parent, "archive_inspirations": insp, "top_k_inspirations": top,
         "meta_recommendations": "global dir", "island_brief": "island-specific dir",
         "failure_note": note, "patch_types": ["diff"], "patch_type_probs": [1.0], "seed": 0,
     })
     assert "island-specific dir" in out3["patch_sys"], "island_brief not used"
-    assert note in out3["patch_sys"], "failure_note dropped when brief set (M3)"
+    assert note in out3["patch_sys"], "failure_note dropped when brief set"
 
 
 def test_island_brief_roundtrip():
-    """Phase 2 (2A — H1): a per-island brief recorded for ONE island reads back for
+    """A per-island brief recorded for ONE island reads back for
     that island and is None for others — the mechanism that lets islands carry
     DIFFERENT directions. Latest-wins; no brief => None (the gen then gets the constant
     no-brief placeholder from _compose_meta_for_gen — there is no global-direction channel)."""
@@ -1382,7 +1384,7 @@ def test_island_brief_roundtrip():
 
 
 def test_island_diversity_metric():
-    """Phase 2 (2B.3, M12): diversity = mean pairwise cosine DISTANCE (a real spread,
+    """Island diversity = mean pairwise cosine DISTANCE (a real spread,
     not a count); stagnation_count = gens since the island's best correct member."""
     sys.path.insert(0, str(_ORCH / "scripts"))
     import island_policy
@@ -1403,7 +1405,7 @@ def test_island_diversity_metric():
 
 
 def test_island_selection_strategy():
-    """Phase 2 (2B.2, M11): island selection honors config.island_selection_strategy;
+    """Island selection honors config.island_selection_strategy;
     'weighted' favors the best-fitness island, 'proportional' the most populous."""
     import random as _r
 
@@ -1431,7 +1433,7 @@ def test_island_selection_strategy():
 
 
 def test_island_policy_apply_actions_noop():
-    """Phase 2 (2B.1, H8): apply_island_actions executes DECIDED actions via the
+    """apply_island_actions executes DECIDED actions via the
     foundation executors and is a safe NO-OP for empty actions — so the default
     island_policy_driven=false path stays byte-identical. Never raises."""
     from shinka.database import ProgramDatabase, DatabaseConfig
@@ -1450,7 +1452,7 @@ def test_island_policy_apply_actions_noop():
 
 
 def test_reward_validity_floor():
-    """Phase 3 (C1, H3): a correct-but-below-parent candidate gets a strictly-positive
+    """A correct-but-below-parent candidate gets a strictly-positive
     FLOORED reward contribution (distinct from a failed one's None), so the bandit can
     tell 'valid no-gain' from 'failed'. A real gain is NOT floored."""
     sys.path.insert(0, str(_ORCH / "scripts"))
@@ -1475,7 +1477,7 @@ def test_reward_validity_floor():
 
 
 def test_bg_call_incomplete_returns_failed_raises_with_cost():
-    """Phase 4 (H2/D1): a capped 'incomplete' response RETURNS its billed partial
+    """A capped 'incomplete' response RETURNS its billed partial
     (text, cost) instead of raising; a genuine 'failed' raises with .cost attached so
     the caller can fold the billed amount into the ledger (no dropped spend)."""
     import asyncio
@@ -1526,15 +1528,15 @@ def test_bg_call_incomplete_returns_failed_raises_with_cost():
 
 
 def test_rollback_basket_and_foundation_guard():
-    """Phase 5 (E5/H4 + K14 + E1): rollback fires on a bandit COLLAPSE at Δ≈0 (the flat
-    phase the old basket was blind to); a healthy hard task (low but STABLE correctness)
-    is NOT rolled back (K14 abs_eval_floor); near-total collapse fires; and the
+    """Rollback fires on a bandit COLLAPSE at Δ≈0 (a flat phase a J-only basket would be
+    blind to); a healthy hard task (low but STABLE correctness)
+    is NOT rolled back (abs_eval_floor); near-total collapse fires; and the
     foundation-write guard refuses a non-mutable target."""
     sys.path.insert(0, str(_ORCH / "harness"))
     import rollback_decision
     import strategy_store
 
-    # bandit collapse at Δ≈0 -> regressed (the old J-only / delta-gated basket missed this).
+    # bandit collapse at Δ≈0 -> regressed (a J-only / delta-gated basket would miss this).
     prior = {"delta": 0.0, "threshold": 0.001, "evaluation_failure_rate": 0.3,
              "llm_bandit_weights": {"a": 0.5, "b": 0.5}}
     measure = {"delta": 0.0, "threshold": 0.001, "evaluation_failure_rate": 0.3,
@@ -1542,7 +1544,7 @@ def test_rollback_basket_and_foundation_guard():
     d = rollback_decision.decide(prior, measure)
     assert d["regressed"] and any("bandit collapse" in r for r in d["reasons"]), d
 
-    # K14: a hard task with ~30% correctness (below the OLD 0.5 floor) but STABLE is NOT
+    # a hard task with ~30% correctness but STABLE is NOT
     # rolled back — abs_eval_floor (0.05) sits far below it and no other arm fires.
     hard = {"delta": 0.0, "threshold": 0.001, "evaluation_failure_rate": 0.7}
     assert rollback_decision.decide(hard, dict(hard))["regressed"] is False
@@ -1551,7 +1553,7 @@ def test_rollback_basket_and_foundation_guard():
     near = rollback_decision.decide({"evaluation_failure_rate": 0.7}, {"evaluation_failure_rate": 0.99})
     assert near["regressed"], near
 
-    # E1: the foundation-write guard refuses a non-mutable target.
+    # the foundation-write guard refuses a non-mutable target.
     try:
         strategy_store.snapshot("_common.py")
         assert False, "snapshot of a non-mutable target must be refused"
@@ -1560,10 +1562,9 @@ def test_rollback_basket_and_foundation_guard():
 
 
 def test_skill_doc_teaches_run_loop_and_roles():
-    """P9-T9 doc-lint: SKILL.md + CLAUDE.md teach the NEW run loop + the two roles in
+    """Doc-lint: SKILL.md + CLAUDE.md teach the run loop + the two roles in
     behavioral language, and the killed jargon is gone from PROSE. Assert durable
-    BEHAVIORS, never a codename being killed. (Atomic with P10-T5: the phantom levers are
-    dropped from both SKILL.md and this asserted set in one change.)"""
+    BEHAVIORS, never a codename being killed."""
     import re as _re
 
     skill = (_REPO_ROOT / ".claude" / "skills" / "shinka-orchestrator" / "SKILL.md").read_text(encoding="utf-8")
@@ -1605,7 +1606,7 @@ def test_skill_doc_teaches_run_loop_and_roles():
 
 
 def test_bandit_reward_ranking():
-    """H14/M19: with EVERY arm updated (so posterior() doesn't take the unseen-arm
+    """With EVERY arm updated (so posterior() doesn't take the unseen-arm
     shortcut and the reward magnitudes actually matter), the bandit ranks arms by reward
     — the owner's 'is model selection sane?' guard — and the weights peek reports it."""
     sys.path.insert(0, str(_ORCH / "scripts"))
@@ -1625,7 +1626,7 @@ def test_bandit_reward_ranking():
 
 
 def test_meta_direction_sampling_weighted():
-    """M19: a brief's directions are sampled BY WEIGHT, not argmax — a 3:1 weight yields
+    """A brief's directions are sampled BY WEIGHT, not argmax — a 3:1 weight yields
     roughly 3:1 frequency and the low-weight arm still appears. The one sampler lives in
     sample_parent._sample_direction; run_window has no direction sampler of its own."""
     import random as _r
@@ -1644,8 +1645,7 @@ def test_meta_direction_sampling_weighted():
 
 
 def test_validate_bundle():
-    """M19: validate_bundle actually runs each target's contract (the concern-bundle
-    gate had no exercising test)."""
+    """validate_bundle actually runs each target's contract."""
     sys.path.insert(0, str(_ORCH / "harness"))
     import validate_strategy
 
@@ -1659,7 +1659,7 @@ def test_validate_bundle():
 
 
 def test_cnot_eval_budget_invariant():
-    """M8: the cnot evaluator's internal timeouts must satisfy
+    """The cnot evaluator's internal timeouts must satisfy
     PER_TRIAL_TIMEOUT_S < EVAL_WALLCLOCK_BUDGET_S so the graceful early-abort can fire
     before a per-trial kill; a future edit that inverts them is caught here. (The
     eval_time > wallclock relation is task-config, documented in the evaluator.)"""
@@ -1677,7 +1677,7 @@ def test_cnot_eval_budget_invariant():
 
 
 def test_repair_db_ops():
-    """P5-T1 (FOUNDATION DB ops): append_program_error re-truncates the COMBINED traceback to
+    """FOUNDATION DB ops: append_program_error re-truncates the COMBINED traceback to
     ~8KB and bumps repair_attempts; tombstone_program preserves island_idx + the row but
     removes the archive entry (NOT _evict_island's null-island)."""
     import dataclasses
@@ -1721,7 +1721,7 @@ def test_repair_db_ops():
 
 
 def test_failure_type_buckets_producer():
-    """P2-T4 (producer + field-name contract): the eval-failure bucketer is what CREATES
+    """Producer + field-name contract: the eval-failure bucketer is what CREATES
     timeout_count / wrong_answer_count. A result carrying `timed_out:True` (the field
     `evaluate.py` synthesizes) flows through to timeout_count; a plain incorrect (no
     timed_out) → wrong_answer_count; a correct slot increments neither. Guards the
@@ -1775,7 +1775,7 @@ def test_failure_type_buckets_producer():
 
 
 def test_log_step_reader_and_cli():
-    """P2-T1: log_step writes steps.jsonl; read_steps filters by generation; the `steps`
+    """log_step writes steps.jsonl; read_steps filters by generation; the `steps`
     CLI view returns the same records."""
     sys.path.insert(0, str(_ORCH / "harness"))
     import journal
@@ -1793,7 +1793,7 @@ def test_log_step_reader_and_cli():
 
 
 def test_no_score_reminder():
-    """P4-T2: after several control-returns with NO work_score recorded, the harness emits
+    """After several control-returns with NO work_score recorded, the harness emits
     a one-line stderr reminder (the taper has no signal so it wakes every window)."""
     import contextlib
     import io
@@ -1829,7 +1829,7 @@ def test_no_score_reminder():
 
 
 def test_tombstone_first_reclaim():
-    """P5-T5: when the archive is full, a repair-tombstoned (dead) program is reclaimed
+    """When the archive is full, a repair-tombstoned (dead) program is reclaimed
     FIRST — evicted ahead of any live program, regardless of fitness. With no tombstoned
     members present, eviction order is byte-identical to today (a worse candidate is not
     inserted)."""
@@ -1894,7 +1894,7 @@ def test_tombstone_first_reclaim():
 
 
 def test_repair_success_and_escalation():
-    """P5-T4 (acceptance items 3 + 5): a repair that SUCCEEDS archives a correct child (no
+    """A repair that SUCCEEDS archives a correct child (no
     tombstone); `repair_escalation_model` routes the strike-two repair mutation to the
     stronger model (off by default = the normal selected arm)."""
     import tempfile
@@ -1928,7 +1928,7 @@ def test_repair_success_and_escalation():
             "db_config": cfg["db_config"], "embedding_model": "text-embedding-3-small",
             "query_type": "summary"})["result"]
 
-    # (3) a SUCCESSFUL repair archives a correct child, no tombstone
+    # a SUCCESSFUL repair archives a correct child, no tombstone
     with tempfile.TemporaryDirectory() as td:
         rd = os.path.join(td, "ok")
         cfg = _cfg(rd, incorrect=[1])  # gen1 errored → triggers repair; the repair gen is CORRECT
@@ -1939,7 +1939,7 @@ def test_repair_success_and_escalation():
         assert after == before + 1, (before, after)  # a repaired-correct child IS archived
         assert d1.get("repair_fail_count", 0) == 0 and d1.get("repair_tombstoned_count", 0) == 0, d1
 
-    # (5) escalation routing on strike two
+    # escalation routing on strike two
     captured = []
     orig_mut = run_window.mutate.main
 
@@ -1964,7 +1964,7 @@ def test_repair_success_and_escalation():
 
 
 def test_validate_select_llm_negative():
-    """P7-T5 (negative half): a select_llm variant whose WEIGHTS mode drops `counts` (the
+    """Negative half of the select_llm contract: a variant whose WEIGHTS mode drops `counts` (the
     collapse data source) fails validation, naming the missing key."""
     import tempfile
 
@@ -1997,7 +1997,7 @@ def test_validate_select_llm_negative():
 
 
 def test_dr_client_cost_on_failure():
-    """P7-T6 (transport): run_dr_call attaches the billed token cost to the raised error on
+    """Transport level: run_dr_call attaches the billed token cost to the raised error on
     a terminal-failed status AND on timeout, so a DR call that burned tokens then failed
     still reports its spend to the ledger (the cost reflects usage when the model is priced)."""
     import asyncio
@@ -2049,7 +2049,7 @@ def test_dr_client_cost_on_failure():
 
 
 def test_dr_refusal_folds_cost_to_ledger():
-    """P7-T6 (script): a refused DR call still folds its billed cost into the ledger and
+    """Script level: a refused DR call still folds its billed cost into the ledger and
     logs exactly one `dr` pointer to calls.jsonl (with its query preserved)."""
     import tempfile
 
@@ -2079,7 +2079,7 @@ def test_dr_refusal_folds_cost_to_ledger():
 
 
 def test_dr_submitted_failure_floors_cost():
-    """A: a SUBMITTED-but-failed DR call (usage None → token cost 0) records >= search_surcharge
+    """A SUBMITTED-but-failed DR call (usage None → token cost 0) records >= search_surcharge
     so the ledger knows Azure billed us, and carries error_code through for diagnosis."""
     import tempfile
 
@@ -2114,8 +2114,8 @@ def test_dr_submitted_failure_floors_cost():
 
 
 def test_dr_call_surfaces_error_and_retries_hung_get():
-    """A: run_dr_call surfaces response.error.code + sets submitted on a terminal failure.
-    C1: a hung status GET is bounded by the per-request cap and RETRIED, not abandoned."""
+    """run_dr_call surfaces response.error.code + sets submitted on a terminal failure;
+    a hung status GET is bounded by the per-request cap and RETRIED, not abandoned."""
     import asyncio
 
     import shinka.llm.agent.dr_client as drc
@@ -2173,7 +2173,7 @@ def test_dr_call_surfaces_error_and_retries_hung_get():
 
 
 def test_bg_call_hung_retrieve_retries_and_wall():
-    """C1: _bg_call bounds each status GET at the SHORT per-request cap and RETRIES a hung one;
+    """_bg_call bounds each status GET at the SHORT per-request cap and RETRIES a hung one;
     only the long monotonic poll-wall ends the job (a hung GET can no longer ride the wall)."""
     import asyncio
     import time as _time
@@ -2237,7 +2237,7 @@ def test_bg_call_hung_retrieve_retries_and_wall():
 
 
 def test_restore_state_rewinds_code():
-    """C1: a documented revert (restore_state) must rewind the strategy .py too — not just
+    """A documented revert (restore_state) must rewind the strategy .py too — not just
     archive+bandit+ledger. deploy() records the pre-deploy code hash into the state snapshot;
     restore_state(snap_id) copies it back over scripts/<target>."""
     import json as _json
@@ -2263,7 +2263,7 @@ def test_restore_state_rewinds_code():
             dep = ss.deploy(cand, target, reason="t", results_dir=rd)
             assert open(os.path.join(scripts, target)).read() == "# V2 REGRESSION\n"  # deployed
             out = ss.restore_state(rd, dep["state_snap_id"])
-            assert open(os.path.join(scripts, target)).read() == "# V1 ORIGINAL\n"  # CODE rewound (C1)
+            assert open(os.path.join(scripts, target)).read() == "# V1 ORIGINAL\n"  # CODE rewound
             assert target in out["code_restored"], out
         finally:
             os.environ.pop("SHINKA_ORCH_SCRIPTS_DIR", None)
@@ -2272,7 +2272,7 @@ def test_restore_state_rewinds_code():
 
 
 def test_restore_state_ledger_recompute_on_corrupt():
-    """H10: if the live run.json is CORRUPT at revert time, restore_state recomputes the
+    """If the live run.json is CORRUPT at revert time, restore_state recomputes the
     ledger from the durable streams (never restores the snapshot's lower value)."""
     import json as _json
     import tempfile
@@ -2311,9 +2311,9 @@ def test_restore_state_ledger_recompute_on_corrupt():
 
 
 def test_feedback_always_fed_no_spoil_apparatus():
-    """Point 5: the spoil apparatus is REMOVED — evaluator text feedback is ALWAYS fed to the
-    fix prompt and the meta round; there is no use_text_feedback gate left (leak-proofing is now
-    the evaluator's job at task setup). Positive inversion of the deleted no-spoil tests; also
+    """There is no spoil apparatus — evaluator text feedback is ALWAYS fed to the
+    fix prompt and the meta round; there is no use_text_feedback gate (leak-proofing is
+    the evaluator's job at task setup). Also
     confirms a stray use_text_feedback key in a payload is simply ignored."""
     sys.path.insert(0, str(_ORCH / "scripts"))
     import construct_mutation_prompt as cmp
@@ -2338,7 +2338,7 @@ def test_feedback_always_fed_no_spoil_apparatus():
 
 
 def test_meta_islands_rich_schema():
-    """G3d/M13: meta parses the rich `islands` output (per-island directions with an
+    """Meta parses the rich `islands` output (per-island directions with an
     assigned_program_id) and DERIVES back-compat island_directions (highest-weight per
     island). A null assigned_program_id → empty assigned list."""
     sys.path.insert(0, str(_ORCH / "scripts"))
@@ -2360,7 +2360,7 @@ def test_meta_islands_rich_schema():
 
 
 def test_sample_parent_direction_oriented():
-    """G6a/H1: with a STRUCTURED island brief, sample_parent draws ONE direction and uses
+    """With a STRUCTURED island brief, sample_parent draws ONE direction and uses
     the programs ASSIGNED to it as inspirations (direction-driven), NOT the score-ranked
     top — and returns the direction text for the prompt."""
     import dataclasses as _dc
@@ -2416,7 +2416,7 @@ def test_sample_parent_direction_oriented():
 
 
 def test_novelty_keep_better_contract():
-    """H5: novelty_check returns the incumbent's SCORE (so the caller can KEEP THE BETTER of
+    """novelty_check returns the incumbent's SCORE (so the caller can KEEP THE BETTER of
     a near-dup pair) and SKIPS tombstoned programs (an evicted dup can't keep blocking)."""
     import dataclasses as _dc
     import tempfile
@@ -2457,7 +2457,7 @@ def test_novelty_keep_better_contract():
         assert out["accept"] is False, out                  # identical embedding → near-dup
         assert out["most_similar_id"] == "incumbent", out
         assert out["most_similar_score"] == 0.5, out        # incumbent score (keep-better data)
-        # tombstone the incumbent → it must no longer block a new candidate (H5).
+        # tombstone the incumbent → it must no longer block a new candidate.
         db = ProgramDatabase(DatabaseConfig(db_path=dbp, **cfg), embedding_model="", read_only=False)
         try:
             db.tombstone_program("incumbent")
@@ -2468,9 +2468,8 @@ def test_novelty_keep_better_contract():
 
 
 def test_termination_streak():
-    """G4/H6-H8: termination_streak counts trailing consecutive control_return rows that are
-    BOTH stagnant AND intervened; a stagnation-break or a no-intervention return resets it.
-    This is the deterministic replacement for the old uncomputable '5 incl >=1 DR' rule."""
+    """termination_streak counts trailing consecutive control_return rows that are
+    BOTH stagnant AND intervened; a stagnation-break or a no-intervention return resets it."""
     import tempfile
 
     sys.path.insert(0, str(_ORCH / "harness"))
@@ -2492,13 +2491,13 @@ def test_termination_streak():
         journal.append_intervention(td, _row(False, True))  # stagnation broke → reset
         assert journal.termination_streak(td) == 0
         # fallback: a row WITHOUT an explicit `intervened` derives it from
-        # work_audit/work_discovery (DEC-6 — keyed on work_discovery, NOT work_grounding).
+        # work_audit/work_discovery (keyed on work_discovery, NOT work_grounding).
         journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
                                          "work_discovery": 2})
         assert journal.termination_streak(td) == 1
-        # a discovery round alone counts as an intervention (no ">=1 DR of 5" special rule anymore)
+        # a discovery round alone counts as an intervention (no ">=1 DR of 5" special rule)
 
-    # REQUIRED NEGATIVE (DEC-6): grounding ALONE never flips intervened, so a stagnant
+    # REQUIRED NEGATIVE: grounding ALONE never flips intervened, so a stagnant
     # control_return whose only work is work_grounding does NOT advance the termination
     # streak — a combine/grounding cannot pad the streak with no discovery behind it.
     with tempfile.TemporaryDirectory() as td:
@@ -2509,7 +2508,7 @@ def test_termination_streak():
 
 
 def test_discovery_in_interval():
-    """DEC-7: journal.discovery_in_interval is the SINGLE source of truth for the
+    """journal.discovery_in_interval is the SINGLE source of truth for the
     fail-closed recency gate that spawn_island (primary) reads (and grounding-engineer
     refuses without). Boundary = timestamp of the most-recent type=='control_return' interventions
     row (0.0 if none → first interval). It returns the in-interval USABLE discovery
@@ -2591,10 +2590,11 @@ def test_discovery_in_interval():
 
 
 def test_mutate_fix_routes_to_full_applier():
-    # H1: a patch_type="fix" reply is FULL CODE (FIX_SYS_FORMAT emits a ```{lang}```
-    # fence). It must route to apply_full_patch and apply. Before the H1 fix it routed
-    # to apply_diff_patch, whose SEARCH/REPLACE regex never matches full code, so EVERY
-    # repair returned applied=False (a paid no-op). This is the regression guard.
+    # A patch_type="fix" reply is FULL CODE (FIX_SYS_FORMAT emits a ```{lang}```
+    # fence). It must route to apply_full_patch and apply. Routing it to
+    # apply_diff_patch instead (whose SEARCH/REPLACE regex never matches full code)
+    # would make EVERY repair return applied=False (a paid no-op) — the regression
+    # this test guards against.
     import mutate  # scripts/ is on sys.path
     parent = "# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n"
     full_reply = (
@@ -2622,8 +2622,8 @@ def test_mutate_fix_routes_to_full_applier():
     return None
 
 
-def test_h2_diff_embedding_separates_distinct_edits():
-    # H2: under novelty_embed_mode="diff" (default) the novelty gate embeds the
+def test_diff_embedding_separates_distinct_edits():
+    # Under novelty_embed_mode="diff" (default) the novelty gate embeds the
     # parent->candidate DIFF, so two genuinely DIFFERENT edits to the same parent yield
     # DISTINCT embed text (and distinct vectors) -> both accepted as novel -> the pool can
     # grow; a true re-proposal of the same edit shares a diff -> still caught as a near-dup.
@@ -2651,9 +2651,9 @@ def test_h2_diff_embedding_separates_distinct_edits():
     return None
 
 
-def test_h13_pre_clean_neutralizes_stale_results():
-    # H13: a REUSED gen dir can hold a PRIOR candidate's metrics.json/correct.json. evaluate.py
-    # now wipes results_dir before each eval, so a result-less death (here: an evaluator that
+def test_pre_clean_neutralizes_stale_results():
+    # A REUSED gen dir can hold a PRIOR candidate's metrics.json/correct.json. evaluate.py
+    # wipes results_dir before each eval, so a result-less death (here: an evaluator that
     # exits before writing) returns correct=False + score 0.0 — NOT the stale correct=true/9.9
     # that would otherwise be read as this candidate's ground truth and fabricate reward.
     import json as _json
@@ -2676,12 +2676,12 @@ def test_h13_pre_clean_neutralizes_stale_results():
             "eval_program_path": evalp, "job_type": "local", "time": "00:01:00",
         })
         assert out["correct"] is False, out
-        assert out["combined_score"] == 0.0, f"stale 9.9 must NOT survive the H13 pre-clean: {out}"
+        assert out["combined_score"] == 0.0, f"stale 9.9 must NOT survive the pre-clean: {out}"
     return None
 
 
 def test_journal_ledger_durability_deleted_then_restart():
-    # H6: run.json DELETED mid-run (sync/AV quarantine) while the streams survive. The next
+    # run.json DELETED mid-run (sync/AV quarantine) while the streams survive. The next
     # boot calls init_run BEFORE any read_run; it must recompute total_cost from the streams,
     # NOT write a fresh $0 ledger (which would let the run re-spend the whole budget).
     import journal
@@ -2699,7 +2699,7 @@ def test_journal_ledger_durability_deleted_then_restart():
 
 
 def test_journal_append_torn_tail_isolated():
-    # L72: a torn (newline-less) tail line must not MERGE with the next append into one
+    # A torn (newline-less) tail line must not MERGE with the next append into one
     # unparseable line that drops both. The next append isolates the torn line; the good
     # rows stay readable.
     import journal
@@ -2719,10 +2719,10 @@ def test_journal_append_torn_tail_isolated():
     return None
 
 
-def test_m27_stagnation_abs_floor_fallback():
-    # M27: with tau AND stagnation_abs_floor both unset, the detector uses its 1e-3 fallback.
-    # The callers (run_window/diagnostics) now pass tau=None (not 0.0), so the fallback is no
-    # longer shadowed for a hand-authored config that omits stagnation_abs_floor.
+def test_stagnation_abs_floor_fallback():
+    # With tau AND stagnation_abs_floor both unset, the detector uses its 1e-3 fallback.
+    # The callers (run_window/diagnostics) pass tau=None (not 0.0), so the fallback is
+    # not shadowed for a hand-authored config that omits stagnation_abs_floor.
     sys.path.insert(0, str(_ORCH / "scripts"))
     import stagnation_detector as sd
     base = {"best_score_start": 0.0, "best_score_end": 0.0005, "window_size": 5,
@@ -2730,15 +2730,15 @@ def test_m27_stagnation_abs_floor_fallback():
             "prior_low_streak": 0, "consecutive_required": 2}
     out = sd.main({**base, "tau": None})
     assert abs(out["threshold"] - 1e-3) < 1e-9, out  # 1e-3 fallback engaged
-    # control: the OLD behavior — an injected tau=0.0 shadows the fallback (threshold 0.0),
-    # which is exactly why the callers must pass None now.
+    # control: an injected tau=0.0 shadows the fallback (threshold 0.0),
+    # which is exactly why the callers must pass None.
     out0 = sd.main({**base, "tau": 0.0})
     assert out0["threshold"] == 0.0, out0
     return None
 
 
-def test_m23_sign_aware_reward_baseline():
-    # M23: with a NEGATIVE parent score, a correct candidate must still produce a strictly
+def test_sign_aware_reward_baseline():
+    # With a NEGATIVE parent score, a correct candidate must still produce a strictly
     # positive bandit signal (reward - max(parent,0) >= floor), so it can't collapse to the same
     # r=0 as a failure under the bandit's max(baseline,0) shift + asymmetric clamp.
     sys.path.insert(0, str(_ORCH / "scripts"))
@@ -2769,8 +2769,8 @@ def test_m23_sign_aware_reward_baseline():
     return None
 
 
-def test_m26_repair_baseline_avoids_obs_max_blowout():
-    # M26 (principle): feeding a repair the PRE-ERROR ancestor score (not the errored parent's
+def test_repair_baseline_avoids_obs_max_blowout():
+    # Principle: feeding a repair the PRE-ERROR ancestor score (not the errored parent's
     # ~0) keeps the credited bandit signal small, so one repair success can't blow out obs_max
     # (after which every normal small delta would normalize to ~0). run_window picks the nearest
     # correct ancestor as that baseline on a repair gen.
@@ -2787,8 +2787,8 @@ def test_m26_repair_baseline_avoids_obs_max_blowout():
     return None
 
 
-def test_m10_cross_island_keys_child_to_parent_island():
-    # M10: in cross-island mode the parent can be drawn from a different island than the selected
+def test_cross_island_keys_child_to_parent_island():
+    # In cross-island mode the parent can be drawn from a different island than the selected
     # one; the returned island_idx must be the PARENT's island (the child inherits it — islands.py
     # assign_island), with the originally-selected island surfaced as sampled_island_idx.
     import dataclasses
@@ -2819,15 +2819,15 @@ def test_m10_cross_island_keys_child_to_parent_island():
             "db_config": {"num_islands": 2, "enforce_island_separation": False},
             "embedding_model": "", "island_idx": 0, "seed": 1,
         })
-        assert res["island_idx"] == 1, res            # M10: keyed to the parent's actual island
+        assert res["island_idx"] == 1, res            # keyed to the parent's actual island
         assert res["sampled_island_idx"] == 0, res    # provenance: originally-selected island
     return None
 
 
-def test_islands_m18_migration_active_and_m16_retire():
-    # M18: a dynamically spawned island (index >= num_islands) PARTICIPATES in migration (was
-    # invisible to range(num_islands)). M16: a policy-decided retire executes via the
-    # non-destructive eviction, protecting island 0 + the global-best island.
+def test_spawned_island_migration_and_retire():
+    # A dynamically spawned island (index >= num_islands) PARTICIPATES in migration
+    # (not invisible to a range(num_islands) scan). A policy-decided retire executes via
+    # the non-destructive eviction, protecting island 0 + the global-best island.
     import dataclasses
     import tempfile
     from shinka.database import Program, ProgramDatabase, DatabaseConfig
@@ -2850,7 +2850,7 @@ def test_islands_m18_migration_active_and_m16_retire():
                 db.cursor.execute("UPDATE programs SET island_idx=? WHERE id=?", (island, pid))
                 db.conn.commit()
             # island 0: elite + 2 migratable; spawned island 2: one member; island 1 EMPTY (so the
-            # only valid destination for island 0's migrants is the spawned island 2 — proves M18).
+            # only valid destination for island 0's migrants is the spawned island 2).
             _add("a0", 0, 0.9); _add("a1", 0, 0.5); _add("a2", 0, 0.4)
             _add("s0", 2, 0.6)
             # drop any auto-seeded island copies so island 1 is genuinely empty (only our 4 rows).
@@ -2863,15 +2863,15 @@ def test_islands_m18_migration_active_and_m16_retire():
             db.island_manager.perform_migration(current_generation=1)
             db.cursor.execute("SELECT COUNT(*) FROM programs WHERE island_idx=2")
             after = db.cursor.fetchone()[0]
-            assert after > before, f"M18: spawned island 2 did not receive migrants ({before}->{after})"
+            assert after > before, f"spawned island 2 did not receive migrants ({before}->{after})"
 
-            # M16: retire island 2 (non-protected). Global best (a0=0.9) is in island 0 → protected.
+            # retire island 2 (non-protected). Global best (a0=0.9) is in island 0 → protected.
             n = db.island_manager.retire_island(2)
             assert n >= 1
             db.cursor.execute("SELECT COUNT(*) FROM programs WHERE island_idx=2")
-            assert db.cursor.fetchone()[0] == 0, "M16: island 2 not freed"
+            assert db.cursor.fetchone()[0] == 0, "island 2 not freed"
             db.cursor.execute("SELECT COUNT(*) FROM programs WHERE island_idx IS NULL")
-            assert db.cursor.fetchone()[0] >= 1, "M16: retired rows were deleted, not preserved"
+            assert db.cursor.fetchone()[0] >= 1, "retired rows were deleted, not preserved"
             # protection: retiring island 0 is a safe no-op (seed lineage), via both entry points.
             assert db.island_manager.retire_island(0) == 0
             assert db.apply_island_actions({"retire_island": 0}, current_generation=2)["retired"] == 0
@@ -2880,15 +2880,15 @@ def test_islands_m18_migration_active_and_m16_retire():
     return None
 
 
-def test_islands_m15_spawn_once_and_m28_diversity_kind():
-    # M28: island_health emits a diversity_kind discriminator (+ typed cosine_spread/member_count)
-    # so a cosine spread is never compared against a raw count. M15: island_policy spawns at most
+def test_island_spawn_once_and_diversity_kind():
+    # island_health emits a diversity_kind discriminator (+ typed cosine_spread/member_count)
+    # so a cosine spread is never compared against a raw count. island_policy spawns at most
     # once per stagnation episode (a durable marker suppresses repeat spawns until best improves).
     sys.path.insert(0, str(_ORCH / "scripts"))
     import island_policy as ip
     orig = ip.archive_query.main
     try:
-        # --- M28 cosine_spread basis (≥2 embeddings)
+        # --- cosine_spread basis (≥2 embeddings)
         ip.archive_query.main = lambda payload: {"result": [
             {"island_idx": 0, "generation": 1, "correct": True, "combined_score": 0.5, "embedding": [1.0, 0.0]},
             {"island_idx": 0, "generation": 2, "correct": True, "combined_score": 0.6, "embedding": [0.0, 1.0]},
@@ -2897,14 +2897,14 @@ def test_islands_m15_spawn_once_and_m28_diversity_kind():
                                 db_path="x", db_config={}, embedding_model="m")
         assert rows[0]["diversity_kind"] == "cosine_spread"
         assert rows[0]["cosine_spread"] is not None and rows[0]["member_count"] == 2
-        # --- M28 member_count fallback (<2 embeddings)
+        # --- member_count fallback (<2 embeddings)
         ip.archive_query.main = lambda payload: {"result": [
             {"island_idx": 0, "generation": 1, "correct": True, "combined_score": 0.5}]}
         rows2 = ip.island_health([{"island_idx": 0, "best": 0.5, "count": 1}],
                                  db_path="x", db_config={}, embedding_model="m")
         assert rows2[0]["diversity_kind"] == "member_count" and rows2[0]["cosine_spread"] is None
 
-        # --- M15 spawn-once: stagnant island (best at gen 1, current gen 60, threshold 10)
+        # --- spawn-once: stagnant island (best at gen 1, current gen 60, threshold 10)
         ip.archive_query.main = lambda payload: {"result": [
             {"island_idx": 0, "generation": 1, "correct": True, "combined_score": 1.0},
             {"island_idx": 0, "generation": 60, "correct": True, "combined_score": 0.5}]}
@@ -2913,7 +2913,7 @@ def test_islands_m15_spawn_once_and_m28_diversity_kind():
         assert ip.main(dict(base))["actions"]["spawn"] is True  # no marker → spawn armed
         r2 = ip.main({**base, "last_policy_spawn_generation": 5})  # marker ≥ best_generation(1)
         assert r2["actions"]["spawn"] is False and r2["spawn_suppressed_this_episode"] is True
-        # --- M15 re-arm: a NEW best (gen 50) past the marker (5) re-enables spawning
+        # --- re-arm: a NEW best (gen 50) past the marker (5) re-enables spawning
         ip.archive_query.main = lambda payload: {"result": [
             {"island_idx": 0, "generation": 50, "correct": True, "combined_score": 2.0},
             {"island_idx": 0, "generation": 60, "correct": True, "combined_score": 1.0}]}
@@ -2925,10 +2925,10 @@ def test_islands_m15_spawn_once_and_m28_diversity_kind():
 
 
 def test_revert_completeness_cluster():
-    # Strategy-store full-rewind safety net: M19 (single deploy blocked by a bundle-rejected
-    # hash), L63 (all-or-nothing bundle restore), L66 (restore removes snapshot-absent state
-    # files), L64 (ledger never rewound), L60 (unresolved-deploy snapshot pinned from pruning),
-    # M20 (snapshot during a live window is flagged / refusable).
+    # Strategy-store full-rewind safety net: a single deploy is blocked by a bundle-rejected
+    # hash; a bundle restore is all-or-nothing; restore removes snapshot-absent state
+    # files; the ledger is never rewound; an unresolved-deploy snapshot is pinned from
+    # pruning; a snapshot during a live window is flagged / refusable.
     import importlib
     import tempfile
     import json as _json
@@ -2946,32 +2946,32 @@ def test_revert_completeness_cluster():
             c1 = os.path.join(td, "c1.py"); open(c1, "w", encoding="utf-8").write("def main(p):\n    return 2\n")
             c2 = os.path.join(td, "c2.py"); open(c2, "w", encoding="utf-8").write("def main(p):\n    return 3\n")
 
-            # --- M19: a hash REJECTED in a BUNDLE also blocks a SINGLE deploy of that file.
+            # --- a hash REJECTED in a BUNDLE also blocks a SINGLE deploy of that file.
             changes = [{"candidate_path": c1, "target": "compute_reward.py"},
                        {"candidate_path": c2, "target": "select_llm.py"}]
             res = ss.deploy_bundle(changes, reason="b", window_index=1)
             ss.record_bundle_outcome(res["new_hashes"], J=0.0, accepted=False)
-            _m19 = False
+            _blocked = False
             try:
                 ss.deploy(c1, "compute_reward.py", reason="single-retread", window_index=2)
             except ValueError:
-                _m19 = True
-            assert _m19, "M19: single deploy should reject a bundle-rejected hash"
+                _blocked = True
+            assert _blocked, "single deploy should reject a bundle-rejected hash"
 
-            # --- L63: a bundle restore with one missing snapshot copies NOTHING (all-or-nothing).
+            # --- a bundle restore with one missing snapshot copies NOTHING (all-or-nothing).
             ss.deploy_bundle(changes, reason="b2", window_index=3, force=True)  # apply c1/c2 to scripts
             cur_cr = open(os.path.join(sc, "compute_reward.py"), encoding="utf-8").read()
             cur_sl = open(os.path.join(sc, "select_llm.py"), encoding="utf-8").read()
-            _l63 = False
+            _raised = False
             try:
                 ss.rollback_bundle({"compute_reward.py": ss.current_hash("compute_reward.py"),
                                     "select_llm.py": "deadbeefdeadbeef"}, reason="x")
             except FileNotFoundError:
-                _l63 = True
-            assert _l63, "L63: a missing bundle snapshot must raise"
+                _raised = True
+            assert _raised, "a missing bundle snapshot must raise"
             assert open(os.path.join(sc, "compute_reward.py"), encoding="utf-8").read() == cur_cr
             assert open(os.path.join(sc, "select_llm.py"), encoding="utf-8").read() == cur_sl, \
-                "L63: a partial bundle restore left scripts/ half-rewound"
+                "a partial bundle restore left scripts/ half-rewound"
 
             # --- snapshot_state cold-start (no bandit_state.pkl present)
             rd = os.path.join(td, "run")
@@ -2980,24 +2980,24 @@ def test_revert_completeness_cluster():
             _json.dump({"total_cost": 0.50}, open(os.path.join(rd, "journal", "run.json"), "w", encoding="utf-8"))
             sid = ss.snapshot_state(rd, label="pre")
 
-            # --- M20: snapshot taken while .window_active exists is FLAGGED (and refusable).
+            # --- a snapshot taken while .window_active exists is FLAGGED (and refusable).
             open(os.path.join(rd, ".window_active"), "w", encoding="utf-8").write("123")
             sid2 = ss.snapshot_state(rd, label="during-window")
             meta2 = _json.loads((_Path(hi) / f"state_{sid2}" / "state_meta.json").read_text())
-            assert meta2["window_active_at_snapshot"] is True, "M20: live-window snapshot not flagged"
+            assert meta2["window_active_at_snapshot"] is True, "live-window snapshot not flagged"
             os.environ["SHINKA_REFUSE_SNAPSHOT_DURING_WINDOW"] = "1"
             try:
-                _m20 = False
+                _refused = False
                 try:
                     ss.snapshot_state(rd, label="refused")
                 except RuntimeError:
-                    _m20 = True
-                assert _m20, "M20: env override should REFUSE a live-window snapshot"
+                    _refused = True
+                assert _refused, "env override should REFUSE a live-window snapshot"
             finally:
                 os.environ.pop("SHINKA_REFUSE_SNAPSHOT_DURING_WINDOW", None)
             os.remove(os.path.join(rd, ".window_active"))
 
-            # --- L66 + L64: a measure window created bandit_state.pkl + bumped the ledger; restore
+            # --- a measure window created bandit_state.pkl + bumped the ledger; restore
             #     the cold-start snapshot `sid`.
             open(os.path.join(rd, "bandit_state.pkl"), "wb").write(b"BANDIT_new")
             open(os.path.join(rd, "programs.sqlite"), "wb").write(b"DB_v2")
@@ -3005,12 +3005,12 @@ def test_revert_completeness_cluster():
             out = ss.restore_state(rd, sid)
             assert open(os.path.join(rd, "programs.sqlite"), "rb").read() == b"DB_v1", "archive not rewound"
             assert not os.path.exists(os.path.join(rd, "bandit_state.pkl")), \
-                "L66: a snapshot-absent bandit_state.pkl survived a full rewind"
+                "a snapshot-absent bandit_state.pkl survived a full rewind"
             assert "bandit_state.pkl" in out["removed"]
             led = _json.loads(open(os.path.join(rd, "journal", "run.json"), encoding="utf-8").read())
-            assert abs(led["total_cost"] - 0.90) < 1e-9, "L64: ledger was rewound below the live total"
+            assert abs(led["total_cost"] - 0.90) < 1e-9, "ledger was rewound below the live total"
 
-            # --- L60: an UNRESOLVED deploy's state snapshot is pinned from pruning.
+            # --- an UNRESOLVED deploy's state snapshot is pinned from pruning.
             c3 = os.path.join(td, "c3.py"); open(c3, "w", encoding="utf-8").write("def main(p):\n    return 9\n")
             dres = ss.deploy(c3, "compute_reward.py", reason="measure", window_index=9, results_dir=rd)
             pinned = dres["state_snap_id"]
@@ -3018,7 +3018,7 @@ def test_revert_completeness_cluster():
             for _ in range(6):
                 ss.snapshot_state(rd, label="filler")
             ss._prune_state_snapshots(keep=1)
-            assert (_Path(hi) / f"state_{pinned}").exists(), "L60: unresolved deploy snapshot pruned"
+            assert (_Path(hi) / f"state_{pinned}").exists(), "unresolved deploy snapshot pruned"
             assert not (_Path(hi) / f"state_{sid}").exists(), "prune did not run (unpinned old snapshot survived)"
         finally:
             os.environ.pop("SHINKA_ORCH_SCRIPTS_DIR", None)
@@ -3027,8 +3027,8 @@ def test_revert_completeness_cluster():
     return None
 
 
-def test_m22_deploy_without_results_dir_stamps_not_revertible():
-    # M22: a deploy with no results_dir takes no STATE snapshot → it is code-revertible only.
+def test_deploy_without_results_dir_stamps_not_revertible():
+    # A deploy with no results_dir takes no STATE snapshot → it is code-revertible only.
     # Warn + stamp revertible:False (don't hard-require results_dir, which breaks smoke/bundle).
     import importlib
     import tempfile
@@ -3053,8 +3053,8 @@ def test_m22_deploy_without_results_dir_stamps_not_revertible():
     return None
 
 
-def test_m36_archive_reads_strategy_history_from_index_path():
-    # M36: archive_run copies strategy_history/index.json from strategy_store's REAL location
+def test_archive_reads_strategy_history_from_index_path():
+    # archive_run copies strategy_history/index.json from strategy_store's REAL location
     # (history_dir() / SHINKA_ORCH_HISTORY_DIR), not the never-existing results_dir/strategy_history.
     import tempfile
     import json as _json
@@ -3073,7 +3073,7 @@ def test_m36_archive_reads_strategy_history_from_index_path():
         try:
             dest = journal.archive_run(rd, dest_root=os.path.join(td, "arch"), run_id="r1", finished_at=1)
             copied = os.path.join(dest, "strategy_history", "index.json")
-            assert os.path.exists(copied), "M36: archive omitted strategy_history/index.json"
+            assert os.path.exists(copied), "archive omitted strategy_history/index.json"
             data = _json.loads(open(copied, encoding="utf-8").read())
             assert data and data[0]["target"] == "x.py"
         finally:
@@ -3081,8 +3081,8 @@ def test_m36_archive_reads_strategy_history_from_index_path():
     return None
 
 
-def test_l80_cleanup_warmup_honest():
-    # L80: cleanup_warmup returns the REAL result — False for a missing dir, True only when the
+def test_cleanup_warmup_honest():
+    # cleanup_warmup returns the REAL result — False for a missing dir, True only when the
     # dir is actually gone (not a false True if rmtree silently failed).
     import tempfile
     sys.path.insert(0, str(_ORCH / "harness"))
@@ -3096,8 +3096,8 @@ def test_l80_cleanup_warmup_honest():
     return None
 
 
-def test_s2_accept_warmup_folds_approved():
-    # S2 keep-approved fold-back: accept_warmup folds the approved warmup archive into the
+def test_accept_warmup_folds_approved():
+    # Keep-approved fold-back: accept_warmup folds the approved warmup archive into the
     # real db via the sqlite BACKUP API (WAL-safe: an unclean warmup shutdown's -wal tail
     # must land in the real db — a raw copy2 of the main file alone would silently drop it),
     # folds its spend DURABLY into the real ledger, cleans up the warmup, and refuses to
@@ -3182,8 +3182,8 @@ def test_s2_accept_warmup_folds_approved():
     return None
 
 
-def test_s1_cadence_policy_is_foundation():
-    # S1: cadence_policy.py is FOUNDATION (the wake-decay schedule + run termination are not
+def test_cadence_policy_is_foundation():
+    # cadence_policy.py is FOUNDATION (the wake-decay schedule + run termination are not
     # orchestrator-rewritable) — removed from MUTABLE_TARGETS, so snapshot()/deploy() refuse it.
     import pytest
     sys.path.insert(0, str(_ORCH / "harness"))
@@ -3194,9 +3194,9 @@ def test_s1_cadence_policy_is_foundation():
     return None
 
 
-def test_m21_index_failclosed_and_n14_record_outcome():
-    # M21: a present-but-corrupt index fails LOUD (not silently [], which would disarm the
-    # rejected-hash guard); writes are atomic. N14: record_outcome on an unmatched hash RAISES
+def test_index_failclosed_and_record_outcome():
+    # A present-but-corrupt index fails LOUD (not silently [], which would disarm the
+    # rejected-hash guard); writes are atomic. record_outcome on an unmatched hash RAISES
     # (no silent no-op leaving the deploy stuck 'deployed', no fabricated phantom history dir).
     import importlib
     import pytest
@@ -3214,12 +3214,12 @@ def test_m21_index_failclosed_and_n14_record_outcome():
             ss.deploy(cand, "compute_reward.py", reason="r", window_index=1, prior_J=0.3)
             assert ss.read_index(), "deploy must record an index entry"
             nh = ss.current_hash("compute_reward.py")
-            with pytest.raises(ValueError):  # N14: unmatched hash raises
+            with pytest.raises(ValueError):  # unmatched hash raises
                 ss.record_outcome("deadbeefdeadbeef", J=1.0, accepted=False)
             assert not (Path(hi) / "deadbeefdeadbeef").exists()  # no phantom dir fabricated
             ss.record_outcome(nh, J=0.4, accepted=True)  # the real outcome still works
             assert [e for e in ss.read_index() if e.get("status") == "accepted"]
-            # M21: corrupt the index in place -> read_index raises (not silent [])
+            # corrupt the index in place -> read_index raises (not silent [])
             ss.index_path().write_text("{ this is not json", encoding="utf-8")
             with pytest.raises(RuntimeError):
                 ss.read_index()
@@ -3234,8 +3234,8 @@ def test_m21_index_failclosed_and_n14_record_outcome():
     return None
 
 
-def test_m1_recent_meta_output_rehydrates():
-    # M1: the last logged meta round's {directions, failure_note} is recoverable from the
+def test_recent_meta_output_rehydrates():
+    # The last logged meta round's {directions, failure_note} is recoverable from the
     # journal so a fresh cluster process re-hydrates the global channel after a relaunch.
     import tempfile
     sys.path.insert(0, str(_ORCH / "harness"))
@@ -3256,11 +3256,11 @@ def test_m1_recent_meta_output_rehydrates():
     return None
 
 
-def test_m48_eval_foundation_smoke():
-    # M48 (keystone): a dependency-free END-TO-END test of the eval primitive
-    # (evaluate.main -> JobScheduler -> local.monitor -> load_results) — the contract that had
-    # ZERO real tests. Pins the field names + the H13/M47/M49 corrected behavior: (a) a correct
-    # program, (b) a crash, (c) a timeout. M49: the shipped default eval_time exceeds 30 min.
+def test_eval_foundation_smoke():
+    # Keystone: a dependency-free END-TO-END test of the eval primitive
+    # (evaluate.main -> JobScheduler -> local.monitor -> load_results). Pins the field
+    # names + behavior for (a) a correct program, (b) a crash, (c) a timeout; and that
+    # the shipped default eval_time exceeds 30 min.
     import json as _json
     from shinka.utils import parse_time_to_seconds
     sys.path.insert(0, str(_ORCH / "scripts"))
@@ -3293,16 +3293,15 @@ def test_m48_eval_foundation_smoke():
     assert b["correct"] is False and b["combined_score"] == 0.0, b
     c = _run("import time\ntime.sleep(30)\n", time_="00:00:02")  # timeout
     assert c["correct"] is False and c["timed_out"] is True, c
-    # M49: the shipped default config's eval_time exceeds the 30-min cnot wallclock budget.
+    # the shipped default config's eval_time exceeds the 30-min cnot wallclock budget.
     _cfg = _json.loads((_REPO_ROOT / "configs" / "orchestrator_run.default.json").read_text())
     assert parse_time_to_seconds(_cfg["task"]["eval_time"]) > 30 * 60, _cfg["task"]["eval_time"]
     return None
 
 
 def test_dr_parse_and_env_robustness():
-    # M6: a brief whose JSON is preceded by prose LONGER than the JSON used to parse to [] (the
-    # trim loop's lower bound was a blob-coordinate on the rebased candidate). L45: the
-    # techniques JSON in a SECOND fence must still be found. L40: a missing-env client
+    # A brief whose JSON is preceded by prose LONGER than the JSON still parses; the
+    # techniques JSON in a SECOND fence must still be found; a missing-env client
     # construction returns the degraded refused envelope, not an ok:false crash.
     sys.path.insert(0, str(_ORCH / "scripts"))
     import deep_research
@@ -3325,8 +3324,8 @@ def test_dr_parse_and_env_robustness():
     return None
 
 
-def test_h10_island_policy_decoupled_gates():
-    # H10: island_policy decides spawn/migrate from its OWN payload gates, so it works with the
+def test_island_policy_decoupled_gates():
+    # island_policy decides spawn/migrate from its OWN payload gates, so it works with the
     # db_config auto-triggers OFF (the documented prerequisite) instead of being a no-op. Without
     # the policy_* keys it defaults to the db_config values (back-compat).
     import dataclasses as _dc
@@ -3373,8 +3372,8 @@ def test_h10_island_policy_decoupled_gates():
     return None
 
 
-def test_h9_parent_pin_targets_program():
-    # H9: a valid parent_id pins THAT program for the COMBINE/grounding run (even though
+def test_parent_pin_targets_program():
+    # A valid parent_id pins THAT program for the COMBINE/grounding run (even though
     # weighted sampling would prefer the higher-scored one); an unknown pin falls back to
     # normal sampling without crashing.
     import dataclasses as _dc
@@ -3417,8 +3416,8 @@ def test_h9_parent_pin_targets_program():
     return None
 
 
-def test_h7_meta_model_effort_shorthand():
-    # H7: a "model@effort" value handed to meta (the shorthand the docs once taught) must be
+def test_meta_model_effort_shorthand():
+    # A "model@effort" value handed to meta (a habitual shorthand) must be
     # SPLIT, not passed verbatim to a nonexistent deployment (which silently degraded every
     # meta round). Both the canonical two-knob form and a habitual @-suffix now work.
     sys.path.insert(0, str(_ORCH / "scripts"))
@@ -3429,8 +3428,8 @@ def test_h7_meta_model_effort_shorthand():
     return None
 
 
-def test_m46_count_live_excludes_tombstoned():
-    # M46: archive_query 'count' reports live (non-tombstoned) rows so the bootstrap can detect
+def test_count_live_excludes_tombstoned():
+    # archive_query 'count' reports live (non-tombstoned) rows so the bootstrap can detect
     # an all-tombstoned archive (live==0 while total>0) and re-seed instead of crash-looping.
     import dataclasses as _dc
     import tempfile
@@ -3649,7 +3648,7 @@ def test_discovery_usable_flag_authoritative():
 
 
 def test_mutate_standalone_selflog():
-    # WS7 parity for standalone orchestrator calls: mutate.main with results_dir + a
+    # Call-logging parity for standalone orchestrator calls: mutate.main with results_dir + a
     # non-"proposer" purpose self-logs the FULL call via journal.log_call (a calls.jsonl
     # pointer row of kind=<purpose>) and folds its cost into the run ledger; the inner
     # loop (purpose proposer / no results_dir) logs NOTHING (its cost flows via
@@ -4015,27 +4014,28 @@ if __name__ == "__main__":
         ("repair_mode_lifecycle", test_repair_mode_lifecycle),
         ("boot_guard", test_boot_guard),
         ("fix_prompt_reads_only_metadata_channels", test_fix_prompt_reads_only_metadata_channels),
+        ("runtime_budget_caution", test_runtime_budget_caution),
         ("snapshot_restore_state", test_snapshot_restore_state),
         ("rollback_fail_closed_and_collapse", test_rollback_fail_closed_and_collapse),
-        ("m27_stagnation_abs_floor_fallback", test_m27_stagnation_abs_floor_fallback),
-        ("m46_count_live_excludes_tombstoned", test_m46_count_live_excludes_tombstoned),
-        ("h7_meta_model_effort_shorthand", test_h7_meta_model_effort_shorthand),
-        ("h9_parent_pin_targets_program", test_h9_parent_pin_targets_program),
-        ("h10_island_policy_decoupled_gates", test_h10_island_policy_decoupled_gates),
-        ("m1_recent_meta_output_rehydrates", test_m1_recent_meta_output_rehydrates),
-        ("s1_cadence_policy_is_foundation", test_s1_cadence_policy_is_foundation),
-        ("l80_cleanup_warmup_honest", test_l80_cleanup_warmup_honest),
-        ("m22_deploy_without_results_dir_stamps_not_revertible", test_m22_deploy_without_results_dir_stamps_not_revertible),
-        ("m36_archive_reads_strategy_history_from_index_path", test_m36_archive_reads_strategy_history_from_index_path),
+        ("stagnation_abs_floor_fallback", test_stagnation_abs_floor_fallback),
+        ("count_live_excludes_tombstoned", test_count_live_excludes_tombstoned),
+        ("meta_model_effort_shorthand", test_meta_model_effort_shorthand),
+        ("parent_pin_targets_program", test_parent_pin_targets_program),
+        ("island_policy_decoupled_gates", test_island_policy_decoupled_gates),
+        ("recent_meta_output_rehydrates", test_recent_meta_output_rehydrates),
+        ("cadence_policy_is_foundation", test_cadence_policy_is_foundation),
+        ("cleanup_warmup_honest", test_cleanup_warmup_honest),
+        ("deploy_without_results_dir_stamps_not_revertible", test_deploy_without_results_dir_stamps_not_revertible),
+        ("archive_reads_strategy_history_from_index_path", test_archive_reads_strategy_history_from_index_path),
         ("revert_completeness_cluster", test_revert_completeness_cluster),
-        ("islands_m15_spawn_once_and_m28_diversity_kind", test_islands_m15_spawn_once_and_m28_diversity_kind),
-        ("islands_m18_migration_active_and_m16_retire", test_islands_m18_migration_active_and_m16_retire),
-        ("m10_cross_island_keys_child_to_parent_island", test_m10_cross_island_keys_child_to_parent_island),
-        ("m23_sign_aware_reward_baseline", test_m23_sign_aware_reward_baseline),
-        ("m26_repair_baseline_avoids_obs_max_blowout", test_m26_repair_baseline_avoids_obs_max_blowout),
-        ("s2_accept_warmup_folds_approved", test_s2_accept_warmup_folds_approved),
-        ("m21_index_failclosed_and_n14_record_outcome", test_m21_index_failclosed_and_n14_record_outcome),
-        ("m48_eval_foundation_smoke", test_m48_eval_foundation_smoke),
+        ("island_spawn_once_and_diversity_kind", test_island_spawn_once_and_diversity_kind),
+        ("spawned_island_migration_and_retire", test_spawned_island_migration_and_retire),
+        ("cross_island_keys_child_to_parent_island", test_cross_island_keys_child_to_parent_island),
+        ("sign_aware_reward_baseline", test_sign_aware_reward_baseline),
+        ("repair_baseline_avoids_obs_max_blowout", test_repair_baseline_avoids_obs_max_blowout),
+        ("accept_warmup_folds_approved", test_accept_warmup_folds_approved),
+        ("index_failclosed_and_record_outcome", test_index_failclosed_and_record_outcome),
+        ("eval_foundation_smoke", test_eval_foundation_smoke),
         ("dr_parse_and_env_robustness", test_dr_parse_and_env_robustness),
         ("validate_select_llm_all_modes", test_validate_select_llm_all_modes),
         ("dr_refusal_graceful", test_dr_refusal_graceful),
@@ -4045,8 +4045,8 @@ if __name__ == "__main__":
         ("end_of_run_summary_and_archive", test_end_of_run_summary_and_archive),
         ("immediate_fix", test_immediate_fix),
         ("mutate_fix_routes_to_full_applier", test_mutate_fix_routes_to_full_applier),
-        ("h2_diff_embedding_separates_distinct_edits", test_h2_diff_embedding_separates_distinct_edits),
-        ("h13_pre_clean_neutralizes_stale_results", test_h13_pre_clean_neutralizes_stale_results),
+        ("diff_embedding_separates_distinct_edits", test_diff_embedding_separates_distinct_edits),
+        ("pre_clean_neutralizes_stale_results", test_pre_clean_neutralizes_stale_results),
         ("meta_summarize_parsing", test_meta_summarize_parsing),
         ("meta_direction_sampling", test_meta_direction_sampling),
         ("call_logging", test_call_logging),

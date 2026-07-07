@@ -54,7 +54,7 @@ class DatabaseConfig:
     db_path: Optional[str] = None  # Path to SQLite database file
     num_islands: int = 2
     archive_size: int = 40
-    # H2: per-island floor — guarantee each initialized island keeps at least this many
+    # Per-island floor — guarantee each initialized island keeps at least this many
     # members in the (global) archive before its members may be evicted to make room for
     # ANOTHER island, so a dominant island cannot starve young ones. 0 = legacy pure-global
     # fitness. The incoming program's OWN island is never shielded from its own competition.
@@ -832,7 +832,7 @@ class ProgramDatabase:
 
     @db_retry()
     def append_program_error(self, program_id: str, traceback_chunk: str) -> int:
-        """Repair-mode (P5): append a FAILED repair attempt's (truncated) error to an
+        """Repair mode: append a FAILED repair attempt's (truncated) error to an
         existing program's record and bump its ``repair_attempts``. Single-row UPDATE,
         NO schema change. The COMBINED error_traceback is re-truncated head+tail to
         ~8KB each append so the field stays bounded. Returns the new repair_attempts
@@ -870,7 +870,7 @@ class ProgramDatabase:
         PRESERVES the row + island_idx + lineage — UNLIKE island eviction, which nulls
         island_idx. Returns True if the program existed.
 
-        ``reason`` (H3) records WHY, in metadata.tombstone_reason, so the two tombstone
+        ``reason`` records WHY, in metadata.tombstone_reason, so the two tombstone
         classes are distinguishable: "repair" = an INCORRECT program that failed its
         repair attempts (caller: repair_record append_fail path), vs "novelty_evict" =
         the worse-but-CORRECT incumbent evicted by keep-the-better (caller: run_window
@@ -2434,8 +2434,8 @@ class ProgramDatabase:
         archive_programs: List[Program],
         prefer: Optional[Program] = None,
     ) -> Optional[Program]:
-        """Pick which archived program to evict to make room for ``program`` (H2:
-        island-aware, superseding the legacy 'globally worst'). Protections: never the
+        """Pick which archived program to evict to make room for ``program`` —
+        island-aware, not simply the globally worst. Protections: never the
         global best, never an island's single best (its elite), and never a member of a
         DIFFERENT island that is at/below the per-island floor. The incoming program's
         OWN island is never shielded from its own competition. ``prefer`` (the crowding
@@ -2489,7 +2489,7 @@ class ProgramDatabase:
 
     def _update_archive_fitness(self, program: Program) -> None:
         """
-        Fitness-based archive update: evict an island-aware victim (H2).
+        Fitness-based archive update: evict an island-aware victim.
 
         Honors the per-island floor + protections via _pick_archive_victim; a below-floor
         island is guaranteed room. Uses rank-based scoring if multiple criteria configured.
@@ -2505,7 +2505,7 @@ class ProgramDatabase:
             self.conn.commit()
             return
 
-        # P5-T5: a repair-tombstoned program (dead — removed from the sampling pool) is
+        # A repair-tombstoned program (dead — removed from the sampling pool) is
         # the natural FIRST thing to reclaim when the archive is full: evict it ahead of
         # any LIVE program. (tombstone_program already de-archives on tombstone, freeing
         # the slot immediately — this is a belt-and-suspenders guarantee that a
@@ -2524,7 +2524,7 @@ class ProgramDatabase:
             self.conn.commit()
             return
 
-        # H2: choose an island-aware victim (per-island floor + protections) instead of
+        # Choose an island-aware victim (per-island floor + protections) instead of
         # the globally worst program.
         victim = self._pick_archive_victim(program, archive_programs)
         if victim is None:
@@ -2585,7 +2585,7 @@ class ProgramDatabase:
         # Get archive for ranked comparison
         archive_programs = self._get_archive_programs()
 
-        # P5-T5: reclaim a repair-tombstoned program FIRST, in parity with the fitness
+        # Reclaim a repair-tombstoned program FIRST, in parity with the fitness
         # path — a dead (repair-removed) row must never hold an archive slot ahead of a
         # live program, regardless of the selection strategy.
         _tombstoned = [
@@ -2605,7 +2605,7 @@ class ProgramDatabase:
         # Niching: evict the most-similar neighbor if the newcomer is better — but never a
         # PROTECTED neighbor (global best / island elite / below-floor other island).
         # _pick_archive_victim returns most_similar when evictable, else the island-aware
-        # worst (H2). A below-floor island is guaranteed room.
+        # worst. A below-floor island is guaranteed room.
         victim = self._pick_archive_victim(program, archive_programs, prefer=most_similar)
         floor = int(getattr(self.config, "archive_floor_per_island", 0) or 0)
         pcount = sum(1 for p in archive_programs if p.island_idx == program.island_idx)
@@ -2805,14 +2805,15 @@ class ProgramDatabase:
         if not self.island_manager:
             return done
         if actions.get("migrate"):
-            # L37: report what ACTUALLY ran — perform_migration returns False when it moved
-            # nothing (its bool was discarded, so done["migrated"] was always True even on a
-            # no-op, contradicting the "returns what actually ran" contract the spawn branch honors).
+            # Report what ACTUALLY ran: perform_migration returns False when it moved
+            # nothing, and that bool must flow through so a no-op migration is not
+            # reported as migrated — the same "returns what actually ran" contract the
+            # spawn branch honors.
             done["migrated"] = bool(self.island_manager.perform_migration(int(current_generation)))
         if actions.get("spawn"):
             done["spawned"] = bool(self.island_manager.spawn_new_island())
-        # M16: retire executor. island_policy's DEFAULT never returns a retire index (shinka
-        # spawns rather than retires), but a policy REWRITE may now decide one — and it executes
+        # Retire executor. island_policy's DEFAULT never returns a retire index (shinka
+        # spawns rather than retires), but a policy REWRITE may decide one — and it executes
         # via the NON-destructive CombinedIslandManager.retire_island (rows preserved +
         # tombstoned, island_idx NULLed) which PROTECTS island 0 + the global-best island, so a
         # retire can never orphan the seed lineage or drop the best program. A protected/absent

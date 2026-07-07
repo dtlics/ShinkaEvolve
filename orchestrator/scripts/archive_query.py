@@ -145,7 +145,7 @@ def _dispatch(db, query_type: str, payload: Dict[str, Any]):
 
     if query_type == "count":
         correct = sum(1 for p in programs if getattr(p, "correct", False))
-        # M46: LIVE (non-tombstoned) rows. The bootstrap must re-seed when EVERY row is
+        # LIVE (non-tombstoned) rows. The bootstrap must re-seed when EVERY row is
         # tombstoned (live==0) even though total>0 — otherwise the run can neither sample a
         # parent (sample_parent raises) nor re-seed, a permanent crash-loop needing DB surgery.
         live = sum(
@@ -199,7 +199,7 @@ def _dispatch(db, query_type: str, payload: Dict[str, Any]):
             1 for p in programs
             if ((getattr(p, "metadata", None) or {}).get("repair_tombstoned") is True)
         )
-        # H3: of the tombstoned rows, count ONLY the repair-removed INCORRECT ones for the
+        # Of the tombstoned rows, count ONLY the repair-removed INCORRECT ones for the
         # errored_fraction numerator. A keep-the-better evictee is a CORRECT program, so
         # `not correct` excludes it robustly (old + new DBs); tombstone_reason makes the
         # distinction explicit where present (never count a "novelty_evict").
@@ -212,10 +212,10 @@ def _dispatch(db, query_type: str, payload: Dict[str, Any]):
         return {
             "total": len(programs),
             "correct": len(correct),
-            # P5: repair-tombstoned programs, EXCLUDED from the errored_fraction trigger
+            # Repair-tombstoned programs, EXCLUDED from the errored_fraction trigger
             # (diagnostics) so repair mode releases once dead programs are removed.
             "tombstoned_count": tombstoned,
-            # H3: only the INCORRECT (repair-removed) tombstones — a CORRECT keep-the-better
+            # Only the INCORRECT (repair-removed) tombstones — a CORRECT keep-the-better
             # evictee is NOT subtracted from the errored numerator (it was never errored).
             "errored_tombstoned_count": errored_tombstoned,
             "best_score": best,

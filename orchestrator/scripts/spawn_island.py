@@ -18,7 +18,7 @@ overwritten, evicted, or replaced.
 The technique seeded here MUST originate from an in-interval discovery round (DR
 round) — EXACTLY ONE OF R1 (Azure deep research, ``deep_research.py``, stub
 ``kind="dr"``) OR R2 (archive-analyst subagent, stub ``kind="archive_analyst"``) —
-logged THIS control-return interval. The PRIMARY fail-closed gate (DEC-7) at the top
+logged THIS control-return interval. The PRIMARY fail-closed gate at the top
 of ``main`` enforces this: it refuses to seed any island unless
 ``journal.discovery_in_interval(results_dir)`` returns a non-empty list of usable
 in-interval stubs. A brainstormed/tournament-over-own-ideas technique has no stub and
@@ -40,7 +40,7 @@ INPUT (stdin JSON):
     "program_id": str,         # the grounded program to seed the new island with
     "results_dir": str,        # REQUIRED — run journal dir; the PRIMARY gate reads
                                #   journal.discovery_in_interval(results_dir) and
-                               #   refuses to seed an island if it is empty (DEC-7).
+                               #   refuses to seed an island if it is empty.
     "discovery_provenance": str  # OPTIONAL exact-match tightener — a reference to the
                                #   in-interval R1/R2 discovery stub this grounding
                                #   came from (e.g. the stub file path or summary).
@@ -64,7 +64,7 @@ except ImportError:
 
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # ------------------------------------------------------------------
-    # PRIMARY fail-closed gate (DEC-7). Run BEFORE opening the DB so a
+    # PRIMARY fail-closed gate. Run BEFORE opening the DB so a
     # refused grounding seeds NO island. The technique must come from an
     # in-interval R1/R2 discovery stub (kind in {dr, archive_analyst});
     # journal.discovery_in_interval is the single source of truth for the
@@ -75,18 +75,18 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not results_dir:
         return {
             "ok": False,
-            "error": "results_dir required for the discovery gate; grounding refused (DEC-7)",
+            "error": "results_dir required for the discovery gate; grounding refused",
         }
     journal = _common._lazy_journal()
     if journal is None or not hasattr(journal, "discovery_in_interval"):
         return {
             "ok": False,
-            "error": "journal.discovery_in_interval unavailable; grounding refused (DEC-7)",
+            "error": "journal.discovery_in_interval unavailable; grounding refused",
         }
     if not journal.discovery_in_interval(results_dir):
         return {
             "ok": False,
-            "error": "no in-interval discovery stub; grounding refused (DEC-7)",
+            "error": "no in-interval discovery stub; grounding refused",
         }
 
     from shinka.database import ProgramDatabase, DatabaseConfig

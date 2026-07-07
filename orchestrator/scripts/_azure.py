@@ -78,11 +78,10 @@ def _usage_cost(response: Any, api_model_name: str) -> float:
         ic, oc = calculate_cost(api_model_name, int(in_tok), int(out_tok))
         cost = float(ic) + float(oc)
     except Exception as e:
-        # D4 (M10): a billed response that fails to price (unknown/renamed/typo'd
-        # deployment) must NOT silently log $0 and lie to the budget ledger. Warn.
-        # P10-T5: this WARN-and-bill-$0 is FIXED behavior — there is NO tunable toggle
-        # (the prior `unpriced_cost_mode` lever was removed); add the deployment to
-        # pricing.csv to fix the undercount.
+        # A billed response that fails to price (unknown/renamed/typo'd deployment)
+        # must NOT silently log $0 and lie to the budget ledger. Warn instead.
+        # This warn-and-bill-$0 behavior is fixed — there is deliberately no tunable
+        # toggle; add the deployment to pricing.csv to fix the undercount.
         if int(in_tok) or int(out_tok):
             logger.warning(
                 "unpriced billed Azure call (model=%s in=%s out=%s): %s — ledger may "
@@ -118,7 +117,7 @@ async def _bg_call(
         # this; the partial output is still extractable. Our cost guardrail.
         create_kwargs["max_output_tokens"] = int(max_output_tokens)
     if tools:
-        # WS4: built-in tools (e.g. web_search_preview) for the call. ONLY set when
+        # Built-in tools (e.g. web_search_preview) for the call. ONLY set when
         # the caller explicitly opts in — see bg_query(enable_web_search=...). The
         # two sanctioned scenarios are DR and pro nailing a DR reference. NOTE: tool
         # availability is per-deployment; a model that doesn't support the tool will
@@ -159,14 +158,13 @@ async def _bg_call(
         if status == "incomplete":
             # A max-output-tokens cap-hit is USABLE (partial text) and BILLED. Return it
             # like a completed call so the cost lands in the ledger and the partial output
-            # can still be parsed/applied. P10-T5: this is FIXED behavior — there is NO
-            # tunable toggle (the prior `azure_partial_output_mode` lever was removed; the
-            # cost is billed either way).
+            # can still be parsed/applied. This behavior is fixed — there is deliberately
+            # no tunable toggle; the cost is billed either way.
             return _extract_text(response), _usage_cost(response, api_model_name)
         if status != "completed":
             # Genuine terminal failure (failed/cancelled/expired): unusable, but may
             # still be BILLED — attach the cost to the exception so the caller folds it
-            # into the ledger instead of dropping it (H2).
+            # into the ledger instead of dropping it.
             err = RuntimeError(f"Azure response {rid} terminal status={status!r}")
             err.cost = _usage_cost(response, api_model_name)
             raise err
@@ -204,7 +202,7 @@ def bg_query(
     `max_output_tokens` defaults to a per-model cap (see _MAX_OUTPUT_TOKENS_BY_MODEL)
     sized so a single max-output call costs < $10. Pass an explicit value to override.
 
-    WS4: `enable_web_search=True` attaches the built-in `web_search_preview` tool
+    `enable_web_search=True` attaches the built-in `web_search_preview` tool
     (or pass an explicit `tools` list). OFF by default — the two sanctioned uses are
     DR and pro nailing a DR reference. Tool support is per-deployment; enable it
     deliberately for the model you've confirmed supports it.

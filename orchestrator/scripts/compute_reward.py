@@ -12,8 +12,8 @@ generated* here, also review *how it is consumed*:
 Change them together, compatibly (see the concern map in SKILL.md). The raw task
 score itself comes from the user's `evaluate.py` and is NOT mutable.
 
-Default policy (identical to the prior hardcoded harness behavior, so the bandit
-is unchanged until you deliberately evolve it):
+Default policy (the harness's classic behavior, so the bandit is unchanged until
+you deliberately evolve it):
   reward  = candidate.combined_score   (None when incorrect → bandit imputes worst)
   baseline= parent.combined_score      (AsymmetricUCB learns on reward - baseline)
 
@@ -22,7 +22,7 @@ INPUT (stdin JSON):
     "candidate": {"combined_score": float, "correct": bool, "public_metrics": {..}},
     "parent": {"combined_score": float} | null,
     "mode": "absolute" | "relative",   # rewrite lever; default "absolute"
-    "reward_validity_floor": float,    # O6 reward-scale floor; default 0.001
+    "reward_validity_floor": float,    # reward-scale floor; default 0.001
     "context": {..}                    # free-form (window stats, etc.)
   }
 
@@ -60,33 +60,33 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     _raw = candidate.get("combined_score")
     _score_finite = isinstance(_raw, (int, float)) and math.isfinite(float(_raw))
 
-    # P10-T1: incorrect OR a NON-FINITE/missing candidate score (NaN / inf / None — a
+    # Incorrect OR a NON-FINITE/missing candidate score (NaN / inf / None — a
     # buggy evaluator or a loss/regret task gone wrong) → no reward; the bandit imputes a
     # worst-case value, so one bad number can't poison an arm. (Failures are penalized,
     # not invisible.) NEGATIVE FINITE scores pass through to the floor logic — the reward
     # math is relative, so negative-score tasks are fully supported.
     if not correct or not _score_finite:
-        # M23: return the sign-aware baseline too (the bandit max()es it with 0 anyway, so this is
+        # Return the sign-aware baseline too (the bandit max()es it with 0 anyway, so this is
         # behavior-identical — but keeps the two branches consistent).
         return {"reward": None, "baseline": max(parent_score, 0.0), "mode": mode}
     score = float(_raw)
 
-    # HYBRID (H3 / O6 reward scale): floor the correct candidate's reward CONTRIBUTION
+    # HYBRID reward scale: floor the correct candidate's reward CONTRIBUTION
     # so a correct-but-below-parent candidate is STRICTLY better than a failed one
     # (reward=None → bandit imputes worst), instead of collapsing to the same
-    # near-worst contribution under the bandit's asymmetric clamp (the bug H3 named).
+    # near-worst contribution under the bandit's asymmetric clamp.
     # The penalty SHAPE is the mutable lever `reward_validity_floor` (default 0.001).
     # The parent-selection SCORE scale has its own separate `validity_floor`
-    # (sample_parent) — two distinct levers per open question O6.
+    # (sample_parent) — two distinct, deliberately separate levers.
     #
-    # M23: SIGN-AWARE baseline. The bandit resolves the effective baseline as
+    # SIGN-AWARE baseline. The bandit resolves the effective baseline as
     # max(passed_baseline, self._baseline=0) and then asymmetric-clamps r = max(reward -
-    # baseline, 0). With a NEGATIVE parent_score the old `reward = parent_score + max(delta,
-    # floor)` gave the bandit r = (parent_score + max(delta,floor)) - 0 = parent_score +
+    # baseline, 0). With a NEGATIVE parent_score a naive `reward = parent_score + max(delta,
+    # floor)` would give the bandit r = (parent_score + max(delta,floor)) - 0 = parent_score +
     # max(delta,floor), which clamps to 0 for a sufficiently negative parent — i.e. a
     # correct-but-low candidate becomes INDISTINGUISHABLE from a failure (also r=0). Build the
     # reward against b = max(parent_score, 0) so the bandit's r = reward - b = max(delta, floor)
-    # >= floor > 0 for ANY parent sign. For parent_score >= 0 this is byte-identical to before.
+    # >= floor > 0 for ANY parent sign. For parent_score >= 0 the baseline shift is a no-op.
     floor = float(payload.get("reward_validity_floor", 0.001) or 0.0)
     baseline = max(parent_score, 0.0)
     delta = score - parent_score

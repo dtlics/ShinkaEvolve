@@ -119,10 +119,10 @@ CONTRACTS: Dict[str, Dict[str, Any]] = {
         "needs_archive": False,
         "build_payload": _prompt_payload,
         "invariant": None,
-        # L5: also smoke the FIX branch. The normal branch alone lets a rewrite that
+        # Also smoke the FIX branch. The normal branch alone lets a rewrite that
         # drops `if payload.get("needs_fix"):` deploy green (it still returns the same
-        # key set with patch_type "diff"/"full"/"cross") — re-opening H1 or losing
-        # repair prompting entirely. The invariant pins patch_type=="fix" on this path.
+        # key set with patch_type "diff"/"full"/"cross") — silently losing repair
+        # prompting entirely. The invariant pins patch_type=="fix" on this path.
         "extra_payloads": [
             {"label": "fix_mode",
              "required_keys": {"patch_sys", "patch_msg", "patch_type"},
@@ -139,7 +139,7 @@ CONTRACTS: Dict[str, Dict[str, Any]] = {
              "invariant": lambda out, ctx: (
                  None if out.get("patch_type") == "fix"
                  else "fix-mode payload must yield patch_type=='fix' "
-                      "(the needs_fix branch appears to have been dropped — H1 regression)"
+                      "(the needs_fix branch appears to have been dropped)"
              )},
         ],
     },
@@ -159,7 +159,7 @@ CONTRACTS: Dict[str, Dict[str, Any]] = {
             "models": ["m1", "m2"], "state": {}, "seed": 0,
         },
         "invariant": None,
-        # P7-T5: also smoke the weights + update modes (the bandit-counts snapshot is the
+        # Also smoke the weights + update modes (the bandit-counts snapshot is the
         # collapse + lock-out data source), so a rewrite that breaks them is caught before
         # deploy. Each uses a FRESH state_path under the temp dir.
         "extra_payloads": [
@@ -219,7 +219,7 @@ CONTRACTS: Dict[str, Dict[str, Any]] = {
             else "meta must return island_directions as a list"
         ),
     },
-    # cadence_policy.py is FOUNDATION / non-deployable (S1): strategy_store._assert_mutable
+    # cadence_policy.py is FOUNDATION / non-deployable: strategy_store._assert_mutable
     # raises PermissionError for it, so the rewrite-deploy path NEVER validates it. This
     # contract is retained only for an out-of-band sanity smoke (e.g. invoking
     # validate_strategy directly on the shipped file), NOT the rewrite-deploy path.
@@ -233,7 +233,7 @@ CONTRACTS: Dict[str, Dict[str, Any]] = {
             None if out.get("return") is True else "expected return=True at window cap"
         ),
     },
-    # M15: mutate.py IS a mutable target — give it a real output-contract smoke (mock
+    # mutate.py IS a mutable target — give it a real output-contract smoke (mock
     # mode makes no LLM/Azure call) so a rewrite that drops candidate_path/applied/cost
     # is caught instead of passing parse-only.
     "mutate.py": {
@@ -298,7 +298,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     spec = CONTRACTS.get(target)
     if spec is None:
-        # M16: a target that is neither a known contract NOR a MUTABLE strategy file is
+        # A target that is neither a known contract NOR a MUTABLE strategy file is
         # almost certainly a typo or a FOUNDATION file — refuse it (the rewrite protocol
         # must not green-light writing it).
         try:
@@ -314,8 +314,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "sample_parent.py", "novelty_check.py", "select_llm.py", "compute_reward.py",
                 "record_policy.py", "stagnation_detector.py", "island_policy.py",
                 "construct_mutation_prompt.py", "mutate.py", "meta_summarize.py",
-                "island_brief.py",  # M3: keep in sync with strategy_store.MUTABLE_TARGETS
-                # (cadence_policy.py is FOUNDATION/non-deployable — S1 — and is
+                "island_brief.py",  # keep in sync with strategy_store.MUTABLE_TARGETS
+                # (cadence_policy.py is FOUNDATION/non-deployable and is
                 # deliberately EXCLUDED from MUTABLE_TARGETS, so it is not listed here.)
             )
         if target not in _MUT:
@@ -323,7 +323,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
                 "valid": False, "stage": "parse",
                 "errors": [f"{target} is neither a known contract nor a MUTABLE strategy target"],
             }
-        # A MUTABLE target without a smoke contract (currently only mutate.py — M15):
+        # A MUTABLE target without a smoke contract (currently only island_brief.py):
         # parse-only for now (confirm a callable main exists).
         if "def main(" not in src:
             return {
@@ -332,7 +332,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             }
         return {
             "valid": True, "stage": "parse",
-            "errors": [], "note": f"no smoke contract for {target}; parse-only (M15: add one)",
+            "errors": [], "note": f"no smoke contract for {target}; parse-only",
         }
 
     # 2. SMOKE
@@ -340,7 +340,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         ctx: Dict[str, Any] = {}
         if spec["needs_archive"]:
             ctx = _build_synthetic_archive(tmp)
-        ctx["tmp_dir"] = tmp  # M15: a writable dir for targets (e.g. mutate) that need one
+        ctx["tmp_dir"] = tmp  # a writable dir for targets (e.g. mutate) that need one
         run_payload = spec["build_payload"](ctx)
         try:
             proc = _run_candidate(candidate_path, run_payload)
@@ -374,7 +374,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             if msg:
                 errors.append(msg)
 
-        # P7-T5: smoke EXTRA modes (e.g. select_llm weights + update) so a rewrite that
+        # Smoke EXTRA modes (e.g. select_llm weights + update) so a rewrite that
         # breaks the bandit-counts snapshot — the collapse + lock-out data source — is
         # caught BEFORE deploy, not silently at runtime.
         for extra in spec.get("extra_payloads", []):
@@ -392,7 +392,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             if _emiss:
                 errors.append(f"{_label} mode missing keys: {sorted(_emiss)}")
                 continue
-            # L5: an extra payload MAY carry its own invariant (the required_keys check
+            # An extra payload MAY carry its own invariant (the required_keys check
             # alone can't catch a semantic regression, e.g. a dropped needs_fix branch
             # still returns the same key set with the wrong patch_type).
             _einv = extra.get("invariant")

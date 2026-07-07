@@ -332,7 +332,7 @@ class JobScheduler:
                                 f"timeout of {self.config.time}. Killing. "
                                 f"=> Gen. {job.generation}"
                             )
-                        kill_process_tree(job.job_id)  # M47: tree-kill (conda grandchild)
+                        kill_process_tree(job.job_id)  # tree-kill so the conda grandchild dies too
                         return False
 
                 # More robust status checking with exception handling
@@ -431,7 +431,7 @@ class JobScheduler:
                 else:
                     # For local jobs, kill the process
                     if isinstance(job_id, ProcessWithLogging):
-                        kill_process_tree(job_id)  # M47: tree-kill (conda grandchild)
+                        kill_process_tree(job_id)  # tree-kill so the conda grandchild dies too
                         return True
                 return False
             except Exception as e:

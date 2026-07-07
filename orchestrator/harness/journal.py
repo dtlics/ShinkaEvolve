@@ -27,14 +27,14 @@ look like" → "every reward-related intervention" → "is island 2 dying."
 
 run.json durability contract (so the hard budget cap can never be silently lost):
 every run.json write is atomic (write a UNIQUE-named temp file, fsync, os.replace with a
-Windows-PermissionError retry, then fsync the parent dir on POSIX — L68/L70), and a
+Windows-PermissionError retry, then fsync the parent dir on POSIX), and a
 missing-or-corrupt run.json is REPAIRED by recomputing total_cost from the durable
 append-only streams (windows.jsonl window_cost + interventions.jsonl cost + calls.jsonl
 cost). The repair fires BOTH on read (corrupt-in-place) AND at init_run when run.json is
-ABSENT but the streams exist (deleted-then-restart — H6), so the cap can never restart
+ABSENT but the streams exist (deleted-then-restart), so the cap can never restart
 from $0. Append is torn-write-safe: a newline-less torn tail is isolated rather than
-merged, and an unparseable line is skipped with a stderr warning, never silently dropped
-(L72). The only spend not recoverable this way is a cost added directly via add_cost
+merged, and an unparseable line is skipped with a stderr warning, never silently dropped.
+The only spend not recoverable this way is a cost added directly via add_cost
 outside any window/intervention/call (e.g. the one boot-time embedding) — a deliberately
 accepted small loss. read_run returns {} only when run.json is genuinely absent AND no
 journal streams exist.
@@ -72,7 +72,7 @@ def _run_path(results_dir: str) -> str:
 
 def _append_jsonl(path: str, obj: Dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    # L72: if a prior append was TORN (a power-loss/kill mid-write left a newline-less
+    # If a prior append was TORN (a power-loss/kill mid-write left a newline-less
     # tail), prefix a newline so the torn record stays isolated on its own (droppable)
     # line instead of MERGING with this record into one unparseable line that both
     # _read_jsonl and the cost recompute would silently drop (losing a window/cost row).
@@ -103,7 +103,7 @@ def _read_jsonl(path: str) -> List[Dict[str, Any]]:
                 try:
                     out.append(json.loads(line))
                 except json.JSONDecodeError:
-                    dropped += 1  # L72: a torn/merged line — surface it, don't hide it
+                    dropped += 1  # a torn/merged line — surface it, don't hide it
                     continue
     if dropped:
         import sys as _sys
@@ -121,14 +121,14 @@ def _write_json_atomic(path: str, obj: Dict[str, Any]) -> None:
     over the target. A crash mid-write leaves either the old file or the new one
     intact — never a truncated run.json that would zero the cost ledger."""
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    # L70: per-write UNIQUE temp name so two writers to the same target can never clobber
+    # Per-write UNIQUE temp name so two writers to the same target can never clobber
     # each other's temp file mid-rename (a fixed `{path}.tmp` collides).
     tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2, default=str)
         f.flush()
         os.fsync(f.fileno())
-    # L70: on Windows os.replace can raise PermissionError against a concurrent reader —
+    # On Windows os.replace can raise PermissionError against a concurrent reader —
     # retry briefly before giving up.
     for _attempt in range(5):
         try:
@@ -138,7 +138,7 @@ def _write_json_atomic(path: str, obj: Dict[str, Any]) -> None:
             time.sleep(0.05)
     else:
         os.replace(tmp, path)  # final attempt; let it raise if the target is truly locked
-    # L68: fsync the PARENT DIRECTORY so a power-loss AFTER the rename can't lose it
+    # Fsync the PARENT DIRECTORY so a power-loss AFTER the rename can't lose it
     # (POSIX only — Windows has no O_DIRECTORY; best-effort, never raises).
     try:
         if os.name == "posix":
@@ -207,7 +207,7 @@ def _reconstruct_run(results_dir: str, prior: Optional[Dict[str, Any]]) -> Dict[
 def init_run(results_dir: str, meta: Dict[str, Any]) -> None:
     """Create run.json on first window if absent (idempotent).
 
-    H6: if run.json is ABSENT but the durable streams already exist (run.json was
+    If run.json is ABSENT but the durable streams already exist (run.json was
     deleted / sync-quarantined mid-run, then a restart or --resume), do NOT write a
     fresh ZEROED ledger — recompute total_cost from the streams via _reconstruct_run so
     the budget hard-cap can never silently restart from $0. Only a genuine fresh boot
@@ -273,7 +273,7 @@ def append_window(results_dir: str, diag: Dict[str, Any]) -> None:
     run["total_programs"] = diag.get("total_programs")
     run["last_window_index"] = diag.get("window_index")
     run["last_J"] = diag.get("J_score")
-    # F4: the active strategy fingerprint ({target: hash}) so run.json is
+    # Record the active strategy fingerprint ({target: hash}) so run.json is
     # self-contained about which strategy version is currently live.
     if diag.get("strategy_fingerprint") is not None:
         run["strategy_fingerprint"] = diag.get("strategy_fingerprint")
@@ -313,9 +313,9 @@ def log_call(
     cost: float = 0.0,
     summary: Optional[str] = None,
 ) -> str:
-    """WS7: persist ONE external LLM call (meta / deep_research) in full, NEVER
-    overwriting, and fold its cost into the ledger. This is what was missing when
-    round-1's DR prompt was lost to an overwritten runner script.
+    """Persist ONE external LLM call (meta / deep_research) in full, NEVER
+    overwriting, and fold its cost into the ledger — every call gets its own
+    uniquely named detail file, so no later call can clobber an earlier prompt.
 
     Writes two things:
       journal/calls/<kind>_<ts>_<rand>.json  — the FULL {request, response} (prompts
@@ -548,7 +548,7 @@ def _work_scores(results_dir: str) -> List[float]:
 def recent_work_score(results_dir: str, n: int = 1, decay: Optional[float] = None) -> Optional[float]:
     """The per-control-return WORK SCORE the agent records on interventions.jsonl
     (how much real work the last control-return did — the scalar
-    ``work_score = work_audit + work_discovery + work_grounding``, DEC-6).
+    ``work_score = work_audit + work_discovery + work_grounding``).
     Returns the last (n=1), the plain mean of the last n, or a recency-decayed mean
     when ``decay`` is given. None when none recorded yet — the taper's no-signal
     default (which the harness reads as "wake every window"). The cadence taper reads
@@ -568,7 +568,7 @@ def recent_work_score(results_dir: str, n: int = 1, decay: Optional[float] = Non
 
 def recent_work_axes(results_dir: str, n: int = 1) -> Optional[Dict[str, Any]]:
     """The last recorded {work_audit, work_discovery, work_grounding} THREE-axis work
-    magnitudes (DEC-6; the hook for a finer, per-axis cadence rule). Splitting discovery
+    magnitudes (the hook for a finer, per-axis cadence rule). Splitting discovery
     from grounding makes a grounding-WITHOUT-discovery stretch detectable — grounding
     alone is real spend but does not count as the intervention that breaks stagnation.
     None when none recorded yet."""
@@ -599,13 +599,13 @@ def work_low_streak(results_dir: str, low_threshold: float = 1.0) -> int:
 
 def termination_streak(results_dir: str) -> int:
     """Count trailing consecutive 'control_return' rows that are BOTH stagnant AND had an
-    orchestrator intervention. The counted interventions are EXACTLY (H12 INCLUSIVE): a
+    orchestrator intervention. The counted interventions are EXACTLY these three: a
     framework rewrite, a DISCOVERY ROUND (R1 Azure DR or R2 archive-analyst) — which is then
     GROUNDED — OR a deliberate config-lever flip. The automatic per-window meta round does NOT
     count. A hand-authored GROUNDING is NOT a standalone counted intervention: a grounding never
     runs without the in-interval discovery that produced its technique (the spawn_island PRIMARY
     gate + grounding-engineer refusal enforce this), so it RIDES that DR and counts only via it
-    (work_discovery>0), never on its own. This is the deterministic termination signal (H6/H7/H8):
+    (work_discovery>0), never on its own. This is the deterministic termination signal:
     N-in-a-row means the search cannot escape stagnation DESPITE intervening at every return. A
     stagnation-break (stagnation_flag False) or a no-intervention return resets the streak.
     Computed from interventions.jsonl — the agent writes one canonical control_return row per
@@ -613,7 +613,7 @@ def termination_streak(results_dir: str) -> int:
 
     Each row: {type:"control_return", stagnation_flag: bool, intervened: bool,
     work_audit, work_discovery, work_grounding, work_score, ...}. ``intervened`` is the agent's
-    explicit (DEC-6: work_audit>0 OR work_discovery>0 — work_grounding ALONE never flips it, so a
+    explicit flag (work_audit>0 OR work_discovery>0 — work_grounding ALONE never flips it, so a
     grounding that grounds NO in-interval discovery cannot pad the streak); rows missing it fall
     back to that derivation so the signal is robust to either shape."""
     rows = [r for r in read_interventions(results_dir) if r.get("type") == "control_return"]
@@ -621,7 +621,7 @@ def termination_streak(results_dir: str) -> int:
     for r in reversed(rows):
         intervened = r.get("intervened")
         if intervened is None:  # robust fallback if the agent omitted the explicit flag
-            # DEC-6: key on work_discovery (NOT work_grounding) — grounding alone is real spend
+            # Key on work_discovery (NOT work_grounding) — grounding alone is real spend
             # but is not the intervention that breaks stagnation.
             work_discovery = r.get("work_discovery", 0)
             intervened = float(r.get("work_audit", 0) or 0) > 0 or float(work_discovery or 0) > 0
@@ -633,7 +633,7 @@ def termination_streak(results_dir: str) -> int:
 
 
 def read_calls(results_dir: str, kind: Optional[str] = None) -> List[Dict[str, Any]]:
-    """WS7: the compact external-call pointer index (no big prompts). Optionally
+    """The compact external-call pointer index (no big prompts). Optionally
     filter by kind ('meta' / 'dr' / 'archive_analyst'). The two DISCOVERY-stub kinds the
     recency gate recognizes are {dr, archive_analyst} (R1 Azure deep research and R2 the
     archive-analyst subagent); 'meta' is the automatic per-window round (not a discovery
@@ -655,7 +655,7 @@ def read_call(results_dir: str, file: str) -> Dict[str, Any]:
 
 
 def _control_return_boundary(results_dir: str) -> float:
-    """The interval anchor for the recency gate (DEC-7): the timestamp of the
+    """The interval anchor for the discovery recency gate: the timestamp of the
     MOST-RECENT type=="control_return" intervention row (0.0 if none → first interval).
     control_return rows are the only timestamped interval anchor — windows carry none.
     Relies on the orchestrator convention of writing the control_return row AFTER acting,
@@ -670,7 +670,7 @@ def _control_return_boundary(results_dir: str) -> float:
 
 
 def discovery_in_interval(results_dir: str) -> List[Dict[str, Any]]:
-    """DEC-7 recency gate — THE single source of truth for "is there a fresh, usable
+    """The discovery recency gate — THE single source of truth for "is there a fresh, usable
     discovery this control-return interval?". Read-only.
 
     A *discovery round* (== "DR round") is a discovery pass via EXACTLY ONE OF R1 (Azure
@@ -679,7 +679,7 @@ def discovery_in_interval(results_dir: str) -> List[Dict[str, Any]]:
     (the PRIMARY spawn_island.py gate; the grounding-engineer subagent likewise refuses
     without it) fails CLOSED on an empty list — no in-interval discovery ⇒ grounding refused.
 
-    In-interval iff ``stub.timestamp > boundary`` (STRICT, DEC-7/O6), where boundary =
+    In-interval iff ``stub.timestamp > boundary`` (STRICTLY greater), where boundary =
     the most-recent control_return row timestamp (0.0 ⇒ first interval). USABLE iff the
     stub denotes >=1 returned direction: when the full detail file is readable and carries
     an explicit ``response.usable``, THAT flag alone decides (False disqualifies, True
@@ -815,10 +815,9 @@ def archive_run(
         src = os.path.join(results_dir, rel)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(dest, os.path.basename(rel)))
-    # M36: the strategy history lives at strategy_store.history_dir() (the orchestrator tree, or
-    # SHINKA_ORCH_HISTORY_DIR), NOT under results_dir — the old `results_dir/strategy_history`
-    # path never existed, so the archive silently omitted the deploy/outcome audit trail. Read
-    # the index from the REAL location.
+    # The strategy history lives at strategy_store.history_dir() (the orchestrator tree, or
+    # SHINKA_ORCH_HISTORY_DIR), NOT under results_dir — read the index from that real location
+    # so the archive always includes the deploy/outcome audit trail.
     try:
         import sys as _sys
 

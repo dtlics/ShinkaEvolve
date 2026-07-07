@@ -1,4 +1,4 @@
-"""repair_record.py — record the outcome of a FAILED repair attempt (P5 repair mode).
+"""repair_record.py — record the outcome of a FAILED repair attempt (repair mode).
 
 MUTABILITY: IMMUTABLE PLUMBING. A thin stdin/stdout wrapper over the foundation DB
 ops ``db.append_program_error`` / ``db.tombstone_program``. It embeds NO LLM call. The
@@ -20,7 +20,7 @@ INPUT (stdin JSON):
     "action": "append_fail" | "tombstone",
     "traceback_chunk": str | null,   # the failed repair's error (action=append_fail)
     "attempt_cap": int,              # default 2; also tombstone once attempts >= cap
-    "reason": "repair" | "novelty_evict"  # H3: WHY (action=tombstone); default "repair"
+    "reason": "repair" | "novelty_evict"  # WHY (action=tombstone); default "repair"
   }
 
 OUTPUT (stdout JSON):
@@ -48,7 +48,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     program_id = str(payload["program_id"])
     action = str(payload.get("action", "append_fail"))
     attempt_cap = int(payload.get("attempt_cap", 2) or 2)
-    # H3: WHY this row is tombstoned. The keep-the-better caller (run_window novelty
+    # WHY this row is tombstoned. The keep-the-better caller (run_window novelty
     # resolve) passes reason="novelty_evict" (a CORRECT incumbent); the repair path uses
     # the default "repair" (an INCORRECT program). errored_fraction counts only "repair".
     reason = str(payload.get("reason", "repair"))

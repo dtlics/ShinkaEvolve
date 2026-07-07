@@ -9,7 +9,7 @@ BASE_SYSTEM_MSG = (
     "previous attempts."
 )
 
-# Point 4.4: a gated preamble that restores the "expert engineer / invent a new idea"
+# A gated preamble that restores the "expert engineer / invent a new idea"
 # identity for no-direction, non-cross gens even when a task_sys_msg replaces BASE_SYSTEM_MSG
 # (the sampler appends this only when no meta direction is present and patch_type is diff/full).
 EXPERT_CREATIVE_PREAMBLE = (
@@ -21,10 +21,10 @@ EXPERT_CREATIVE_PREAMBLE = (
 
 
 def perf_str(combined_score: float, public_metrics: Dict[str, float]) -> str:
-    # C2: render each public metric on its own line as "- {key}: {value}" for readability
-    # on many-metric tasks (was a single ';'-joined run-on line). Pure presentation: the
-    # numbers and their meaning are identical, and direction/best-so-far still belong to
-    # objective_brief (perf_str has no archive context).
+    # Render each public metric on its own line as "- {key}: {value}" — readable even
+    # on many-metric tasks, unlike a single ';'-joined run-on line. Pure presentation:
+    # direction/best-so-far context belongs to objective_brief (perf_str has no archive
+    # context), so this carries only the raw numbers.
     perf_str = f"Combined score to maximize: {combined_score:.2f}"
     for key, value in public_metrics.items():
         if isinstance(value, float):
@@ -35,7 +35,7 @@ def perf_str(combined_score: float, public_metrics: Dict[str, float]) -> str:
 
 
 def objective_section(objective_brief) -> str:
-    """Point 4.3: render the orchestrator-authored qualitative score-shape paragraph
+    """Render the orchestrator-authored qualitative score-shape paragraph
     (what we optimize + hard constraints + the building blocks a valid candidate may use) as a
     header for the metric slot. Empty string when no brief was authored, so the prompt is
     byte-identical to the legacy form. AUGMENTS perf_str's numbers; carries only authored prose."""
@@ -74,7 +74,7 @@ def construct_eval_history_msg(
     material to combine is supplied separately (``get_cross_component``), so this
     block must NOT tell the model "do not combine these" (that would contradict the
     crossover task). It stays plain background context. For diff/full it keeps the
-    D3 "eval history, not inspirations to stitch together" framing.
+    "eval history, not inspirations to stitch together" framing.
     """
     if correct and for_cross:
         # cross: the crossover target is shown separately; these are just background.
@@ -84,7 +84,7 @@ def construct_eval_history_msg(
             "over with is given separately below):\n\n"
         )
     elif correct:
-        # Point 4.2 (D3): non-cross modes keep these prior programs, but they are EVAL
+        # Non-cross modes keep these prior programs, but they are EVAL
         # HISTORY for quick reference — NOT inspirations to copy/combine. (cross supplies its
         # real crossover material separately via get_cross_component.)
         inspiration_str = (

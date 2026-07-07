@@ -5,9 +5,9 @@ step. The orchestrator deploys a candidate, runs ONE measure window, then calls
 this with the prior window's diagnostics and the measure window's diagnostics; it
 returns whether to roll back (and why).
 
-WHY a basket instead of `new_J < prior_J·0.8`: the old J-only guard was inert
+WHY a basket instead of `new_J < prior_J·0.8`: a J-only guard is inert
 during the opening phase. Best score is monotonic non-decreasing, so window J is
-≥ 0, and early on prior_J ≈ 0 → the guard could never fire (was F14) — exactly
+≥ 0, and early on prior_J ≈ 0 → such a guard could never fire — exactly
 when a careless rewrite does the most damage. This judges a basket of
 search-health signals (correctness, diversity, score), so a rewrite that breaks
 mutation correctness or floods near-duplicates is caught even when the score is
@@ -19,17 +19,17 @@ A rewrite is a REGRESSION (→ roll back) if ANY of:
      flat early phase), OR fell below ``min_eval_success`` while the prior was above
      it, OR dropped by ≥ ``eval_drop`` vs prior. ``abs_eval_floor`` (0.05) sits FAR
      below a genuinely-hard task's healthy floor, so a hard task that simply has low
-     correctness is NOT auto-rolled-back every rewrite (K14).
+     correctness is NOT auto-rolled-back every rewrite.
   2. Diversity collapse — novelty-acceptance dropped by ≥ ``nov_drop`` vs prior.
-     SKIPPED when novelty is UNKNOWN (absent), not treated as maximal (O10/K15).
+     SKIPPED when novelty is UNKNOWN (absent), not treated as maximal.
   3. Score regression — the prior window was making real progress
      (prior Δ > prior threshold) AND the measure window's Δ is < ``score_ratio`` ×
      prior Δ AND search health did not improve to compensate.
   4. Bandit collapse — selection collapsed onto ONE arm THIS measure window. PRIMARY arm
      4a is COUNTS-share: the top arm's submitted-share (from ``llm_bandit_window_counts``,
-     this window's counts — H5) ≥ ``bandit_collapse_count_frac`` AND rose vs prior, with
-     ≥ ``bandit_collapse_min_pulls`` total pulls. Fires INDEPENDENTLY of Δ — the
-     reward/bandit-regression class the old basket was blind to (H5). Arm 4b (weights-share)
+     this window's counts) ≥ ``bandit_collapse_count_frac`` AND rose vs prior, with
+     ≥ ``bandit_collapse_min_pulls`` total pulls. Fires INDEPENDENTLY of Δ, so it catches
+     a reward/bandit regression the score arms cannot see. Arm 4b (weights-share)
      is LEGACY/near-unreachable (a single arm's weight caps at 1−epsilon).
 
 Otherwise accept. Thresholds are kwargs so a future tuning pass can adjust them.
@@ -67,7 +67,7 @@ def _eval_success(diag: Dict[str, Any]) -> float:
 
 
 def _nov(diag: Dict[str, Any]):
-    # O10/K15: return None when novelty is UNKNOWN (absent) — do NOT default to 1.0
+    # Return None when novelty is UNKNOWN (absent) — do NOT default to 1.0
     # ("perfectly diverse"), which would mask a rewrite that records zero novelty
     # events. Callers skip the diversity arm when this is None.
     v = diag.get("novelty_acceptance_rate")
@@ -91,7 +91,7 @@ def decide(
 ) -> Dict[str, Any]:
     reasons: List[str] = []
 
-    # P7-T2: FAIL CLOSED on no usable measure data. A measure window that crashed,
+    # FAIL CLOSED on no usable measure data. A measure window that crashed,
     # exited non-zero, returned empty, or produced NaN in a core sensor is treated as a
     # REGRESSION (revert) — never silently accepted. That is the precise worst case the
     # safety net exists to catch. A VALID flat window (delta 0 with a present, non-NaN
@@ -105,13 +105,13 @@ def decide(
         and "evaluation_failure_rate" not in measure
     )
     _core_nan = any(_is_nan(measure.get(k)) for k in ("delta", "evaluation_failure_rate", "best_score_end"))
-    # H4: a ZERO-EVALUATION measure window (every slot apply-exhausted — exactly what a
+    # A ZERO-EVALUATION measure window (every slot apply-exhausted — exactly what a
     # patch-format-breaking construct_mutation_prompt rewrite, or an Azure outage, produces)
     # completes with evaluation_failure_rate=0.0 PRESENT (the 0/0 branch) + delta 0, so the
     # absent/NaN guards above do NOT catch it and the gate would ACCEPT the poisoned rewrite
     # with zero evidence. apply_failure_rate==1.0 is the structural "nothing was evaluated"
     # signal; a VALID flat window has apply_failure_rate<1.0 (some slots evaluated) so it is
-    # NOT caught (preserves the K14 valid-flat-window contract).
+    # NOT caught here — a valid flat window must never be failed closed.
     _no_evals = float(measure.get("apply_failure_rate", 0.0) or 0.0) >= 1.0
     if measure_crashed or (not measure) or _core_absent or _core_nan or _no_evals:
         return {
@@ -133,7 +133,7 @@ def decide(
     if m_eval < abs_eval_floor:
         # ABSOLUTE near-total collapse — fires regardless of prior, so a rewrite that
         # breaks almost everything is caught even in the early/flat phase. abs_eval_floor
-        # (0.05) sits FAR below a genuinely-hard task's healthy floor (K14), so a hard
+        # (0.05) sits FAR below a genuinely-hard task's healthy floor, so a hard
         # task that simply has low correctness is NOT auto-rolled-back every rewrite.
         reasons.append(
             f"correctness collapse: eval-success {m_eval:.2f} < abs_eval_floor {abs_eval_floor}"
@@ -147,7 +147,7 @@ def decide(
             f"correctness drop: eval-success {p_eval:.2f} → {m_eval:.2f} (≥{eval_drop})"
         )
 
-    # 2. Diversity collapse (skip when novelty is UNKNOWN — O10/K15).
+    # 2. Diversity collapse (skip when novelty is UNKNOWN).
     if p_nov is not None and m_nov is not None and (p_nov - m_nov) >= nov_drop:
         reasons.append(
             f"diversity drop: novelty-acceptance {p_nov:.2f} → {m_nov:.2f} (≥{nov_drop})"
@@ -176,12 +176,12 @@ def decide(
             out[arm] = float(c.get("submitted", c.get("completed", 0)) or 0) if isinstance(c, dict) else float(c or 0)
         return out
 
-    # H5: read THIS window's submitted counts (llm_bandit_window_counts), falling back to
+    # Read THIS window's submitted counts (llm_bandit_window_counts), falling back to
     # the run-CUMULATIVE llm_bandit_counts only when absent. The cumulative pkl counts can
     # never move the top-share past the threshold mid-run (a 10-pull collapsed window barely
-    # shifts an N-pull lifetime total), so a mid-run select_llm/compute_reward rewrite that
-    # collapses selection was previously auto-accepted. The per-window source makes arm 4a
-    # actually reachable; the fallback keeps older priors / tests non-crashing.
+    # shifts an N-pull lifetime total), so only the per-window source makes arm 4a actually
+    # reachable against a mid-run select_llm/compute_reward rewrite that collapses selection;
+    # the fallback keeps older priors / tests non-crashing.
     pc = _submitted(prior.get("llm_bandit_window_counts") or prior.get("llm_bandit_counts"))
     mc = _submitted(measure.get("llm_bandit_window_counts") or measure.get("llm_bandit_counts"))
     m_total = sum(mc.values())

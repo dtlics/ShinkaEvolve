@@ -18,7 +18,7 @@ INPUT (stdin JSON):
   {
     "db_path": str, "db_config": {..}, "embedding_model": str,
     "current_generation": int | null,  # if null, taken as max generation in archive
-    "apply": false                      # opt-in: EXECUTE the decided actions (H8/O3)
+    "apply": false                      # opt-in: EXECUTE the decided actions
   }
 
 OUTPUT (stdout JSON):
@@ -79,7 +79,7 @@ def island_health(
 ):
     """Per-island health rows for the window diagnostics. MUTABLE POLICY.
 
-    Real metrics (M12 fix): ``diversity`` is the mean pairwise cosine DISTANCE of
+    Real metrics: ``diversity`` is the mean pairwise cosine DISTANCE of
     the island's program embeddings — a genuine spread, so two islands collapsed
     onto one genome read LOW even with many members (the toy count could not). And
     ``stagnation_count`` is generations since the island's best correct program.
@@ -122,7 +122,7 @@ def island_health(
                 "best": isl.get("best"),
                 # real spread when embeddings exist; else fall back to the count.
                 "diversity": spread if spread is not None else isl.get("count"),
-                # M28: disambiguate the `diversity` UNITS so a reader never compares a cosine
+                # Disambiguate the `diversity` UNITS so a reader never compares a cosine
                 # spread (≈0..2, real embedding diversity) against a raw member count. The typed
                 # `cosine_spread` is None when <2 members carry an embedding (the fallback case),
                 # and `diversity_kind` says which basis `diversity` actually used this window.
@@ -168,21 +168,21 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     migration_interval = int(db_config.get("migration_interval", 10))
     num_islands = int(db_config.get("num_islands", 2))
 
-    # H10: decouple the POLICY's spawn/migrate decision from the db_config AUTO-TRIGGER knobs
+    # Decouple the POLICY's spawn/migrate decision from the db_config AUTO-TRIGGER knobs
     # (enable_dynamic_islands / migration_rate>0) that ALSO drive the foundation add()-time
-    # maintenance. Keying on the SAME knobs made island_policy_driven a no-op under its
-    # documented prerequisite (auto-triggers OFF → both decisions always False, result
-    # discarded) and a DOUBLE-execution when the knobs are flipped ON. The policy now reads its
-    # OWN payload keys, defaulting to the db_config values for back-compat — so the correct way
-    # to drive island_policy_driven is: add()-time triggers OFF (enable_dynamic_islands=false,
-    # migration_rate=0) AND these policy_* keys set.
+    # maintenance. Keying on the SAME knobs would make island_policy_driven a no-op under
+    # its documented prerequisite (auto-triggers OFF → both decisions always False, result
+    # discarded) and a DOUBLE-execution when the knobs are flipped ON. The policy therefore
+    # reads its OWN payload keys, defaulting to the db_config values for back-compat — so
+    # the correct way to drive island_policy_driven is: add()-time triggers OFF
+    # (enable_dynamic_islands=false, migration_rate=0) AND these policy_* keys set.
     _policy_spawn_enabled = bool(payload.get("policy_spawn_enabled", enable_dynamic))
     _policy_spawn_stag = int(payload.get("policy_spawn_stagnation", stagnation_threshold))
     _policy_migrate_enabled = bool(payload.get("policy_migrate_enabled", migration_rate > 0.0))
     _policy_migrate_interval = int(payload.get("policy_migrate_interval", migration_interval))
     spawn = _policy_spawn_enabled and gens_since_best >= _policy_spawn_stag
 
-    # M15: spawn-ONCE-per-stagnation-episode. The raw rule (gens_since_best >= threshold) stays
+    # Spawn-ONCE-per-stagnation-episode. The raw rule (gens_since_best >= threshold) stays
     # TRUE every window while the island is stuck, so without a durable marker the policy would
     # spawn a NEW island EVERY window it stays stagnant — flooding the population. The harness
     # carries `last_policy_spawn_generation` across windows (in the window diag) and passes it
@@ -209,11 +209,11 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         and current_generation > 0
     )
 
-    # H8/O3 (opt-in): when the caller asks to APPLY, execute the decided actions via
+    # Opt-in: when the caller asks to APPLY, execute the decided actions via
     # the FOUNDATION executor (db.apply_island_actions) — this file only DECIDES; the
-    # mutation lives in immutable plumbing. Default (no apply) is decision-only, so a
-    # rewrite of THIS policy's spawn/migrate logic now actually TAKES EFFECT when the
-    # orchestrator runs with evo.island_policy_driven (fixes H8's dead-code lever).
+    # mutation lives in immutable plumbing. Default (no apply) is decision-only; a
+    # rewrite of THIS policy's spawn/migrate logic takes effect when the orchestrator
+    # runs with evo.island_policy_driven.
     executed = None
     if payload.get("apply"):
         from shinka.database import ProgramDatabase, DatabaseConfig
@@ -233,7 +233,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         finally:
             _db.close()
 
-    # M15: advance the durable marker ONLY when a spawn actually EXECUTED this window; otherwise
+    # Advance the durable marker ONLY when a spawn actually EXECUTED this window; otherwise
     # carry the prior marker forward (suppressed / decision-only windows must not advance it, or
     # the cooldown would never elapse). The harness stamps this back into the window diag.
     _spawned = bool((executed or {}).get("spawned"))

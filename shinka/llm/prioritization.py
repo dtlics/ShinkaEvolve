@@ -192,7 +192,7 @@ class BanditBase(ABC):
         raise NotImplementedError
 
     def save_state(self, path: Union[str, Path]) -> None:
-        """Save bandit state to a pickle file ATOMICALLY (M25): write a temp file, fsync, then
+        """Save bandit state to a pickle file ATOMICALLY: write a temp file, fsync, then
         os.replace — ~20+ writes/window means a kill mid-write would otherwise truncate the
         pickle, and the next load silently starts a ZEROED bandit (all learning lost)."""
         import os as _os
@@ -706,10 +706,10 @@ class AsymmetricUCB(BanditBase):
                     # power > 1 more aggressively favors cheap models
                     cost_ratio_scaled = np.power(cost_ratio_norm, self.cost_power)
                     # additive blend: at kc=1, only cost matters; at kc=0, only reward.
-                    # L73: use `kc`, NOT `k` — here `k` is the virtual-pull LOOP counter
-                    # (`while k > 0` / `k -= 1`); reassigning it collapsed the batch posterior
-                    # to one-hot after one iteration. Dead on the default route (samples==1),
-                    # but a trap for an anti-collapse rewrite reaching for samples>1.
+                    # Use `kc`, NOT `k` — here `k` is the virtual-pull LOOP counter
+                    # (`while k > 0` / `k -= 1`); reassigning it would collapse the batch
+                    # posterior to one-hot after one iteration. Harmless on the default route
+                    # (samples==1), but a trap for an anti-collapse rewrite using samples>1.
                     kc = self.cost_aware_coefficient
                     scores = (1.0 - kc) * scores + kc * cost_ratio_scaled
 

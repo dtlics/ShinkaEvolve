@@ -11,14 +11,15 @@ INPUT (stdin JSON):
     "db_config": {..},
     "embedding_model": str,
     "query_type": "get" | "ancestry" | "best" | "top_n" | "by_generation"
-                | "recent_failures" | "all" | "count" | "summary"
-                | "island_brief",
+                | "recent_failures" | "all" | "all_compact" | "count"
+                | "summary" | "island_brief" | "island_best",
     # query-specific params:
     "program_id": str,              # get / ancestry
     "island_idx": int,              # island_brief (latest per-island direction)
     "max_ancestors": 10,            # ancestry
     "metric": str | null,           # best
-    "n": 10,                        # top_n / recent_failures / all (cap)
+    "n": 10,                        # top_n / recent_failures / all (cap);
+                                    # all_compact cap defaults to 800
     "generation": int,              # by_generation
     "correct_only": true,           # top_n
     "include_code": false,
@@ -94,6 +95,53 @@ def _dispatch(db, query_type: str, payload: Dict[str, Any]):
         n = int(payload.get("n", 0) or 0)
         chosen = programs[:n] if n > 0 else programs
         return [_summ(payload, p) for p in chosen]
+
+    if query_type == "all_compact":
+        # Archive-COMPLETE compact view: EVERY live (non-tombstoned) program as one
+        # tiny row, so a reader (the meta round) can see the whole search history
+        # under a bounded token budget. Ordered by generation; capped at the most
+        # RECENT `n` rows (default 800) so a very long run stays bounded.
+        live = [
+            p for p in programs
+            if not ((getattr(p, "metadata", None) or {}).get("repair_tombstoned") is True)
+        ]
+        live.sort(key=lambda p: getattr(p, "generation", 0) or 0)
+        n = int(payload.get("n", 800) or 800)
+        chosen = live[-n:] if n > 0 else live
+        rows = []
+        for p in chosen:
+            err = str(getattr(p, "error_traceback", None) or "").strip()
+            lines = [ln.strip() for ln in err.splitlines() if ln.strip()]
+            sc = getattr(p, "combined_score", None)
+            rows.append({
+                "id": getattr(p, "id", None),
+                "generation": getattr(p, "generation", None),
+                "island_idx": getattr(p, "island_idx", None),
+                "combined_score": round(float(sc), 4) if sc is not None else None,
+                "correct": bool(getattr(p, "correct", False)),
+                "error_head": (lines[0][:120] if lines else ""),
+            })
+        return rows
+
+    if query_type == "island_best":
+        # The best CORRECT live program of EACH island, one summary per island
+        # (sorted by island_idx). Honors include_code / code_preview_chars like
+        # every other query, so the caller decides how much code travels.
+        best_by_island: Dict[int, Any] = {}
+        for p in programs:
+            if not getattr(p, "correct", False):
+                continue
+            if (getattr(p, "metadata", None) or {}).get("repair_tombstoned") is True:
+                continue
+            isl = getattr(p, "island_idx", None)
+            if isl is None:
+                continue
+            cur = best_by_island.get(isl)
+            if cur is None or (
+                getattr(p, "combined_score", 0.0) > getattr(cur, "combined_score", 0.0)
+            ):
+                best_by_island[isl] = p
+        return [_summ(payload, best_by_island[i]) for i in sorted(best_by_island)]
 
     if query_type == "count":
         correct = sum(1 for p in programs if getattr(p, "correct", False))

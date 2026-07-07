@@ -32,7 +32,9 @@ R1/R2 discovery this grounding came from — an Azure DR (`kind=dr`) or archive-
 brainstormed / own-hypothesis technique, or only a stale prior-interval discovery, **REFUSE**: hand
 back a one-line report "refused — no in-interval R1/R2 discovery provenance; run a discovery round
 first." Grounding a discovery technique with no fresh discovery behind it is exactly the failure this
-gate exists to stop, and `spawn_island` would refuse the result anyway. (Use B — the rescue — has no
+gate exists to stop — and `spawn_island`'s code gate backstops only path (i) NOVEL; path (ii)
+SIMILAR lands via `archive_record`, which has NO gate, so on that path YOUR refusal is the only
+guard. (Use B — the rescue — has no
 discovery and is exempt: it does not spawn an island, so this gate does not apply.)
 
 ## What you are given (in the spawn prompt)
@@ -45,7 +47,8 @@ discovery and is exempt: it does not spawn an island, so this gate does not appl
 - The **clean seed/scaffolding** (`initial.<ext>`) — the EVOLVE-BLOCK markers + the fixed harness
   around them. For path (ii), also the closest existing program to combine into.
 - The run dir, the absolute `evaluate.py` path, a SCRATCH dir to write into, and the per-eval
-  `time` cap (thread it from the live `run.json`'s `task.eval_time`).
+  `time` cap (thread it from the run CONFIG file you were launched from — its `task.eval_time` —
+  NOT `journal/run.json`, which is the run-summary journal and carries no task block).
 
 ## How to author + verify
 1. **Read** the seed to find the exact EVOLVE-BLOCK markers and the I/O contract the harness
@@ -97,5 +100,6 @@ cost — your Claude tokens are off-ledger; only the embedding is ledgered).
 - SCRATCH path only; NEVER edit the user's `initial.py` (that WOULD be a foundation edit).
 - Score-0 / below-baseline on a first injection is EXPECTED, not a failure — report it as such.
 - You never authorize a run termination; your handoff is about THIS injection only.
-- Your output is written to `strategy_history/grounding_<window>.md`; keep it self-contained so a
-  future reader understands it without rerunning your work.
+- Return your report to the orchestrator; it saves it to
+  `strategy_history/grounding_<window>.md` — keep it self-contained so a future reader
+  understands it without rerunning your work.

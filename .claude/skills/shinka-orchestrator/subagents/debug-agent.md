@@ -41,7 +41,9 @@ Return Markdown with exactly these sections:
   *parent* problem (this lineage is unstable → down-weight it), or a *one-off*
   (incidental, accept the failed slot and move on)?
 - **Recommended action** — pick ONE: `rewrite:construct_mutation_prompt`,
-  `down_weight_parent:<id>`, or `accept_and_continue`. Add a one-line why.
+  `down_weight_parent:<id>` (the orchestrator acts on this via a strategy rewrite of
+  `sample_parent.py` — de-prioritize the lineage — or by steering the next island brief away
+  from it; it is not a config key), or `accept_and_continue`. Add a one-line why.
 - **Confidence** — low / medium / high.
 
 ## Rules

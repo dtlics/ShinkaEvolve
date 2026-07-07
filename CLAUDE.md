@@ -89,7 +89,8 @@ operating playbook — before acting. In short:
   `Get-Process` a run by bare PID; a run is its `results_dir`, owned by an OS lock on
   `<results_dir>/.run.lock`.)
 - **The automatic meta round is per-window, not yours.** Deterministic code calls it each
-  window (default `azure-gpt-5.5` medium): one call that reads the whole archive and writes each
+  window (default `azure-gpt-5.5` medium): one call that reads the whole archive (every program
+  as a compact row, plus code for the top programs and each island's best) and writes each
   live island its own differentiated direction list — what already works there plus what looks
   promising — so islands diverge BY DEFAULT. You don't hand-author briefs. Because the whole run
   leans on this one call per window, keep its prompt aligned with that design: every direction
@@ -124,7 +125,9 @@ operating playbook — before acting. In short:
   interventions and hard-stops at the cap (`budget_exhausted`); a per-call ~$10 max-output-token
   cap bounds any single call. Pass `results_dir` to `meta_summarize`/`deep_research` so they
   self-log their cost — do NOT also `append_intervention` it (double-count). A standalone grounding
-  call you run between clusters is tagged `purpose=grounding` and folded into the same ledger. If
+  call you run between clusters works the same way: pass `results_dir` + `purpose:"grounding"` to
+  `mutate.py` so it self-logs (full request/response + cost, `kind=grounding`) into the same
+  ledger — never also `append_intervention` it. If
   `run.json` is ever corrupted the ledger is rebuilt by recomputing from the journal streams; the
   only spend a recompute can't recover is a boot-time embedding logged before the first window.
 - **This repo's shinka is the only one used.** `run_window` asserts `shinka`
@@ -209,14 +212,18 @@ the taper). Recover any kill with `run_window.py --resume`. Use `--warmup` (its 
 per-step trace) for boot oversight — and once a warmup looks completely normal, keep it
 (`--accept-warmup`) and let the real run continue from it; use `--windows 1 --trace-steps` for the
 one measure window after a framework change. The one failure self-caffeinate can't beat is
-**sandbox idle-reclaim** of the backgrounded launcher→`run_window`→eval group when the agent's
-session goes idle (a missed wake). This barely happens as long as you don't spawn a subagent to
-make external LLM queries — which by design you shouldn't — but guard it with a short self-wake
-**heartbeat**: a backgrounded ~5-minute timer that re-invokes you and re-checks
-`journal/windows.jsonl` / `run.json` liveness each wake, re-armed until run_window's clean exit
-fires (`--resume` only recovers after the fact). (The user keeps the laptop lid open and on AC — a
-clamshelled laptop hardware-sleeps regardless, which no caffeinate can prevent.) See SKILL.md
-"How you launch the inner loop".
+**sandbox idle-reclaim** of the backgrounded launcher→`run_window`→eval group (a missed wake).
+Two facts about it: (i) reclaim triggers on SESSION dormancy past a variable threshold (~16–49
+min measured), subagents or not — ticks that keep the session non-dormant are what prevent it;
+(ii) separately, never spawn a SUBAGENT that makes external LLM calls — the main session
+launching `run_window`, which itself calls Azure, is the designed path. The guard is a single
+persistent **Monitor** armed at launch: a watch script over the run's journal that emits a
+~4-minute tick (each tick re-invokes the session and is acked with one short no-tool line), plus
+stall alerts and window events; it stays armed across clusters until the run terminates
+(TaskStop it then). `run_window`'s clean exit is still the real wake; `--resume` still recovers
+any kill. (The user keeps the laptop lid open and on AC — a clamshelled laptop hardware-sleeps
+regardless, which no caffeinate can prevent.) See SKILL.md "Launch the inner loop and get
+woken".
 
 The cluster returns control on stagnation or at the work-score taper boundary; you read
 the diagnostics, optionally rewrite a mutable strategy file via the snapshot → reason →
@@ -264,7 +271,7 @@ git push -u origin <branch>        # origin = dtlics/ShinkaEvolve.git
 - Do not read a prior run's archive (`orchestrator/run_archive/`) while running a new job — those are for the user's later reference only, not run inputs.
 - Do not read the doc archive (`docs/archive/`) as current guidance. It holds APPLIED / SUPERSEDED fix plans and past audits (`FIX_PLAN_*`, `AUDIT_*`) kept for historical reference ONLY — each describes a PAST state of the repo, not what to do now. The live, authoritative guidance is THIS file (`CLAUDE.md`) + `.claude/skills/shinka-orchestrator/SKILL.md`. A stale "PLAN ONLY" / "nothing applied" banner inside an archived plan does NOT mean there is work to do.
 - Do not manually kill a slow backgrounded Azure mutate/meta/DR call — cost books only on a terminal status, so a kill leaks unlogged billed spend; let it ride the 3600s wall. To stop a `run_window` cluster, write `<results_dir>/.stop` then `--resume` (never `Stop-Process`).
-- Do not identify, check, or kill a `run_window` by bare OS PID or a process-name scan (`Get-Process`/`tasklist`/`pkill -f run_window`) — OS PIDs are reused across worktrees, so a PID check or kill can land on ANOTHER session's run. A run IS its `results_dir`: check liveness by journal progress (`journal/run.json` `updated_at` + `windows.jsonl`), stop it by writing `<results_dir>/.stop`, recover it with `--resume`. `run_window` holds an exclusive OS lock on `<results_dir>/.run.lock` for its lifetime (kernel-released on any death), so a re-launched/second run on a live `results_dir` refuses to start instead of double-writing — a wrong "it's dead" guess is harmless.
+- Do not identify, check, or kill a `run_window` by bare OS PID or a process-name scan (`Get-Process`/`tasklist`/`pkill -f run_window`) — OS PIDs are reused across worktrees, so a PID check or kill can land on ANOTHER session's run. A run IS its `results_dir`: check liveness by journal progress (`journal/run.json` `updated_at` + `windows.jsonl`), stop it by writing `<results_dir>/.stop`, recover it with `--resume`. `run_window` holds an exclusive OS lock on `<results_dir>/.run.lock` for its lifetime (kernel-released on any death) — one lock per `results_dir` guarding EVERY mode, `--warmup` and `--accept-warmup` included — so a re-launched/second run on a live `results_dir` refuses to start instead of double-writing — a wrong "it's dead" guess is harmless.
 - Do not run two `run_window`s on one `results_dir`, and to keep concurrent worktree sessions independent always launch from the worktree's own `results_dir` with a unique `run_id` — a relative `results_dir` is anchored to the config-file directory (not the launch CWD), so distinct configs ⇒ distinct run dirs ⇒ distinct locks.
 - Do not finalize a run as `stopped_by_user` (or any terminal status) on your own initiative: `budget_exhausted` and `stagnation_intervention_exhausted` are finalized BY THE HARNESS, and `stopped_by_user` is valid ONLY when the user literally typed a stop message in the live conversation. Never infer/remember/assume a user stop; "it feels done" is not a stop.
 - Do not re-introduce any "no-spoil" machinery (a `use_text_feedback` gate, evaluator-text stripping, a boot spoiling self-check). Held-out numbers belong under the evaluator's `private` metrics at task setup, and evaluator text feedback is ALWAYS fed to the inner loop. If a value the evaluator must show would still reveal the trick, STOP and ask the user — do not add a gate.

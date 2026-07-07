@@ -473,6 +473,10 @@ def test_meta_island_directions():
     out2 = meta_summarize.main(
         {"mock": True, "mock_text": '{"directions": [], "failure_note": ""}', "goal": "g"})
     assert out2["island_directions"] == []  # absent key → []
+    # A PARSED but directionless reply is the NORMAL case (the prompt routes every idea
+    # into `islands`) — it must yield directions == [], NOT trip the raw-text fallback
+    # (which would stuff the whole JSON blob in as a phantom global direction).
+    assert out2["directions"] == [], out2["directions"]
     return None
 
 
@@ -1046,29 +1050,40 @@ def test_meta_summarize_parsing():
     assert abs(out["directions"][0]["weight"] - 0.7) < 1e-9
     assert "timeout" in out["failure_note"].lower()
 
-    # Non-JSON fallback: keep the raw text as one direction, empty failure_note.
+    # Non-JSON fallback: ONLY an unparseable reply keeps the raw text as one direction.
     out2 = meta_summarize.main({"mock": True, "mock_text": "just iterate harder", "max_recommendations": 5})
     assert len(out2["directions"]) == 1 and out2["directions"][0]["text"] == "just iterate harder"
     assert out2["failure_note"] == ""
+
+    # Fallback gated on ACTUAL parse failure: a PARSED reply that routes everything into
+    # `islands` (no top-level directions) yields directions == [] — the raw JSON must NOT
+    # come back as a phantom global direction (it would pollute prior_recommendations).
+    islands_only = ('{"failure_note": "fn", "islands": [{"island_idx": 0, '
+                    '"directions": [{"text": "greedy", "weight": 1.0}]}]}')
+    out3 = meta_summarize.main({"mock": True, "mock_text": islands_only, "max_recommendations": 5})
+    assert out3["directions"] == [], out3["directions"]
+    assert out3["islands"] and out3["islands"][0]["island_idx"] == 0, out3["islands"]
+    assert out3["failure_note"] == "fn"
     return None
 
 
 def test_meta_direction_sampling():
-    """Weighted sampling of a brief's directions still works (used inside the meta round). The
-    per-gen composer no longer reads a global-directions channel: an island with no brief yet
-    just gets a neutral placeholder (the prompt still carries modes/inspirations/task), so
-    island differentiation rides entirely on the per-island briefs."""
-    import random as _r
+    """No global-directions channel: the dead per-gen weighted sampler
+    (_sample_meta_direction) is DELETED from run_window (brief-direction sampling lives
+    in sample_parent._sample_direction), and the per-gen composer returns a neutral
+    placeholder regardless of evo — island differentiation rides entirely on the
+    per-island briefs; the persistent failure caution rides as its own always-on
+    `failure_note` field."""
+    import random as _r  # noqa: F401 (kept for parity with the sibling sampler test)
 
     sys.path.insert(0, str(_ORCH / "harness"))
     import run_window
 
-    dirs = [{"text": "A", "weight": 1.0}, {"text": "B", "weight": 0.0}]
-    picks = {run_window._sample_meta_direction(dirs, _r.Random(i)) for i in range(20)}
-    assert picks == {"A"}, picks  # zero-weight arm never chosen
+    # Dead-code sweep: the helper is gone (a rewrite re-adding a global-directions
+    # sampler to run_window would resurrect the phantom channel).
+    assert not hasattr(run_window, "_sample_meta_direction")
 
-    # No global-directions channel: the composer returns a neutral placeholder regardless of
-    # evo, and the persistent failure caution rides as its own always-on `failure_note` field.
+    # The composer returns a neutral placeholder regardless of evo.
     ph = run_window._compose_meta_for_gen(
         {"meta_directions": [{"text": "tryX", "weight": 1.0}],
          "meta_failure_note": "watch runtime/timeouts", "seed": 0}, 3)
@@ -1330,7 +1345,8 @@ def test_failure_note_always_rendered():
 def test_island_brief_roundtrip():
     """Phase 2 (2A — H1): a per-island brief recorded for ONE island reads back for
     that island and is None for others — the mechanism that lets islands carry
-    DIFFERENT directions. Latest-wins; no brief => None (global-direction fallback)."""
+    DIFFERENT directions. Latest-wins; no brief => None (the gen then gets the constant
+    no-brief placeholder from _compose_meta_for_gen — there is no global-direction channel)."""
     from shinka.database import ProgramDatabase, DatabaseConfig
 
     sys.path.insert(0, str(_ORCH / "scripts"))
@@ -1610,19 +1626,22 @@ def test_bandit_reward_ranking():
 
 
 def test_meta_direction_sampling_weighted():
-    """M19: directions are sampled BY WEIGHT, not argmax — a 3:1 weight yields roughly
-    3:1 frequency and the low-weight arm still appears (the degenerate {1,0} case could
-    not distinguish weighted sampling from 'always pick the top')."""
+    """M19: a brief's directions are sampled BY WEIGHT, not argmax — a 3:1 weight yields
+    roughly 3:1 frequency and the low-weight arm still appears. The sampler now lives in
+    sample_parent._sample_direction (run_window's dead global-channel copy was deleted)."""
     import random as _r
 
-    sys.path.insert(0, str(_ORCH / "harness"))
-    import run_window
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import sample_parent
 
     dirs = [{"text": "A", "weight": 3.0}, {"text": "B", "weight": 1.0}]
-    picks = [run_window._sample_meta_direction(dirs, _r.Random(i)) for i in range(400)]
+    picks = [sample_parent._sample_direction(dirs, _r.Random(i))["text"] for i in range(400)]
     a, b = picks.count("A"), picks.count("B")
     assert b > 0, "weighted sampling must still pick the low-weight arm (not argmax)"
     assert 2.0 < a / b < 5.0, (a, b)  # ~3:1
+    # zero-total weights degrade to a uniform choice (no ZeroDivision / crash)
+    z = sample_parent._sample_direction([{"text": "X", "weight": 0.0}], _r.Random(0))
+    assert z["text"] == "X"
 
 
 def test_validate_bundle():
@@ -3079,9 +3098,12 @@ def test_l80_cleanup_warmup_honest():
 
 
 def test_s2_accept_warmup_folds_approved():
-    # S2 keep-approved fold-back: accept_warmup copies the approved warmup archive into the real
-    # db, folds its spend DURABLY into the real ledger, cleans up the warmup, and refuses to
+    # S2 keep-approved fold-back: accept_warmup folds the approved warmup archive into the
+    # real db via the sqlite BACKUP API (WAL-safe: an unclean warmup shutdown's -wal tail
+    # must land in the real db — a raw copy2 of the main file alone would silently drop it),
+    # folds its spend DURABLY into the real ledger, cleans up the warmup, and refuses to
     # clobber a started real run.
+    import sqlite3
     import tempfile
     sys.path.insert(0, str(_ORCH / "harness"))
     import run_window
@@ -3091,7 +3113,33 @@ def test_s2_accept_warmup_folds_approved():
         warm = os.path.join(rd, "warmup")
         os.makedirs(warm)
         wdb = os.path.join(warm, "programs.sqlite")
-        open(wdb, "wb").write(b"FAKE_SQLITE")  # copied verbatim; content irrelevant here
+        # Build a REAL warmup db in WAL mode whose committed rows still live in the -wal
+        # tail (never checkpointed into the main file) — the unclean-shutdown shape.
+        src = os.path.join(td, "src.sqlite")
+        conn = sqlite3.connect(src)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE t (x INTEGER)")
+            conn.executemany("INSERT INTO t VALUES (?)", [(1,), (2,), (3,)])
+            conn.commit()
+            # Snapshot main-db + -wal WHILE the connection is open (close would checkpoint,
+            # emptying the WAL and hiding the regression this test exists to catch).
+            import shutil as _sh
+            _sh.copy2(src, wdb)
+            _sh.copy2(src + "-wal", wdb + "-wal")
+        finally:
+            conn.close()
+        # Sanity: the copied MAIN file alone (what copy2 used to promote) is missing the
+        # tail — hide the -wal for a moment and look at the bare main file.
+        os.rename(wdb + "-wal", wdb + "-wal.hidden")
+        _bare = sqlite3.connect(wdb)
+        try:
+            _n_bare = _bare.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='t'").fetchone()[0]
+        finally:
+            _bare.close()
+        os.rename(wdb + "-wal.hidden", wdb + "-wal")
+        assert _n_bare == 0, "precondition: rows must still be only in the -wal tail"
         journal.init_run(warm, {"run_id": "w"})
         journal.add_cost(warm, 0.25)  # warmup spend to fold
         cfg = {
@@ -3103,21 +3151,29 @@ def test_s2_accept_warmup_folds_approved():
             "budget_usd": 10.0,
             "run_id": "r",
         }
-        # Stub the live-count so the test needs no real sqlite schema.
+        # Stub the live-count so the test needs no real shinka schema.
         orig = run_window.archive_query.main
         run_window.archive_query.main = lambda payload: {"result": {"live": 3, "total": 3}}
         try:
             res = run_window.accept_warmup(cfg)
             assert res["accepted"] is True, res
             assert res["live_programs"] == 3 and abs(res["folded_cost_usd"] - 0.25) < 1e-9
-            assert os.path.exists(cfg["db_path"]), "warmup archive not copied to real db"
+            assert os.path.exists(cfg["db_path"]), "warmup archive not folded into real db"
+            # WAL-safety: the rows that lived only in the -wal tail made it into the real db.
+            rconn = sqlite3.connect(cfg["db_path"])
+            try:
+                assert rconn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 3, (
+                    "the -wal tail was dropped — accept_warmup must fold via the backup API")
+            finally:
+                rconn.close()
             assert not os.path.isdir(warm), "warmup workspace not cleaned after accept"
             # spend folded into the real ledger...
             assert abs(journal.total_cost(rd) - 0.25) < 1e-9
             # ...and DURABLY (recoverable from interventions.jsonl if run.json is lost)
             os.remove(os.path.join(rd, "journal", "run.json"))
             assert abs(journal.total_cost(rd) - 0.25) < 1e-9, "fold not durable in the stream"
-            # refuse to clobber a started real run (real db now exists)
+            # refuse to clobber a started real run (real db now exists) — refuses BEFORE
+            # touching sqlite, so a placeholder warmup file suffices here.
             os.makedirs(warm)
             open(wdb, "wb").write(b"X")
             res2 = run_window.accept_warmup(cfg)
@@ -3496,6 +3552,450 @@ def test_novelty_logging_stream():
     return None
 
 
+def test_log_llm_content_cap_and_counter():
+    # Inner-loop forensics: log_llm_content writes ONE JSON detail file per call under
+    # journal/llm_content/, keeps a running byte total in .bytes, and SKIPS writes once
+    # the total would exceed the per-run cap (never raising to the caller).
+    import json as _json
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import journal
+
+    with tempfile.TemporaryDirectory() as td:
+        p1 = journal.log_llm_content(td, 3, 0, "mutation",
+                                     {"model": "m", "patch_sys": "S", "patch_msg": "M",
+                                      "raw_response": "R"})
+        assert p1 and os.path.exists(p1), p1
+        assert os.path.basename(p1) == "gen00003_a0_mutation.json", p1
+        detail = _json.loads(open(p1, encoding="utf-8").read())
+        assert detail["patch_sys"] == "S" and detail["raw_response"] == "R", detail
+        bytes_path = os.path.join(td, "journal", "llm_content", ".bytes")
+        t1 = int(open(bytes_path, encoding="utf-8").read().strip())
+        assert t1 == os.path.getsize(p1), (t1, os.path.getsize(p1))
+        # a second call INCREMENTS the counter (distinct file: fix attempt 1)
+        p2 = journal.log_llm_content(td, 3, 1, "fix", {"raw_response": "F"})
+        assert p2 and p2 != p1
+        t2 = int(open(bytes_path, encoding="utf-8").read().strip())
+        assert t2 == t1 + os.path.getsize(p2), (t1, t2)
+
+        # cap: once the running total would exceed it, the write is SKIPPED (None, no file)
+        orig_cap = journal._LLM_CONTENT_CAP_BYTES
+        journal._LLM_CONTENT_CAP_BYTES = t2  # any further write busts the cap
+        try:
+            p3 = journal.log_llm_content(td, 4, 0, "mutation", {"raw_response": "X" * 100})
+            assert p3 is None, p3
+            assert not os.path.exists(os.path.join(td, "journal", "llm_content",
+                                                   "gen00004_a0_mutation.json"))
+            # counter untouched by the skipped write
+            assert int(open(bytes_path, encoding="utf-8").read().strip()) == t2
+        finally:
+            journal._LLM_CONTENT_CAP_BYTES = orig_cap
+    return None
+
+
+def test_discovery_usable_flag_authoritative():
+    # The explicit response.usable flag in the detail blob is AUTHORITATIVE: a stub whose
+    # free-text summary happens to mention a refusal but whose detail says usable:true now
+    # COUNTS; usable:false still disqualifies; the summary substring screen is only the
+    # FALLBACK when the detail is missing/unreadable or carries no usable key.
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import journal
+
+    def _fresh(td):
+        journal.init_run(td, {"run_id": "d"})
+        journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
+                                         "work_audit": 1, "timestamp": 1000.0})
+
+    # (a) summary mentions a refusal in passing, detail usable:true → COUNTS
+    with tempfile.TemporaryDirectory() as td:
+        _fresh(td)
+        journal.log_call(td, "dr", {"query": "q"},
+                         {"usable": True, "brief": ["use X"]},
+                         cost=0.0, summary="found X after Azure refused the pivot")
+        got = journal.discovery_in_interval(td)
+        assert len(got) == 1 and got[0]["kind"] == "dr", got
+
+    # (b) clean summary but detail usable:false → still skipped (flag wins both ways)
+    with tempfile.TemporaryDirectory() as td:
+        _fresh(td)
+        journal.log_call(td, "dr", {"query": "q"}, {"usable": False, "brief": []},
+                         cost=0.0, summary="DR: 1 direction")
+        assert journal.discovery_in_interval(td) == []
+
+    # (c) detail MISSING → falls back to the summary substring screen (both polarities)
+    with tempfile.TemporaryDirectory() as td:
+        _fresh(td)
+        p_ref = journal.log_call(td, "dr", {"query": "q"}, {"brief": []},
+                                 cost=0.0, summary="DR REFUSED: no usable direction")
+        p_ok = journal.log_call(td, "dr", {"query": "q"}, {"brief": ["d"]},
+                                cost=0.0, summary="DR: 1 direction")
+        os.remove(p_ref)
+        os.remove(p_ok)
+        got = journal.discovery_in_interval(td)
+        assert len(got) == 1 and got[0]["summary"] == "DR: 1 direction", got
+
+    # (d) detail present but WITHOUT a usable key → summary screen decides
+    with tempfile.TemporaryDirectory() as td:
+        _fresh(td)
+        journal.log_call(td, "dr", {"query": "q"}, {"brief": []},
+                         cost=0.0, summary="unusable output")
+        journal.log_call(td, "archive_analyst", {"query": "q"}, {"brief": ["d"]},
+                         cost=0.0, summary="analyst: 1 direction")
+        got = journal.discovery_in_interval(td)
+        assert len(got) == 1 and got[0]["kind"] == "archive_analyst", got
+    return None
+
+
+def test_mutate_standalone_selflog():
+    # WS7 parity for standalone orchestrator calls: mutate.main with results_dir + a
+    # non-"proposer" purpose self-logs the FULL call via journal.log_call (a calls.jsonl
+    # pointer row of kind=<purpose>) and folds its cost into the run ledger; the inner
+    # loop (purpose proposer / no results_dir) logs NOTHING (its cost flows via
+    # window_cost only, so double-count protection needs BOTH guards).
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import journal
+    import mutate
+
+    parent = "# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n"
+    full_reply = (
+        "<NAME>\ng\n</NAME>\n<DESCRIPTION>\nd\n</DESCRIPTION>\n"
+        "<CODE>\n```python\n# EVOLVE-BLOCK-START\nx = 2\n# EVOLVE-BLOCK-END\n```\n</CODE>\n"
+    )
+
+    def _payload(td, **kw):
+        base = {"parent_code": parent, "patch_dir": td, "language": "python",
+                "patch_type": "fix", "model_name": "azure-x",
+                "mock": True, "mock_patch": full_reply, "mock_cost": 0.75}
+        base.update(kw)
+        return base
+
+    # grounding purpose + results_dir → ONE calls.jsonl row, cost folded into the ledger
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "g"})
+        out = mutate.main(_payload(td, results_dir=td, purpose="grounding"))
+        assert out["applied"] is True, out
+        rows = journal.read_calls(td, kind="grounding")
+        assert len(rows) == 1, rows
+        assert "applied" in rows[0]["summary"], rows[0]
+        detail = journal.read_call(td, rows[0]["file"])
+        assert detail["response"]["candidate_code"] == out["candidate_code"], detail
+        assert abs(journal.total_cost(td) - 0.75) < 1e-9, journal.total_cost(td)
+
+    # purpose "proposer" (the inner loop) → NOTHING logged even with results_dir set
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "p"})
+        mutate.main(_payload(td, results_dir=td, purpose="proposer"))
+        assert journal.read_calls(td) == []
+        assert journal.total_cost(td) == 0.0
+
+    # no results_dir (run_window's mut/fix payloads never pass it) → nothing to log
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "n"})
+        mutate.main(_payload(td, purpose="grounding"))
+        assert journal.read_calls(td) == []
+    return None
+
+
+def test_novelty_scope_lever():
+    # evo.novelty_scope: "island" (default) gates within the parent's island (payload
+    # island_idx = the parent's island); "global" compares against the WHOLE archive
+    # (payload island_idx None). Checked at BOTH levels: the run_window payload decision
+    # (captured via a stubbed novelty_check in a mock window) and novelty_check.py's
+    # island filter itself.
+    import dataclasses as _dc
+    import tempfile
+
+    from shinka.database import DatabaseConfig, Program, ProgramDatabase
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import novelty_check
+    import run_window
+
+    # --- novelty_check.py: island_idx set filters to that island; None scans globally.
+    def _mk(pid, isl, emb):
+        kw = {}
+        for f in _dc.fields(Program):
+            if f.default is not _dc.MISSING or f.default_factory is not _dc.MISSING:
+                continue
+            tn = getattr(f.type, "__name__", str(f.type))
+            kw[f.name] = {"str": "", "int": 0, "float": 0.0, "bool": False}.get(tn, None)
+        kw.update(id=pid, code=f"# {pid}\n", combined_score=0.5, correct=True,
+                  embedding=emb, island_idx=isl)
+        names = {f.name for f in _dc.fields(Program)}
+        if "generation" in names:
+            kw.setdefault("generation", 0)
+        if "language" in names:
+            kw["language"] = "python"
+        p = Program(**kw)
+        p.metadata = {}
+        return p
+
+    with tempfile.TemporaryDirectory() as td:
+        dbp = os.path.join(td, "p.sqlite")
+        # ONE island: a multi-island db seeds COPIES of the first program onto every
+        # island (fresh ids), which would leak the incumbent into the "other" island.
+        cfg = {"num_islands": 1, "archive_size": 20}
+        db = ProgramDatabase(DatabaseConfig(db_path=dbp, **cfg), embedding_model="", read_only=False)
+        try:
+            inc = _mk("inc", 0, [1.0, 0.0])
+            db.add(inc)
+            # force the incumbent onto island 0 regardless of add()'s own allocation
+            db.cursor.execute("UPDATE programs SET island_idx = 0 WHERE id = 'inc'")
+            db.conn.commit()
+        finally:
+            db.close()
+        q = {"db_path": dbp, "db_config": cfg, "candidate_embedding": [1.0, 0.0],
+             "code_embed_sim_threshold": 0.99}
+        # other-island scope: the incumbent is invisible → accept, nothing compared
+        out_isl = novelty_check.main({**q, "island_idx": 1})
+        assert out_isl["accept"] is True and out_isl["n_compared"] == 0, out_isl
+        # global scope (island_idx None): the identical incumbent blocks it
+        out_glob = novelty_check.main({**q, "island_idx": None})
+        assert out_glob["accept"] is False and out_glob["most_similar_id"] == "inc", out_glob
+
+    # --- run_window payload decision: capture what the window hands novelty_check.
+    def _cfg(rd, scope):
+        os.makedirs(rd, exist_ok=True)
+        ip = os.path.join(rd, "i.py")
+        open(ip, "w").write("# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n")
+        evo = {"window_size": 1, "patch_types": ["diff"], "patch_type_probs": [1.0],
+               "embedding_model": "text-embedding-3-small", "enable_novelty": True,
+               "seed": 0, "auto_meta": False}
+        if scope is not None:
+            evo["novelty_scope"] = scope
+        return {
+            "results_dir": rd, "run_id": "ns", "budget_usd": 100.0,
+            "task": {"eval_program_path": "unused.py", "init_program_path": ip,
+                     "task_sys_msg": "x", "language": "python"},
+            "db_config": {"num_islands": 1, "archive_size": 20},
+            "evo": evo,
+            "mock": {"enabled": True, "mutate_cost": 0.0,
+                     "scores_by_generation": {str(i): 1.0 + 0.01 * i for i in range(40)}},
+            "cadence": {"mode": "until_decision", "max_windows_per_call": 1},
+            "window_state": {"window_index": 0, "prior_low_streak": 0},
+        }
+
+    captured: list = []
+    orig_nc = run_window.novelty_check_script.main
+
+    def _capture(payload):
+        captured.append(payload)
+        return {"accept": True, "max_similarity": 0.0, "most_similar_id": None,
+                "most_similar_score": None, "n_compared": 1}
+
+    run_window.novelty_check_script.main = _capture
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            run_window.main(_cfg(os.path.join(td, "run"), "global"))
+            assert captured, "novelty gate never ran"
+            assert all(p["island_idx"] is None for p in captured), captured
+        captured.clear()
+        with tempfile.TemporaryDirectory() as td:
+            run_window.main(_cfg(os.path.join(td, "run"), None))  # default scope: island
+            assert captured, "novelty gate never ran"
+            assert all(p["island_idx"] is not None for p in captured), captured
+    finally:
+        run_window.novelty_check_script.main = orig_nc
+    return None
+
+
+def test_prebrief_inspiration_mode():
+    # Pre-brief (no island brief yet) exemplar policy: "top" (default) exploits the score
+    # ranking (best non-parent program leads top_k); "random" draws a uniform sample of the
+    # same count from the island's correct pool — valid ids, never the parent.
+    import dataclasses as _dc
+    import tempfile
+
+    from shinka.database import DatabaseConfig, Program, ProgramDatabase
+
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import sample_parent
+
+    def _mk(pid, score):
+        kw = {}
+        for f in _dc.fields(Program):
+            if f.default is not _dc.MISSING or f.default_factory is not _dc.MISSING:
+                continue
+            tn = getattr(f.type, "__name__", str(f.type))
+            kw[f.name] = {"str": "", "int": 0, "float": 0.0, "bool": False}.get(tn, None)
+        kw.update(id=pid, code=f"# {pid}\nx = 1\n", combined_score=score, correct=True)
+        names = {f.name for f in _dc.fields(Program)}
+        if "generation" in names:
+            kw.setdefault("generation", 0)
+        if "language" in names:
+            kw["language"] = "python"
+        p = Program(**kw)
+        p.metadata = {}
+        return p
+
+    with tempfile.TemporaryDirectory() as td:
+        dbp = os.path.join(td, "p.sqlite")
+        cfg = {"num_islands": 1, "archive_size": 20}
+        db = ProgramDatabase(DatabaseConfig(db_path=dbp, **cfg), embedding_model="", read_only=False)
+        try:
+            for pid, s in (("best", 0.9), ("mid", 0.5), ("low", 0.2), ("tiny", 0.1)):
+                db.add(_mk(pid, s))
+        finally:
+            db.close()
+        base = {"db_path": dbp, "db_config": cfg, "embedding_model": "", "seed": 0}
+        all_ids = {"best", "mid", "low", "tiny"}
+
+        # default/"top": the highest-scoring non-parent leads top_k (score-ranked)
+        out = sample_parent.main({**base, "prebrief_inspiration_mode": "top"})
+        expected_top = "best" if out["parent_id"] != "best" else "mid"
+        assert out["top_k_inspiration_ids"][0] == expected_top, out
+        out_default = sample_parent.main(dict(base))  # omitted → same "top" policy
+        assert out_default["top_k_inspiration_ids"][0] == (
+            "best" if out_default["parent_id"] != "best" else "mid"), out_default
+
+        # "random": same COUNT of inspirations, valid ids, parent excluded
+        n_top = len(out["top_k_inspiration_ids"])
+        n_arch = len(out["archive_inspiration_ids"])
+        out_r = sample_parent.main({**base, "prebrief_inspiration_mode": "random"})
+        insp = out_r["top_k_inspiration_ids"] + out_r["archive_inspiration_ids"]
+        assert len(out_r["top_k_inspiration_ids"]) == n_top, out_r
+        assert len(out_r["archive_inspiration_ids"]) == n_arch, out_r
+        assert set(insp) <= all_ids - {out_r["parent_id"]}, out_r
+        assert len(set(insp)) == len(insp), out_r  # no duplicates (a sample, not choices)
+
+        # across seeds, "random" actually varies the exemplars (not argmax in disguise)
+        seen = set()
+        for s in range(12):
+            o = sample_parent.main({**base, "seed": s, "prebrief_inspiration_mode": "random"})
+            seen.update(o["top_k_inspiration_ids"])
+        assert len(seen) > 1, seen
+    return None
+
+
+def test_error_history_accumulation():
+    # Owner design: a still-incorrect candidate archives its WHOLE failure history.
+    # _head_tail_trunc bounds each entry (~2KB, head+tail); _attempt_immediate_fixes
+    # appends one entry per failed fix attempt (including patch-did-not-apply notes)
+    # to the caller-owned list seeded with the original attempt's error.
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    # helper: small text passes through; big text is head+tail with a truncation marker
+    small = run_window._head_tail_trunc("boom")
+    assert small == "boom"
+    big = run_window._head_tail_trunc("A" * 3000 + "Z" * 3000)
+    assert len(big) <= 2048 + len("\n[... truncated ...]\n"), len(big)
+    assert big.startswith("A") and big.endswith("Z") and "[... truncated ...]" in big
+
+    orig_cmp = run_window.construct_mutation_prompt.main
+    orig_mut = run_window.mutate.main
+    orig_eval = run_window._evaluate_candidate
+    try:
+        run_window.construct_mutation_prompt.main = lambda p: {
+            "patch_sys": "s", "patch_msg": "m", "patch_type": "fix"}
+        ev0 = {"correct": False, "combined_score": 0.0, "error_traceback": "original boom",
+               "stdout_log": "", "stderr_log": ""}
+        mut0 = {"candidate_code": "broken", "candidate_path": "/tmp/b.py", "cost": 0.0}
+        with tempfile.TemporaryDirectory() as td:
+            cfg = {"results_dir": td, "task": {"task_sys_msg": "g"},
+                   "evo": {"enable_novelty": False, "log_llm_content": False},
+                   "budget_usd": None}
+
+            # attempt 1: patch does not apply; attempt 2: applies but still fails
+            calls = {"n": 0}
+
+            def _mut(p):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return {"candidate_code": "broken", "candidate_path": "/tmp/b.py",
+                            "cost": 0.1, "applied": False, "error": "no SEARCH block"}
+                return {"candidate_code": "still broken", "candidate_path": "/tmp/c.py",
+                        "cost": 0.1, "applied": True}
+
+            run_window.mutate.main = _mut
+            run_window._evaluate_candidate = lambda *a, **k: {
+                "correct": False, "combined_score": 0.0,
+                "error_traceback": "fix attempt still boom", "stdout_log": "", "stderr_log": ""}
+            hist = [run_window._head_tail_trunc(ev0["error_traceback"])]  # caller seeds it
+            counters = {"cost": 0.0, "iter_index": 0}
+            ev, mut, _fc = run_window._attempt_immediate_fixes(
+                cfg, dict(ev0), dict(mut0), None, "azure-x", "medium", td, td, 5,
+                "python", 2, counters, error_history=hist)
+            assert ev["correct"] is False
+            assert len(hist) == 3, hist  # original + did-not-apply + still-failing eval
+            assert hist[0] == "original boom"
+            assert "patch did not apply" in hist[1] and "no SEARCH block" in hist[1], hist[1]
+            assert hist[2] == "fix attempt still boom", hist[2]
+
+            # error_history=None (default) stays a no-op — no AttributeError on append
+            counters = {"cost": 0.0, "iter_index": 0}
+            calls["n"] = 0
+            run_window._attempt_immediate_fixes(
+                cfg, dict(ev0), dict(mut0), None, "azure-x", "medium", td, td, 5,
+                "python", 2, counters)
+    finally:
+        run_window.construct_mutation_prompt.main = orig_cmp
+        run_window.mutate.main = orig_mut
+        run_window._evaluate_candidate = orig_eval
+    return None
+
+
+def test_repair_prompt_no_inspirations():
+    # Owner design: a REPAIR prompt (needs_fix) carries NO inspirations — just fix the
+    # parent. Captured from a real mock repair window (the same lifecycle as
+    # test_repair_mode_lifecycle); a normal mutation prompt is unaffected.
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    def _cfg(rd):
+        os.makedirs(rd, exist_ok=True)
+        ip = os.path.join(rd, "i.py")
+        open(ip, "w").write("# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n")
+        return {
+            "results_dir": rd, "run_id": "rp", "budget_usd": 100.0,
+            "task": {"eval_program_path": "unused.py", "init_program_path": ip,
+                     "task_sys_msg": "x", "language": "python"},
+            "db_config": {"num_islands": 1, "archive_size": 20},
+            "evo": {"window_size": 1, "patch_types": ["diff"], "patch_type_probs": [1.0],
+                    "embedding_model": "text-embedding-3-small", "enable_novelty": False,
+                    "seed": 0, "auto_meta": False, "repair_trigger_fraction": 0.2,
+                    "repair_attempt_cap": 2, "fix_retry_budget": 0},
+            "mock": {"enabled": True, "mutate_cost": 0.0,
+                     "scores_by_generation": {str(i): 1.0 for i in range(40)},
+                     "incorrect_generations": [1, 2, 3]},  # gen1 errored; repairs fail
+            "cadence": {"mode": "until_decision", "max_windows_per_call": 1},
+            "window_state": {"window_index": 0, "prior_low_streak": 0},
+        }
+
+    seen: list = []
+    orig_cmp = run_window.construct_mutation_prompt.main
+
+    def _spy(payload):
+        seen.append({"needs_fix": bool(payload.get("needs_fix")),
+                     "ancestors": list(payload.get("ancestor_inspirations") or [])})
+        return orig_cmp(payload)
+
+    run_window.construct_mutation_prompt.main = _spy
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            rd = os.path.join(td, "run")
+            cfg = _cfg(rd)
+            run_window.main(cfg)   # window 0: normal gen → errored child
+            run_window.main(cfg)   # window 1: repair mode ON → needs_fix prompt
+        fix_prompts = [s for s in seen if s["needs_fix"]]
+        assert fix_prompts, "repair window produced no needs_fix prompt"
+        assert all(s["ancestors"] == [] for s in fix_prompts), fix_prompts
+    finally:
+        run_window.construct_mutation_prompt.main = orig_cmp
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
@@ -3587,6 +4087,13 @@ if __name__ == "__main__":
         ("termination_streak", test_termination_streak),
         ("discovery_in_interval", test_discovery_in_interval),
         ("novelty_logging_stream", test_novelty_logging_stream),
+        ("log_llm_content_cap_and_counter", test_log_llm_content_cap_and_counter),
+        ("discovery_usable_flag_authoritative", test_discovery_usable_flag_authoritative),
+        ("mutate_standalone_selflog", test_mutate_standalone_selflog),
+        ("novelty_scope_lever", test_novelty_scope_lever),
+        ("prebrief_inspiration_mode", test_prebrief_inspiration_mode),
+        ("error_history_accumulation", test_error_history_accumulation),
+        ("repair_prompt_no_inspirations", test_repair_prompt_no_inspirations),
     ]
     ok = True
     for name, fn in tests:

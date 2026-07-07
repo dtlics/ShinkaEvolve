@@ -355,6 +355,64 @@ def log_call(
     return fpath
 
 
+# log_llm_content 10GB per-run cap: forensics must never eat the disk. One stderr
+# warning per process once the cap trips (module-level flag, not per-call spam).
+_LLM_CONTENT_CAP_BYTES = 10_737_418_240
+_llm_content_cap_warned = False
+
+
+def log_llm_content(results_dir: str, generation: int, attempt: int, kind: str,
+                    payload: Dict[str, Any]) -> Optional[str]:
+    """Durable per-call INNER-LOOP forensics: persist ONE external LLM call's full
+    content (prompt + raw response + outcome) as JSON to
+    journal/llm_content/gen{generation:05d}_a{attempt}_{kind}.json, so every
+    mutation/fix call's request and response survive the run and can be audited
+    after the fact. Meta / deep-research (and any standalone orchestrator call)
+    are already content-logged in full via ``log_call`` (journal/calls/) — this
+    covers the high-volume per-candidate calls that path skips.
+
+    Best-effort: NEVER raises to the caller — forensics must not break a mutation.
+    Disk use is bounded by a 10GB per-run cap: a running byte total lives in
+    journal/llm_content/.bytes (read int, add this file's size, write back — a
+    single writer process owns results_dir via .run.lock, so no locking is
+    needed); once a write would push the total past the cap it is skipped and
+    ONE stderr warning is emitted per process. Returns the written path, or
+    None when capped/failed."""
+    global _llm_content_cap_warned
+    try:
+        d = os.path.join(journal_dir(results_dir), "llm_content")
+        os.makedirs(d, exist_ok=True)
+        data = json.dumps(payload, default=str)
+        size = len(data.encode("utf-8"))
+        bytes_path = os.path.join(d, ".bytes")
+        total = 0
+        try:
+            if os.path.exists(bytes_path):
+                with open(bytes_path, encoding="utf-8") as bf:
+                    total = int(bf.read().strip() or 0)
+        except Exception:
+            total = 0
+        if total + size > _LLM_CONTENT_CAP_BYTES:
+            if not _llm_content_cap_warned:
+                _llm_content_cap_warned = True
+                import sys as _sys
+
+                print(
+                    f"[journal] llm_content hit the 10GB per-run cap — skipping "
+                    f"further per-call content logs ({results_dir})",
+                    file=_sys.stderr,
+                )
+            return None
+        fpath = os.path.join(d, f"gen{int(generation):05d}_a{attempt}_{kind}.json")
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(data)
+        with open(bytes_path, "w", encoding="utf-8") as bf:
+            bf.write(str(total + size))
+        return fpath
+    except Exception:
+        return None
+
+
 def log_step(results_dir: str, record: Dict[str, Any]) -> None:
     """Append ONE per-step trace record to journal/steps.jsonl. Written ONLY when
     step tracing is on (warmup, and the framework-audit measuring window); absent in
@@ -401,9 +459,12 @@ def novelty_near_threshold(results_dir: str, margin: float = 0.02,
     the gate could plausibly have classified either way. The efficient entry point for
     tuning evo.code_embed_sim_threshold: read these compact rows (ids + numbers), then
     fetch ONLY each row's {candidate_id, most_similar_id} pair via archive_query to eyeball
-    whether they are truly similar (-> threshold too low, raise it) or genuinely different
-    (-> threshold too high, lower it) — never scanning full programs. Skips rows with no
-    comparison (n_compared==0 / missing threshold)."""
+    them — never scanning full programs. The gate rejects as near-dup when
+    max_similarity >= threshold, so a HIGHER threshold is STRICTER about what counts as a
+    near-dup (fewer rejects): a borderline pair that is truly similar means the threshold
+    is too high (near-dups are slipping through) -> LOWER it; a genuinely different pair
+    means the threshold is too low (real new work is being consolidated away) -> RAISE it.
+    Skips rows with no comparison (n_compared==0 / missing threshold)."""
     out: List[Dict[str, Any]] = []
     for r in read_novelty(results_dir, window_index=window_index):
         thr = r.get("threshold")
@@ -620,11 +681,14 @@ def discovery_in_interval(results_dir: str) -> List[Dict[str, Any]]:
 
     In-interval iff ``stub.timestamp > boundary`` (STRICT, DEC-7/O6), where boundary =
     the most-recent control_return row timestamp (0.0 ⇒ first interval). USABLE iff the
-    stub denotes >=1 returned direction: the pointer ``summary`` is not a refusal AND, when
-    the full detail file is readable, its ``response.usable`` is True (an explicit
-    ``usable:false`` from R1/R2 disqualifies it; a missing detail/usable flag is treated as
-    usable so a legitimate stub is never silently dropped). A stale stub (timestamp <=
-    boundary) never satisfies the gate."""
+    stub denotes >=1 returned direction: when the full detail file is readable and carries
+    an explicit ``response.usable``, THAT flag alone decides (False disqualifies, True
+    counts — even when the free-text pointer summary happens to mention a refusal in
+    passing, e.g. "found X after Azure refused the pivot"); the pointer-``summary``
+    substring screen ('refus'/'no usable'/'unusable') is only the FALLBACK for a stub
+    whose detail is missing/unreadable or has no usable key. A stub with neither signal
+    is treated as usable, so a legitimate stub is never silently dropped. A stale stub
+    (timestamp <= boundary) never satisfies the gate."""
     boundary = _control_return_boundary(results_dir)
     stubs = read_calls(results_dir, kind="dr") + read_calls(results_dir, kind="archive_analyst")
     out: List[Dict[str, Any]] = []
@@ -632,20 +696,24 @@ def discovery_in_interval(results_dir: str) -> List[Dict[str, Any]]:
         ts = s.get("timestamp")
         if not isinstance(ts, (int, float)) or float(ts) <= boundary:
             continue  # stale (or undated) → not in this interval
-        # Pointer-level refusal screen: a summary that reads as a refusal disqualifies.
-        summary = str(s.get("summary") or "").strip().lower()
-        if summary and ("refus" in summary or "no usable" in summary or "unusable" in summary):
-            continue
-        # Confirm against the full detail blob when present: an explicit response.usable
-        # is False disqualifies; absent flag/detail is treated as usable (fail OPEN on a
-        # legitimate stub, not closed).
-        usable = True
+        # The explicit response.usable flag in the full detail blob is AUTHORITATIVE —
+        # R1/R2 write it deliberately, while the pointer summary is free text (a usable
+        # stub may legitimately MENTION a refusal). Consult the detail first; fall back
+        # to the summary substring screen only when the detail can't answer.
+        usable: Optional[bool] = None
         file = s.get("file")
         if file:
             detail = read_call(results_dir, file)
             resp = detail.get("response") if isinstance(detail, dict) else None
             if isinstance(resp, dict) and "usable" in resp:
                 usable = bool(resp.get("usable"))
+        if usable is None:
+            # Fallback pointer-level refusal screen (detail missing/unreadable or no
+            # usable key): a summary that reads as a refusal disqualifies; otherwise
+            # treat as usable (fail OPEN on a legitimate stub, not closed).
+            summary = str(s.get("summary") or "").strip().lower()
+            usable = not (summary and ("refus" in summary or "no usable" in summary
+                                       or "unusable" in summary))
         if not usable:
             continue
         out.append(s)

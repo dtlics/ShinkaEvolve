@@ -15,16 +15,21 @@ decision): after each window the harness calls this ONCE → a ``failure_note``
 caution + a differentiated direction list PER LIVE ISLAND (the ``islands`` block),
 auto-recorded as per-island briefs so islands evolve in DIFFERENT directions by
 default. Every direction is assigned to exactly one island — there is no separate
-global-directions channel. It summarizes what the search has ALREADY tried (recent
-attempts, including failures). It is NOT the per-gen idea source: each gen reads its
-island's brief, and an island with no brief yet gets a neutral placeholder. Default
-model ``azure-gpt-5.5`` at ``medium`` effort, mutable to a stronger model (e.g. pro@high).
+global-directions channel. The meta round is ALL-INFO input (owner design): its
+user message carries the FULL archive as compact one-line rows, plus code for the
+top/recent programs AND each island's best, all under a bounded budget — the depth
+knobs (``meta_n_recent``, ``meta_code_preview_chars``) are orchestrator levers. It
+is NOT the per-gen idea source: each gen reads its island's brief, and an island
+with no brief yet gets a neutral placeholder. Default model ``azure-gpt-5.5`` at
+``medium`` effort, mutable to a stronger model (e.g. pro@high).
 
 OUTPUT CONTRACT:
   * ``directions``    — kept for back-compat but no longer the search driver: the
                         parser still accepts a top-level list if present, but the
                         prompt asks the model to place every idea in an island
-                        instead (see ``islands``), so this is normally empty.
+                        instead (see ``islands``), so this is normally empty. The
+                        raw-text fallback fills it ONLY when the reply contained
+                        no parseable JSON object at all.
   * ``failure_note``  — a concise PROSE paragraph: what tended to cause failures
                         (e.g. runtime/timeout vs correctness) and what future
                         attempts should watch for. The orchestrator writes it to
@@ -56,7 +61,8 @@ INPUT (stdin JSON):
     "islands": [ {"id": int, "best": float, "count": int} ] | null,  # live islands to differentiate
     "num_islands": int | null,
     "best_program": {"combined_score": float, "code": str} | null,
-    "n_recent": 16,
+    "meta_n_recent": 32,          # depth knob (legacy alias: n_recent)
+    "meta_code_preview_chars": 1200,  # per-program code preview cap (0 disables)
     "prior_recommendations": str | null,
     "max_recommendations": 5,
     "results_dir": str | null,   # WS7: if set, self-log the full call + fold cost into the ledger
@@ -138,7 +144,9 @@ def _gather_recent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         return []
     db_config = payload.get("db_config", {}) or {}
     embedding_model = payload.get("embedding_model", "azure-text-embedding-3-small")
-    n_recent = int(payload.get("n_recent", 16) or 16)
+    # Depth knob (orchestrator lever): run_window passes meta_n_recent; the legacy
+    # n_recent key still wins over the default so old callers keep working.
+    n_recent = int(payload.get("meta_n_recent", payload.get("n_recent", 32)) or 32)
     # F4 (mutable knob): how much of the context is recent FAILURES vs top performers.
     # Default 0.5 reproduces today's even split; raise toward 0.75 when failures
     # dominate and the distilled failure_note keeps coming back vague.
@@ -170,7 +178,36 @@ def _gather_recent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return out
 
 
-def _build_user_msg(payload: Dict[str, Any], recents: List[Dict[str, Any]]) -> str:
+def _gather_archive_full(payload: Dict[str, Any]):
+    """Archive-COMPLETE meta input (owner design: the meta round is all-info).
+    Returns (compact_rows, island_best): every live program as a one-line compact
+    row (bounded by archive_query's recency cap), plus the best CORRECT program of
+    each island WITH a code preview (capped at meta_code_preview_chars). Both are
+    best-effort — a missing db or a query error degrades to empty, never crashes."""
+    db_path = payload.get("db_path")
+    if not db_path:
+        return [], []
+    base = {"db_path": db_path, "db_config": payload.get("db_config", {}) or {},
+            "embedding_model": payload.get("embedding_model", "azure-text-embedding-3-small")}
+    compact: List[Dict[str, Any]] = []
+    island_best: List[Dict[str, Any]] = []
+    try:
+        compact = archive_query.main({**base, "query_type": "all_compact"})["result"]
+    except Exception:
+        pass
+    try:
+        island_best = archive_query.main(
+            {**base, "query_type": "island_best",
+             "code_preview_chars": int(payload.get("meta_code_preview_chars", 1200) or 0)}
+        )["result"]
+    except Exception:
+        pass
+    return compact, island_best
+
+
+def _build_user_msg(payload: Dict[str, Any], recents: List[Dict[str, Any]],
+                    compact: Optional[List[Dict[str, Any]]] = None,
+                    island_best: Optional[List[Dict[str, Any]]] = None) -> str:
     best = payload.get("best_program") or {}
     prior = payload.get("prior_recommendations")
     parts = [f"# Goal\n{payload.get('goal', '(none)')}"]
@@ -207,13 +244,13 @@ def _build_user_msg(payload: Dict[str, Any], recents: List[Dict[str, Any]]) -> s
     # direction to an existing program id it already realizes.
     islands = payload.get("islands") or []
     by_island = {}
-    for p in recents[:24]:
+    for p in recents[:48]:
         by_island.setdefault(p.get("island_idx"), []).append(p)
     if islands:
         for it in islands:
             iid = it.get("id")
             progs = by_island.get(iid, [])
-            body = ("\n".join(_prog_block(p) for p in progs[:4]) if progs
+            body = ("\n".join(_prog_block(p) for p in progs[:8]) if progs
                     else "  (no recent attempts)")
             parts.append(
                 f"\n# ISLAND {iid} (best={it.get('best')} members={it.get('count')})\n{body}"
@@ -225,7 +262,36 @@ def _build_user_msg(payload: Dict[str, Any], recents: List[Dict[str, Any]]) -> s
         )
     elif recents:
         # No island list (single-island / degraded) → one flat block.
-        parts.append("\n# Recent attempts\n" + "\n".join(_prog_block(p) for p in recents[:12]))
+        parts.append("\n# Recent attempts\n" + "\n".join(_prog_block(p) for p in recents[:24]))
+    # Archive-COMPLETE input: every live program as one compact row, so meta reasons
+    # over the WHOLE search history (not just the deep-rendered recents above).
+    if compact:
+        def _row(r):
+            line = (f"  [id={r.get('id')}] gen {r.get('generation')} "
+                    f"isl={r.get('island_idx')} "
+                    f"[{'ok' if r.get('correct') else 'FAIL'}] "
+                    f"score={r.get('combined_score')}")
+            if r.get("error_head"):
+                line += f" err={r['error_head']}"
+            return line
+        parts.append(
+            f"\n# Full archive (compact) — every live program, one row each "
+            f"({len(compact)} rows)\n" + "\n".join(_row(r) for r in compact)
+        )
+    # Code preview for EACH island's best (not only the global best), so a
+    # direction can build on what its own island already has. Cap at 8 islands.
+    if island_best:
+        blocks = []
+        for p in island_best[:8]:
+            code = p.get("code") or p.get("code_preview") or ""
+            if not code:
+                continue
+            blocks.append(
+                f"## Island {p.get('island_idx')} best [id={p.get('id')}] "
+                f"score={p.get('combined_score')}\n```\n{code}\n```"
+            )
+        if blocks:
+            parts.append("\n# Best program per island (code previews)\n" + "\n".join(blocks))
     if prior:
         parts.append(f"\n# Prior recommendations (avoid repeating)\n{prior}")
     return "\n".join(parts)
@@ -233,8 +299,11 @@ def _build_user_msg(payload: Dict[str, Any], recents: List[Dict[str, Any]]) -> s
 
 def _parse_meta(text: str, max_n: int) -> Dict[str, Any]:
     """Lenient JSON extraction → {directions:[{text,weight}], failure_note:str}.
-    Falls back to treating the whole response as one direction so a non-JSON reply
-    never crashes the meta cycle (it just yields a single unweighted direction)."""
+    ONLY when the reply contains no parseable JSON object at all does it fall back
+    to treating the whole response as one direction, so a non-JSON reply never
+    crashes the meta cycle. A parsed reply with an empty `directions` list is the
+    NORMAL case (the prompt routes every idea into `islands`) — it must not trip
+    the fallback, or the raw JSON blob becomes a phantom global direction."""
     directions: List[Dict[str, Any]] = []
     island_directions: List[Dict[str, Any]] = []
     islands_rich: List[Dict[str, Any]] = []
@@ -307,9 +376,12 @@ def _parse_meta(text: str, max_n: int) -> Dict[str, Any]:
                     island_directions.append(
                         {"island_idx": isl["island_idx"], "text": ds[0]["text"]}
                     )
-    if not directions:
-        # Fallback: no parseable JSON — keep the raw text as a single direction so
-        # the orchestrator still gets *something* usable, and log nothing lost.
+    if not isinstance(data, dict):
+        # Fallback gated on ACTUAL parse failure (no JSON object extracted), never
+        # on `directions` being empty — the prompt no longer requests a top-level
+        # "directions" key, so a successful reply legitimately leaves it empty and
+        # treating that as failure would stuff the whole raw JSON in as a phantom
+        # global direction (polluting the next round's prior_recommendations).
         txt = (text or "").strip()
         if txt:
             directions = [{"text": txt[:2000], "weight": 1.0}]
@@ -362,8 +434,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             payload = {**payload, "prior_recommendations": "; ".join(_prior[:8])}
 
     recents = _gather_recent(payload)
+    compact, island_best = _gather_archive_full(payload)
     system_msg = _SYS.format(n=n)
-    user_msg = _build_user_msg(payload, recents)
+    user_msg = _build_user_msg(payload, recents, compact, island_best)
     call_metadata = {"purpose": "meta", "model_name": model}
     if payload.get("run_id"):
         call_metadata["run_id"] = payload["run_id"]

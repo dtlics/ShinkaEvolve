@@ -41,7 +41,15 @@ INPUT (stdin JSON):
     "enable_web_search": false,              # WS4: attach web_search_preview (DR-ref grounding / fix)
     "max_attempts": 3,
     "mock": false, "mock_code": str|null, "mock_patch": str|null, "mock_cost": 0.0,
-    "run_id": str|null, "generation": int|null, "verbose": false
+    "run_id": str|null, "generation": int|null, "verbose": false,
+    "purpose": "proposer",      # cost-ledger label; a standalone grounding call passes
+                                #   e.g. "grounding" so its spend is separable
+    "results_dir": str|null     # WS7 standalone self-log: with a non-proposer purpose
+                                #   set, the terminal outcome (success OR failure — a
+                                #   failed call may still be billed) is persisted via
+                                #   journal.log_call and its cost folded into the run
+                                #   ledger, same as meta/DR. run_window never passes it
+                                #   for the inner loop (that cost flows via window_cost).
   }
 
 OUTPUT (stdout JSON):
@@ -130,7 +138,66 @@ def _mock(payload, parent_code, patch_type, patch_dir, language, verbose) -> Dic
             "cost": cost, "attempts": 0, "transport": "mock", "error": None, "raw_response": None}
 
 
+def _self_log_standalone(payload: Dict[str, Any], result: Dict[str, Any]) -> None:
+    """Standalone-call self-logging (WS7 parity with meta_summarize / deep_research):
+    when the ORCHESTRATOR runs this script directly between clusters (a grounding, or
+    any other non-proposer purpose) and threads ``results_dir``, persist the FULL call
+    (the prompt/config actually sent + the raw model output + applied/refusal state)
+    via journal.log_call and fold the real billed cost into the run ledger — so a
+    standalone grounding's spend can never escape the budget cap. Failures log too:
+    a transport-error / apply-exhausted outcome may still carry billed cost (the loop
+    folds it into ``cost`` before the terminal return), mirroring deep_research's
+    refused-path folding.
+
+    Double-count protection — BOTH guards must hold, so the inner loop is unaffected:
+    (1) ``results_dir`` present — run_window's mut/fix payloads never pass it; and
+    (2) ``purpose`` set and != "proposer" — the inner-loop mutation/fix defaults to
+    "proposer" and its cost flows via window_cost only. Best-effort: logging must
+    never break the call."""
+    results_dir = payload.get("results_dir")
+    purpose = payload.get("purpose")
+    if not results_dir or not purpose or purpose == "proposer":
+        return
+    try:
+        cost = float(result.get("cost", 0.0) or 0.0)
+        applied = bool(result.get("applied"))
+        err = result.get("error")
+        summary = (
+            f"{purpose} via {payload.get('model_name')}: "
+            + ("applied" if applied else f"NOT applied ({str(err or 'no error')[:80]})")
+            + f", attempts={result.get('attempts')}, cost=${cost:.4f}"
+        )
+        _common.log_external_call(
+            results_dir, str(purpose),
+            {"model_name": payload.get("model_name"),
+             "reasoning_effort": payload.get("reasoning_effort"),
+             "patch_type": payload.get("patch_type", "diff"),
+             "enable_web_search": bool(payload.get("enable_web_search", False)),
+             "max_attempts": int(payload.get("max_attempts", 3)),
+             "patch_sys": payload.get("patch_sys"),
+             "patch_msg": payload.get("patch_msg"),
+             "parent_code": payload.get("parent_code")},
+            {"applied": applied, "num_applied": result.get("num_applied"),
+             "name": result.get("name"), "description": result.get("description"),
+             "attempts": result.get("attempts"), "transport": result.get("transport"),
+             "error": err, "raw_response": result.get("raw_response"),
+             "candidate_code": result.get("candidate_code")},
+            cost=cost, summary=summary,
+        )
+    except Exception:
+        pass
+
+
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
+    # Every path through _mutate ends in a terminal outcome dict with the billed cost
+    # already folded in (transport errors attach their cost before breaking out), so
+    # logging the returned result covers success AND billed-failure alike.
+    result = _mutate(payload)
+    _self_log_standalone(payload, result)
+    return result
+
+
+def _mutate(payload: Dict[str, Any]) -> Dict[str, Any]:
     parent_code = payload["parent_code"]
     patch_type = payload.get("patch_type", "diff")
     patch_dir = payload["patch_dir"]

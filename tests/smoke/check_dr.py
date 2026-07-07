@@ -13,7 +13,23 @@ Run from repo root:
 """
 
 import asyncio
+import os
+import sys
 import time
+
+# Install-isolation: a stale editable install can resolve `shinka` to a DIFFERENT
+# checkout, silently probing the wrong code. Force this repo's tree to the front of
+# sys.path BEFORE any shinka import, then loud-fail if the import still escaped
+# (mirrors run_window's worktree-shinka assert).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, _REPO_ROOT)
+
+import shinka  # noqa: E402
+
+assert (getattr(shinka, "__file__", "") or "").startswith(_REPO_ROOT), (
+    f"shinka resolved to {shinka.__file__!r}, NOT this repo ({_REPO_ROOT}). Remove the "
+    "conflicting editable install or run from the repo root."
+)
 
 
 def main() -> int:

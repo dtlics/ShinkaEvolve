@@ -350,32 +350,6 @@ def _parse_arm(arm_id: Optional[str], default_effort: Optional[str]) -> Tuple[Op
     return arm_id, default_effort
 
 
-def _sample_meta_direction(meta_directions: Optional[List[Any]], rng: random.Random) -> Optional[str]:
-    """WS2: sample ONE meta direction by weight (relative promise / 'best shots').
-    Returns the chosen direction text, or None if there are none."""
-    if not meta_directions:
-        return None
-    texts: List[str] = []
-    weights: List[float] = []
-    for d in meta_directions:
-        if isinstance(d, dict):
-            t = d.get("text")
-            try:
-                w = max(0.0, float(d.get("weight", 1.0)))
-            except (TypeError, ValueError):
-                w = 1.0
-        else:
-            t, w = (str(d) if d else None), 1.0
-        if t:
-            texts.append(t)
-            weights.append(w)
-    if not texts:
-        return None
-    if sum(weights) <= 0:
-        return rng.choice(texts)
-    return rng.choices(texts, weights=weights, k=1)[0]
-
-
 def _sample_patch_mode(patch_types, patch_type_probs, seed, exclude_fix=False) -> str:
     """D4: sample ONE patch MODE (diff/full/cross/fix) by weight, seeded. The mode is drawn
     BEFORE the parent so a "fix" draw can be paired with an INCORRECT parent and the others
@@ -409,6 +383,17 @@ def _compose_meta_for_gen(evo: Dict[str, Any], generation: int) -> Optional[str]
     )
 
 
+def _head_tail_trunc(text: Any, cap: int = 2048) -> str:
+    """Head+tail truncation for ONE error-history entry — same shape as the
+    error_traceback bound, at a smaller per-entry cap so the whole history fits
+    the record."""
+    t = "" if text is None else str(text)
+    if len(t) <= cap:
+        return t
+    half = cap // 2
+    return t[:half] + "\n[... truncated ...]\n" + t[-half:]
+
+
 def _attempt_immediate_fixes(
     cfg: Dict[str, Any],
     ev: Dict[str, Any],
@@ -423,6 +408,7 @@ def _attempt_immediate_fixes(
     fix_budget: int,
     counters: Dict[str, Any],
     enable_web_search: bool = False,
+    error_history: Optional[List[str]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
     """WS1 — IMMEDIATE correctness repair (MUTABLE fix concern).
 
@@ -448,6 +434,10 @@ def _attempt_immediate_fixes(
       * ``enable_web_search`` is OFF for ordinary fixes; WS4/WS5 turn it on only
         when the repair is nailing a DISCOVERY reference. Left mutable for future
         outer-loops (one of the framework's policy switches, like novelty/bandit).
+      * ``error_history`` (caller-owned list, seeded with the original attempt's
+        error) collects each failed fix attempt's error — head+tail-truncated per
+        entry — so a still-incorrect candidate archives its WHOLE failure history,
+        not just the last error.
     """
     if ev.get("correct"):
         return ev, mut, 0.0
@@ -519,8 +509,25 @@ def _attempt_immediate_fixes(
         _c = float(fix_mut.get("cost", 0.0) or 0.0)
         fix_cost += _c
         counters["cost"] = counters.get("cost", 0.0) + _c
+        if evo.get("log_llm_content", True):
+            # Durable per-call forensics (journal/llm_content/, 10GB run cap enforced by the
+            # journal helper). attempt_index 0 is the original mutation; fixes are 1..N.
+            # Wrapped so forensic logging can never break a window.
+            try:
+                journal.log_llm_content(
+                    cfg["results_dir"], generation, fix_used, "fix",
+                    {"model": model_name, "patch_type": fix_prompt["patch_type"],
+                     "patch_sys": fix_prompt["patch_sys"], "patch_msg": fix_prompt["patch_msg"],
+                     "raw_response": fix_mut.get("raw_response")},
+                )
+            except Exception:
+                pass
         mut = fix_mut
         if not fix_mut.get("applied"):
+            if error_history is not None:
+                error_history.append(_head_tail_trunc(
+                    f"(fix attempt {fix_used}) patch did not apply: {fix_mut.get('error')}"
+                ))
             continue  # patch didn't apply; spend counted, retry if budget remains
         ev = _evaluate_candidate(
             cfg, fix_mut["candidate_path"], results_dir, counters["iter_index"], generation
@@ -528,6 +535,10 @@ def _attempt_immediate_fixes(
         if ev.get("correct"):
             counters["fix_success"] = counters.get("fix_success", 0) + 1
             break
+        if error_history is not None:
+            error_history.append(_head_tail_trunc(
+                ev.get("error_traceback") or ev.get("text_feedback") or ""
+            ))
     return ev, mut, fix_cost
 
 
@@ -571,6 +582,9 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         "embedding_model": embedding_model,
         "seed": gseed,
         "validity_floor": evo.get("validity_floor"),
+        # How inspirations are picked BEFORE an island has a brief: "top" (default) |
+        # "random". Orchestrator lever (docs teach it); sample_parent implements it.
+        "prebrief_inspiration_mode": evo.get("prebrief_inspiration_mode", "top"),
     }
     # D4: sample the patch MODE first (diff/full/cross + the 5% fix mode). A "fix" draw — or
     # the errfrac repair latch — pairs with an INCORRECT parent (select="errored" + the repair
@@ -680,7 +694,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
 
     # 2a. per-island DIRECTION (H1): fetch the latest brief the orchestrator authored
     # for THIS island so different islands carry DIFFERENT directions. None => the
-    # island falls back to the global meta direction (byte-identical no-brief default).
+    # island falls back to the constant no-brief placeholder (_compose_meta_for_gen).
     brief_text = None
     _isl = sp.get("island_idx")
     # H1: prefer the per-gen direction the SAMPLER drew from this island's STRUCTURED brief
@@ -701,19 +715,22 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             brief_text = None
 
     # 2. construct mutation prompt (MUTABLE policy; fix-mode picks the repair prompt)
-    # Capture the per-gen sampled meta direction ONCE (the sampler draws randomly per
-    # gen — recomputing it for the trace would show a different draw than was used).
+    # The no-brief fallback direction is a constant placeholder (_compose_meta_for_gen);
+    # island differentiation rides on the per-island brief above.
     _meta_for_gen = _compose_meta_for_gen(evo, generation)
     prompt = construct_mutation_prompt.main(
         {
             "parent": parent,
             "archive_inspirations": archive_insp,
             "top_k_inspirations": top_k_insp,
-            "ancestor_inspirations": ancestors,
+            # A repair prompt carries NO inspirations — just fix the parent (owner design).
+            # `ancestors` itself stays fetched: the repair reward baseline (step 4b) still
+            # reads the nearest CORRECT ancestor's score from it.
+            "ancestor_inspirations": [] if needs_fix else ancestors,
             "needs_fix": needs_fix,
-            # WS2/WS3: per-gen weighted sample of ONE meta direction. The persistent
-            # failure caution rides separately as `failure_note` (always-on, never
-            # dropped) rather than embedded in the direction string (M1/M2/M3/M4).
+            # The persistent failure caution rides separately as `failure_note`
+            # (always-on, never dropped) rather than embedded in the direction
+            # string (M1/M2/M3/M4).
             "meta_recommendations": _meta_for_gen,
             "failure_note": evo.get("meta_failure_note"),
             # H1: per-island direction (None unless the orchestrator authored one).
@@ -829,6 +846,20 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     _mut_cost = float(mut.get("cost", 0.0) or 0.0)
     counters["cost"] = counters.get("cost", 0.0) + _mut_cost
     _slot_mut_cost = _mut_cost  # arm's total model spend for this slot (+= fix cost below)
+    if evo.get("log_llm_content", True) and not mock.get("enabled"):
+        # Durable per-call forensics (journal/llm_content/, 10GB run cap enforced by the
+        # journal helper). attempt_index 0 = the original mutation; fix attempts are 1..N
+        # (logged inside _attempt_immediate_fixes). Wrapped so forensic logging can never
+        # break a window.
+        try:
+            journal.log_llm_content(
+                cfg["results_dir"], generation, 0, "mutation",
+                {"model": model_name, "patch_type": prompt["patch_type"],
+                 "patch_sys": prompt["patch_sys"], "patch_msg": prompt["patch_msg"],
+                 "raw_response": mut.get("raw_response")},
+            )
+        except Exception:
+            pass
     _trace({"step": "llm_output", "applied": mut.get("applied"),
             "num_applied": mut.get("num_applied"), "name": mut.get("name"),
             "transport": mut.get("transport"), "attempts": mut.get("attempts"),
@@ -888,12 +919,19 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     # evo.fix_retry_budget times (default 1 for ordinary gens). Skipped in mock mode
     # (offline tests don't make LLM calls). eval_total/eval_failures below count the
     # FINAL post-fix state, so evaluation_failure_rate is the *un-repairable* rate.
+    # Owner design: keep ALL error messages as metadata on a still-incorrect entry —
+    # seed the history with the ORIGINAL attempt's error; each failed fix attempt
+    # appends its own (per-entry head+tail-truncated; total capped at archive time).
+    _err_history: List[str] = []
     if (
         not ev["correct"]
         and not (cfg.get("mock", {}) or {}).get("enabled")
         and int(evo.get("fix_retry_budget", 1)) > 0
     ):
         _pre_fix_code = mut["candidate_code"]
+        _err_history.append(_head_tail_trunc(
+            ev.get("error_traceback") or ev.get("text_feedback") or ""
+        ))
         ev, mut, _fix_cost = _attempt_immediate_fixes(
             cfg, ev, mut, parent, model_name, reasoning_effort, gen_dir, results_dir,
             generation, language, int(evo.get("fix_retry_budget", 1)), counters,
@@ -901,6 +939,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             # mutable — a future outer-loop can set evo.fix_web_search to let the
             # repair model consult the web (like the other policy switches).
             enable_web_search=bool(evo.get("fix_web_search", False)),
+            error_history=_err_history,
         )
         _slot_mut_cost += _fix_cost  # attribute the repair spend to the same arm
         # Re-embed only if a fix actually changed the code, so the archived
@@ -980,7 +1019,10 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             "embedding_model": embedding_model,
             "candidate_embedding": code_embedding or [],
             "code_embed_sim_threshold": evo.get("code_embed_sim_threshold", 0.99),
-            "island_idx": sp.get("island_idx"),
+            # evo.novelty_scope is an orchestrator lever (docs teach it): "island"
+            # (default) gates within the parent's island; "global" against the whole archive.
+            "island_idx": (None if str(evo.get("novelty_scope", "island")) == "global"
+                           else sp.get("island_idx")),
         })
         _max_sim = float(nov.get("max_similarity", 0.0) or 0.0)
         _n_cmp = int(nov.get("n_compared", 0) or 0)
@@ -1126,6 +1168,18 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     )
 
     # 5. archive_record (IMMUTABLE plumbing)
+    _rec_metadata = rec.get("metadata", {}) or {}
+    if not ev["correct"] and _err_history:
+        # Owner design: a still-incorrect entry keeps ALL its error messages, not only the
+        # final error_traceback — a later repair sees the whole failure history. Total is
+        # capped ~8KB (matching the error_traceback bound) by dropping the OLDEST entries.
+        _total, _kept = 0, []
+        for _e in reversed(_err_history):  # most recent attempts win the cap
+            _total += len(_e)
+            if _total > 8192 and _kept:
+                break
+            _kept.append(_e)
+        _rec_metadata["error_history"] = list(reversed(_kept))
     program_fields: Dict[str, Any] = {
         "id": _cand_id,
         "code": mut["candidate_code"],
@@ -1143,7 +1197,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         # M5: persist the domain-failure reason so a later sampled-parent repair (which
         # has no traceback for a domain failure) can still see WHY the parent failed.
         "text_feedback": ev.get("text_feedback"),
-        "metadata": rec.get("metadata", {}),
+        "metadata": _rec_metadata,
     }
     if code_embedding is not None:
         program_fields["embedding"] = code_embedding
@@ -1247,12 +1301,10 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     # cfg, so it is LOST at every cluster relaunch (each early-phase window runs in a fresh
     # process). Re-hydrate it from the last logged meta round so the caution survives a relaunch;
     # this window's meta round overwrites it. (Island directions live per-island as briefs in the
-    # archive, read directly by the sampler — the rehydrated `directions` here is now inert.)
-    if not evo.get("meta_directions") or not evo.get("meta_failure_note"):
+    # archive, read directly by the sampler — nothing else to rehydrate.)
+    if not evo.get("meta_failure_note"):
         _mh = _common.recent_meta_output(cfg["results_dir"])
-        if _mh.get("directions") and not evo.get("meta_directions"):
-            evo["meta_directions"] = _mh["directions"]
-        if _mh.get("failure_note") and not evo.get("meta_failure_note"):
+        if _mh.get("failure_note"):
             evo["meta_failure_note"] = _mh["failure_note"]
 
     window_state = cfg.get("window_state", {}) or {}
@@ -1461,13 +1513,16 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         journal.append_window(cfg["results_dir"], diag)  # folds window_cost into the ledger
 
         # P3-T2: AUTOMATIC per-window meta round — run by the HARNESS, not the agent. One
-        # call → global directions + a failure caution + ONE distinct direction per live
-        # island, auto-recorded as per-island briefs so islands diverge BY DEFAULT. The
+        # call → a failure caution + one distinct direction LIST per live island,
+        # auto-recorded as per-island briefs so islands diverge BY DEFAULT. The
         # call self-logs + folds its own cost into the ledger (do NOT append_intervention
         # it). Wrapped so a meta/parse/brief bug can NEVER crash a window. auto_meta:false
-        # skips the WHOLE round (global + per-island briefs). It runs AFTER append_window
+        # skips the WHOLE round (caution + per-island briefs). It runs AFTER append_window
         # so diag's island_health is final; total_cost is refreshed below to include it.
-        if evo.get("auto_meta", True):
+        # Skipped on a cooperative stop: the agent asked for control back, so don't spend
+        # minutes + dollars on a meta call it didn't order — the next window's meta
+        # re-derives the briefs.
+        if evo.get("auto_meta", True) and not _coop_stop["hit"]:
             try:
                 _mock = cfg.get("mock", {}) or {}
                 _meta_gen = (next_gen + iters_run - 1) if iters_run else next_gen
@@ -1496,6 +1551,9 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     "num_islands": len(diag.get("island_health", []) or []),
                     "best_program": _meta_best,
                     "meta_code_preview_chars": evo.get("meta_code_preview_chars", 1200),
+                    # Depth knob (orchestrator lever, evo.meta_n_recent in the config):
+                    # how many recent programs meta renders in depth.
+                    "meta_n_recent": evo.get("meta_n_recent", 32),
                 }
                 if _mock.get("enabled"):  # offline runs/tests: no Azure call
                     _meta_payload["mock"] = True
@@ -1508,11 +1566,8 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 _written: set = set()
                 _hallucinated: List[int] = []
                 if not (_meta.get("skipped") or _meta.get("degraded")):
-                    # Write global output into the LIVE evo dict (don't clobber a non-empty
-                    # prior with None). run_window samples meta_directions per gen; the
-                    # failure_note rides into every gen.
-                    if _meta.get("directions"):
-                        evo["meta_directions"] = _meta["directions"]
+                    # Write the failure caution into the LIVE evo dict (don't clobber a
+                    # non-empty prior with None); it rides into every gen as failure_note.
                     if _meta.get("failure_note"):
                         evo["meta_failure_note"] = _meta["failure_note"]
                     # Auto-record ONE brief per live island so islands diverge. Prefer the RICH
@@ -1843,11 +1898,11 @@ def acquire_run_lock(results_dir: str, run_id: Optional[str] = None) -> _RunLock
     return _RunLock(fd)
 
 
-# Cooperative graceful-stop sentinel. The agent asks a LIVE run to stop between
-# windows by writing <results_dir>/.stop (optionally {"target_run_id": ...}); it
-# never kills a process. run_window consumes it at a window boundary and exits 0
-# (no mid-eval kill => no half-written sqlite). A stale .stop from a prior process
-# generation is cleared at startup, so it can never stop-loop a --resume.
+# Cooperative graceful-stop sentinel. The agent asks a LIVE run to stop by writing
+# <results_dir>/.stop (optionally {"target_run_id": ...}); it never kills a process.
+# run_window honors it BETWEEN CANDIDATES (and at window boundaries) and exits 0 —
+# each candidate commits atomically, so no half-written sqlite. A stale .stop from a
+# prior process generation is cleared at startup, so it can never stop-loop a --resume.
 def _read_stop(results_dir: str) -> Optional[Dict[str, Any]]:
     p = os.path.join(results_dir, ".stop")
     if not os.path.exists(p):
@@ -1917,10 +1972,11 @@ def _run_meta(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 def accept_warmup(cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Keep-approved fold-back: promote the orchestrator-APPROVED final warmup into the real
-    run. Copies the warmup archive over the (still-absent) real db so the run CONTINUES from the
-    warmed, reviewed population, and folds the warmup's spend into the real ledger as a DURABLE
-    intervention (so the budget cap counts the tokens already burned). Failed/abandoned warmups
-    are never accepted — the next ``--warmup`` simply auto-resets them away.
+    run. Backs the warmup archive up into the (still-absent) real db via the sqlite backup API
+    so the run CONTINUES from the warmed, reviewed population, and folds the warmup's spend into
+    the real ledger as a DURABLE intervention (so the budget cap counts the tokens already
+    burned). Failed/abandoned warmups are never accepted — the next ``--warmup`` simply
+    auto-resets them away.
 
     Refuses (no-op, accepted:False) if there is no populated warmup archive, if the warmup
     archive has no LIVE rows, or if the real archive ALREADY exists (the real run has started —
@@ -1954,10 +2010,21 @@ def accept_warmup(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if live <= 0:
         return {"ok": False, "accepted": False,
                 "reason": "warmup archive has no live rows — nothing worth keeping"}
-    import shutil
+    import sqlite3
 
     os.makedirs(os.path.dirname(rdb) or ".", exist_ok=True)
-    shutil.copy2(wdb, rdb)
+    # Fold via the sqlite backup API, NOT a raw file copy: the live-row count above reads
+    # THROUGH the WAL, so an unclean warmup shutdown's -wal tail must land in the real db
+    # too — copy2 of the main db file alone would silently drop that tail.
+    _src = sqlite3.connect(wdb)
+    try:
+        _dst = sqlite3.connect(rdb)
+        try:
+            _src.backup(_dst)
+        finally:
+            _dst.close()
+    finally:
+        _src.close()
     # Fold the warmup spend DURABLY: pre-create run.json on a genuinely fresh boot (no journal
     # streams yet, so add_cost takes the plain path — NOT the reconstruct path, which would
     # double-count the just-appended intervention), then record the spend as an intervention so
@@ -2050,6 +2117,14 @@ def _cli() -> None:
     # The cooperative .stop sentinel lives in the run's results_dir. Capture it BEFORE the warmup
     # redirect below so a .stop the agent writes to the parent dir still stops a warmup.
     cfg["stop_dir"] = cfg["results_dir"]
+    # ONE exclusive lock at <results_dir>/.run.lock guards EVERY _cli mode — taken on the
+    # PARENT results_dir before any branch below, so: a second --warmup can no longer wipe
+    # a LIVE warmup's workspace (cleanup_warmup runs under the lock), --accept-warmup can
+    # no longer fold a live warmup or race a booting real run, and a warmup + a real run on
+    # one results_dir can no longer run concurrently. The warmup subdir no longer carries
+    # its own .run.lock. Held until this process exits (the OS releases it on any death);
+    # kept in a local that outlives main() — dropping it would release the lock mid-run.
+    _run_lock = acquire_run_lock(cfg["results_dir"], cfg.get("run_id"))  # noqa: F841
     if args.accept_warmup:
         res = accept_warmup(cfg)
         sys.stdout.write(_common.dumps(res))
@@ -2105,10 +2180,6 @@ def _cli() -> None:
                 f"[resume] window_index→{ws['window_index']} "
                 f"prior_low_streak→{ws['prior_low_streak']}\n"
             )
-    # Take the per-run lock for the whole run (held until this process exits; the OS releases it on
-    # any death). A second run_window on this results_dir refuses to start instead of commingling
-    # state. Kept in a local that outlives main() — dropping it would release the lock mid-run.
-    _run_lock = acquire_run_lock(cfg["results_dir"], cfg.get("run_id"))  # noqa: F841
     result = main(cfg)
     if _warmup_dir:
         result["warmup_workspace"] = _warmup_dir

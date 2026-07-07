@@ -6,10 +6,26 @@ testpaths and is not named ``test_*``, so pytest never collects it. Run from rep
     conda run -n shinka python tests/smoke/check_azure.py
 """
 
+import os
+import sys
 import time
 
-from shinka.llm.kwargs import sample_model_kwargs
-from shinka.llm.query import query
+# Install-isolation: a stale editable install can resolve `shinka` to a DIFFERENT
+# checkout, silently probing the wrong code. Force this repo's tree to the front of
+# sys.path BEFORE any shinka import, then loud-fail if the import still escaped
+# (mirrors run_window's worktree-shinka assert).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, _REPO_ROOT)
+
+import shinka  # noqa: E402
+
+assert (getattr(shinka, "__file__", "") or "").startswith(_REPO_ROOT), (
+    f"shinka resolved to {shinka.__file__!r}, NOT this repo ({_REPO_ROOT}). Remove the "
+    "conflicting editable install or run from the repo root."
+)
+
+from shinka.llm.kwargs import sample_model_kwargs  # noqa: E402
+from shinka.llm.query import query  # noqa: E402
 
 MODELS = [
     "azure-gpt-5.4-mini",

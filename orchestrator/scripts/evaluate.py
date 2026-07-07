@@ -40,6 +40,7 @@ OUTPUT (stdout JSON):
     "error": str | null,            # validation/first error message
     "error_traceback": str | null,  # truncated traceback when correct=false
     "text_feedback": str | null,    # evaluator's human-readable reason (domain-failure detail)
+    "timed_out": bool,              # true when the eval hit the wall-clock cap (kill synthesized)
     "stdout_log": str,
     "stderr_log": str,              # already head+tail truncated to ~16KB
     "runtime_sec": float

@@ -26,7 +26,12 @@ INPUT (stdin JSON):
     "select": "errored" | null,   # P5 repair mode: pick an ERRORED parent to fix in place
                                   #   (no inspirations, needs_fix=True); skips tombstoned +
                                   #   attempt-cap-reached rows. null = normal selection.
-    "repair_attempt_cap": int     # default 2; an errored parent past the cap is not picked
+    "repair_attempt_cap": int,    # default 2; an errored parent past the cap is not picked
+    "prebrief_inspiration_mode": "top" | "random"
+                                  # pre-brief (no island brief yet) exemplar policy: "top"
+                                  #   (default) = score-ranked top-k + elites; "random" =
+                                  #   a uniform sample of the same count from the island's
+                                  #   correct pool
   }
 
 Repair mode (``select="errored"``) and the bootstrap fallback both SKIP tombstoned
@@ -323,6 +328,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # sample ONE of its directions and use the programs ASSIGNED to it as the exemplars
     # (else just the direction text). Pre-brief, fall through to the score-ranked default
     # below (byte-identical to before → WeightedSamplingStrategy parity preserved).
+    # Both the brief-usage policy here and the pre-brief choice below it are
+    # orchestrator-rewritable strategy levers.
     sampled_direction = None
     _dirs = _load_island_directions(config, embedding_model, island_idx)
     top_k: List[str] = []
@@ -340,13 +347,24 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             archive_insp = [pid for pid in _assigned if pid not in top_k][:arch_n]
         # else: a direction with no realized programs yet → direction-centered, code optional.
     else:
-        # Pre-brief default: top-k by score (excluding parent) + a couple of elites.
-        ranked = sorted(pool, key=lambda p: _finite_score(getattr(p, "combined_score", 0.0)), reverse=True)  # M8: NaN/None-safe
+        # Pre-brief: payload.prebrief_inspiration_mode picks the exemplar policy while the
+        # island has no direction structure yet — "top" (default) exploits the score ranking;
+        # "random" draws a uniform sample of the same count from the island's correct pool
+        # (diverse exemplars while nothing distinguishes directions). "top" consumes no rng,
+        # so the default stays byte-identical to the WeightedSamplingStrategy parity path.
         top_k_n = int(getattr(config, "num_top_k_inspirations", 1))
-        top_k = [p.id for p in ranked if p.id != parent.id][:top_k_n]
         arch_n = int(getattr(config, "num_archive_inspirations", 1))
-        elite_pool = [p for p in ranked if p.id != parent.id and p.id not in top_k]
-        archive_insp = [p.id for p in elite_pool[:arch_n]]
+        if str(payload.get("prebrief_inspiration_mode") or "top") == "random":
+            others = [p for p in pool if p.id != parent.id]
+            picked = rng.sample(others, k=min(top_k_n + arch_n, len(others)))
+            top_k = [p.id for p in picked[:top_k_n]]
+            archive_insp = [p.id for p in picked[top_k_n:]]
+        else:
+            # Top-k by score (excluding parent) + a couple of elites.
+            ranked = sorted(pool, key=lambda p: _finite_score(getattr(p, "combined_score", 0.0)), reverse=True)  # M8: NaN/None-safe
+            top_k = [p.id for p in ranked if p.id != parent.id][:top_k_n]
+            elite_pool = [p for p in ranked if p.id != parent.id and p.id not in top_k]
+            archive_insp = [p.id for p in elite_pool[:arch_n]]
 
     return {
         "parent_id": parent.id,

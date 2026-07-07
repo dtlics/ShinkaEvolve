@@ -49,14 +49,15 @@ proves stable (see the taper, below).
    program-rescue grounding) described in "Running a discovery round and grounding it".
 2. **Do not stop until a termination criterion is met.** A run is long and consecutive; the
    healthiest run is many control-returns read with no NEED for intervention. Keep launching the
-   next cluster, and keep the heartbeat armed until the run terminates. Idleness is not done-ness —
-   only the termination checklist is (see "When the run ends").
+   next cluster, and keep the Monitor armed until the run terminates. Idleness is not done-ness —
+   only the termination checklist is (see "Termination + end of run").
 
 ## Safety railguards (enforced in code — NOT strategy knobs you can weaken)
 
 - **Budget hard cap + crash-durable ledger.** Set `budget_usd` in the run config. The
   harness keeps a cumulative cost ledger (`journal/run.json` → `total_cost`) summing EVERY
-  LLM cost (mutation, the automatic meta round, deep research, embeddings) plus the
+  LLM cost (mutation, the automatic meta round, deep research, standalone grounding calls —
+  self-logged when you pass `results_dir` — and embeddings) plus the
   interventions you log. The harness **hard-stops** the moment cumulative spend ≥
   `budget_usd` (`return_reason="budget_exhausted"`; overshoot ≤ one slot). The ledger is
   crash-durable: `run.json` is written atomically and a missing/corrupt one is rebuilt by
@@ -96,13 +97,14 @@ This is the single source of truth; the rest of this doc expands each step.
 2. **ACTUAL RUN — event-driven; you are woken, you do not poll.** You launch a self-caffeinated
    window-cluster (`run_window.py --until-decision`, background-launched). The harness runs windows
    autonomously and **returns control by exiting** at the cluster boundary; that clean exit
-   re-invokes you — that IS the "wake". (Because a backgrounded task can be reclaimed if the session
-   sits idle too long, you ALSO keep a short heartbeat that re-invokes you every few minutes; the
-   clean exit still wakes you as designed when the cluster finishes.) Initially control returns after
+   re-invokes you — that IS the "wake". (Because a backgrounded task is reclaimed if the SESSION
+   sits dormant too long, the persistent **Monitor** you armed at warmup keeps ticking every ~4
+   minutes — ack each tick with one short no-tool line; the clean exit still wakes you as designed
+   when the cluster finishes.) Initially control returns after
    every window; as your recent work tapers it returns less often. There is **no max-window cap** — a
    cluster is bounded only by the budget hard-stop, a termination criterion, and stagnation (which
-   always returns control immediately). Recover from any kill with `--resume`, and while the cluster
-   is backgrounded hold the self-wake **heartbeat** (see "Launch the inner loop and get woken"). The
+   always returns control immediately). Recover from any kill with `--resume`; the persistent
+   **Monitor** stays armed throughout (see "Launch the inner loop and get woken"). The
    user keeps the laptop lid open and on AC so the host doesn't hardware-sleep under it.
 3. **EACH WINDOW ENDS WITH AN AUTOMATIC META ROUND — run by the harness, not by you.**
    Deterministic code composes the meta prompt from the current archive + the live island list and
@@ -136,8 +138,8 @@ This is the single source of truth; the rest of this doc expands each step.
    per-window returns don't inflate the first steady cluster. The same cluster size is BOTH the
    framework-audit cadence AND the discovery-check cadence — one shared rhythm. If you forget to
    record a work score the taper has no signal and conservatively wakes you every window (and the
-   harness prints a reminder). And no matter how long the cadence grows, keep the heartbeat armed —
-   it is what prevents a backgrounded cluster from being silently reclaimed.
+   harness prints a reminder). And no matter how long the cadence grows, keep the Monitor armed —
+   its ticks are what prevent a backgrounded cluster from being silently reclaimed.
 
 ## The work score (record it after every control-return)
 
@@ -195,43 +197,66 @@ reaped by host idle-sleep. There is no separate detached launcher — the backgr
 unattended runs the user keeps the laptop lid open and on AC — a clamshelled laptop
 hardware-sleeps regardless, which self-caffeinate can't prevent.)
 
-**Heartbeat — the survival leg self-caffeinate can't cover.** Self-caffeinate beats *host*
+**The Monitor — the survival leg self-caffeinate can't cover.** Self-caffeinate beats *host*
 idle-sleep, but NOT the *sandbox* idle-reclaim of the backgrounded launcher→`run_window`→eval
-process group: the agent's OWN long idle is what arms it (tens of minutes of session dormancy
-→ the cluster is reaped mid-window with no exit and no wake — the "missed wake", where you
-wait forever for a cluster that is already dead). With the default `window_size` a single
-window can outlast that threshold, so a deploy-and-yield is exactly what dies. While a cluster
-is backgrounded, therefore, do NOT yield into a long idle: arm a short self-wake **heartbeat**
-— a backgrounded timer of a few minutes that exits and re-invokes you — and on each wake
-confirm `run_window` is still alive and progressing by JOURNAL PROGRESS in this run's
-`results_dir` ONLY — `journal/run.json` `updated_at` advancing + `windows.jsonl` gaining
-lines; **never probe or kill by PID / `Get-Process` / `tasklist`** (see "Run identity,
-stopping, recovery" below), then re-arm; keep the interval well under the
-reclaim threshold (~5 min is safe). Stop re-arming only when `run_window`'s own clean-exit
-notification arrives. The heartbeat does NOT detach `run_window` (it stays a harness-tracked
-job, so its exit still wakes you) — it keeps the *session* active so the tracked job is not
-reclaimed (the same effect a user's periodic ping has). `--resume` only RECOVERS a kill after
-the fact; the heartbeat PREVENTS the missed-wake.
+process group: reclaim triggers on SESSION dormancy past a variable threshold (~16–49 min
+measured), subagents or not — the cluster is reaped mid-window with no exit and no wake (the
+"missed wake", where you wait forever for a cluster that is already dead). With the default
+`window_size` a single window can outlast that threshold, so a deploy-and-yield is exactly what
+dies. The guard is ONE persistent **Monitor**: a watch script over this run's `results_dir`
+whose ~4-minute ticks re-invoke the session and keep it non-dormant (empirically validated: a
+harness-tracked background job survived 72+ minutes of full user idleness on 4-minute ticks
+alone, every tick delivered; ~4 min also keeps the prompt cache warm — 5-min TTL). Arm it ONCE,
+right after launching the first `--warmup` (warmup is covered too — a 3-candidate warmup can
+outlast the reclaim threshold), and keep it armed until a termination criterion is met —
+INCLUDING between clusters: a backgrounded DR/grounding call can run up to the 3600s wall and
+must not sit in a dormant session. Template (adapt paths; set the stall bar from
+`task.eval_time`):
 
-**Re-arm robustly — a single forgotten re-arm kills the run** (the observed failure mode: a run
-held alive for hours died the moment a long reasoning stretch lapsed the timer). On every
-heartbeat wake, RE-ARM THE NEXT TIMER FIRST — before the liveness check or any other work. Re-arm
-UNCONDITIONALLY: even on a wake that found nothing new, and *especially* right before a long
-reasoning/rewrite turn (arm the next timer immediately before you start thinking). Before ending
-ANY turn while a cluster is backgrounded, run the self-check "is a live heartbeat pending?"
-(alongside "did I record a work score?"). Stop re-arming ONLY on `run_window`'s own clean-exit
-wake — a stagnation/taper return is followed by another launched cluster, which must be
-heartbeated again.
+```bash
+RD=<results_dir>; EVAL_SEC=<task.eval_time in seconds>; STALL=$((EVAL_SEC + 600)); LAST=0
+PY=<the shinka env python>   # the age check is a python one-liner so the script runs
+while true; do               # identically under Git Bash (Windows) and macOS bash
+  sleep 240
+  WIN=$(wc -l < "$RD/journal/windows.jsonl" 2>/dev/null || echo 0)
+  # Per-CANDIDATE disk signals — run.json / windows.jsonl move ONLY at window
+  # boundaries, so never stall-gate on those two.
+  AGE=$("$PY" -c "import glob,os,time; m=[os.path.getmtime(p) for pat in ('journal/novelty.jsonl','journal/llm_content/*','*.sqlite*','gen_*') for p in glob.glob(os.path.join(r'$RD', pat))]; print(int(time.time()-max(m)) if m else -1)")
+  [ "$WIN" -gt "$LAST" ] && echo "WINDOW windows=$WIN"
+  LAST=$WIN
+  [ "$AGE" -ge 0 ] && [ "$AGE" -gt "$STALL" ] && echo "ALERT_STALL no disk movement for ${AGE}s"
+  echo "TICK windows=$WIN signal_age=${AGE}s"
+done
+```
+
+**Protocol.** Ack every TICK with ONE short no-tool line — no tool calls, no re-arming, nothing
+else. On ALERT_STALL, check journal liveness (`journal/run.json` `updated_at` + `windows.jsonl`
+gaining lines in THIS `results_dir` — **never probe or kill by PID / `Get-Process` /
+`tasklist`**, see "Run identity, stopping, recovery" below) and relaunch `--resume` if dead —
+the `.run.lock` makes a wrong "it's dead" guess harmless. The cluster's own clean-exit
+notification remains the REAL wake — a tick never substitutes for reading the diagnostics. If
+ticks stop arriving while a cluster is backgrounded (rare — the monitor itself died), re-arm a
+new Monitor at your next wake. TaskStop the Monitor only when the run ends. The Monitor does
+NOT detach `run_window` (it stays a harness-tracked job, so its exit still wakes you) — it
+keeps the *session* active so the tracked job is not reclaimed. Residual risk: between the
+monitor dying and your next wake there is no tick cover — `--resume` still recovers any reaped
+cluster after the fact.
 
 **Run identity, stopping, recovery — never touch the OS process.** A run IS its
 `results_dir`: `run_window` holds an exclusive OS lock on `<results_dir>/.run.lock` for its
 whole lifetime (the kernel frees it on ANY death — clean, crash, or kill), and writes
-`<results_dir>/.run_owner.json` for forensics. Therefore — **liveness** is journal progress
+`<results_dir>/.run_owner.json` for forensics. ONE lock guards EVERY mode — `--warmup` and
+`--accept-warmup` included (the warmup subdir has no lock of its own): a second warmup, an
+accept during a live warmup, or a real run during a warmup all refuse loudly. Therefore —
+**liveness** is journal progress
 in THIS run's `results_dir` (above), NEVER `Get-Process`/`tasklist`/a PID probe (OS PIDs are
 reused across worktrees, so a PID check or kill can land on ANOTHER session's `run_window`).
 **To stop or pause a running cluster** (e.g. to interrupt for a framework rewrite), write
-`<results_dir>/.stop` (optionally `{"target_run_id": "<id>"}`); it exits 0 at the next window
-boundary — NEVER `Stop-Process`. **To recover a dead/wedged run**, relaunch `--resume`: it
+`<results_dir>/.stop` (optionally `{"target_run_id": "<id>"}`); it is honored BETWEEN
+CANDIDATES — worst wait ≈ one candidate's mutate+eval, not a whole window — and exits 0. A
+stopped window SKIPS its auto-meta round (no post-stop Azure spend) and still writes its
+window row, so `--resume` bookkeeping is exact. NEVER `Stop-Process`. **To recover a
+dead/wedged run**, relaunch `--resume`: it
 re-acquires the lock and, if the original is somehow still alive, refuses to start instead of
 double-writing — so a wrong "it's dead" guess is harmless, not a corrupted archive. Two runs
 aimed at one `results_dir` (e.g. a copied config) likewise make the second refuse loudly.
@@ -309,7 +334,7 @@ research for SOTA at onset (see "Running a discovery round and grounding it"). U
 the initial program, `num_islands` (the starter ships 4; the engine default if you omit it is 2 —
 set it explicitly; 8 if multiple algorithmic families compete), and to sharpen the goal.
 
-**4. Author `run.json`** (schema in Reference). Default strategy files as shipped. At boot
+**4. Author `run.json`** (schema in "The run config (you author this)"). Default strategy files as shipped. At boot
 `run_window` green-lights the discovery-gate contract (alongside its assert that `shinka` resolves to
 this worktree) — it confirms `journal.discovery_in_interval` exists and `journal.recent_work_axes`
 returns the three work axes, printing `[setup] discovery-gate contract OK`. If that line is absent
@@ -326,6 +351,9 @@ python orchestrator/harness/run_window.py --config <run>/run.json --warmup
 python orchestrator/harness/run_window.py --config <run>/run.json --warmup --iters 5   # widen
 python orchestrator/harness/run_window.py --config <run>/run.json --accept-warmup      # KEEP it
 ```
+
+Arm the persistent Monitor right after launching the first `--warmup` — a 3-candidate warmup can
+outlast the sandbox reclaim threshold (see "Launch the inner loop and get woken").
 
 Each `--warmup` **auto-resets the throwaway workspace** at start: it wipes any prior
 `<results_dir>/warmup/` before running, so a rerun after a fix always validates against a FRESH
@@ -429,9 +457,11 @@ stay compatible.
 
 ## The automatic meta round (not yours to trigger)
 
-Every window, the harness calls `meta_summarize.py` once. It sees the archive grouped PER ISLAND
-with a code preview of each island's top + failed programs (not just score trends), and returns, for
-each live island, a `failure_note` plus that island's own direction list: 1–3 directions, each
+Every window, the harness calls `meta_summarize.py` once. Its input is archive-complete: EVERY
+program as a compact row, plus code previews for the top/recent programs and each island's best
+(~2× the old bounded budget; depth knobs `evo.meta_n_recent`, default 32, and
+`evo.meta_code_preview_chars`). It returns ONE common `failure_note` for the round plus, for
+each live island, that island's own direction list: 1–3 directions, each
 optionally tagged with an `assigned_program_id` — the existing program that already realizes it.
 Every direction is assigned to exactly one island (none duplicated across islands). Those per-island
 directions + their program assignments are auto-recorded as each island's brief (`structured_json`),
@@ -440,7 +470,8 @@ shown — not text alone. A brand-new island with no brief yet just carries a ne
 that is enough: its mutation prompt still has its modes, inspirations, and the task message. You
 don't hand-author briefs. Your meta levers: `evo.meta_model` / `evo.meta_reasoning_effort` (default
 `azure-gpt-5.5` medium; to escalate set `meta_model: azure-gpt-5.4-pro` AND `meta_reasoning_effort:
-high` — two knobs, NOT a `model@effort` suffix; pro rejects `low`); `evo.meta_code_preview_chars`
+high` — two knobs, NOT a `model@effort` suffix; pro rejects `low`); `evo.meta_n_recent` (default
+32) / `evo.meta_code_preview_chars`
 (default 1200 — shrink if meta cost climbs); or `evo.auto_meta:false` (suppresses the whole round;
 islands keep their last brief). Its cost folds automatically; budget-gated and wrapped so a meta
 failure never aborts a window.
@@ -479,6 +510,33 @@ bandit geometry itself (`exploration_coef` / `cost_aware_coef` / `exponential_ba
 foundation — it is tunable through the config levers plus a calibration measure window. Just don't
 silently hand-rewrite the geometry mid-run; a real geometry change belongs in the end-of-run ending
 document.
+
+## Knobs you check at every control-return
+
+Beyond the flagship model-collapse check, walk these look-points on the same cadence — each is a
+knob or a rewritable concern, so the fix is usually a lever flip, not a code rewrite:
+
+- **Island health.** Read `island_health` in the window diagnostics every control-return: island
+  count, per-island best/count trajectories, and diversity vs DISTINCTIVENESS (a high-diversity
+  island whose best never moves is churn, not progress; two islands with near-identical bests and
+  code are duplicates, not diversity). Levers: `db_config.max_islands` + `island_evict_strategy`
+  (cap + retire pressure), `spawn_island.py` (seed a new family — discovery-gated), and
+  `enforce_island_separation` (cross-island gene flow).
+- **`evo.novelty_scope`** (`island` default | `global`) — the novelty gate's comparison pool.
+  When cross-island near-dups flood the archive (two islands converging on the same program),
+  widen to `global`; if the scope knob isn't enough, rewrite `novelty_check.py`.
+- **`evo.prebrief_inspiration_mode`** (`top` default | `random`) — which programs an island shows
+  as inspirations before its first meta brief lands. Alongside it, the brief-usage policy in
+  `sample_parent.py` is a rewritable strategy concern: the sampler random-draws ONE of the
+  island's brief directions per prompt and attaches that direction's assigned programs as
+  inspirations if any, else runs the direction as pure creative text — rewrite it when direction
+  sampling looks degenerate (always the same direction drawn, or assignments ignored).
+- **Meta input depth** — `evo.meta_n_recent` (default 32) + `evo.meta_code_preview_chars` set how
+  much archive the meta round sees; raise when its directions look under-informed, shrink when
+  meta cost climbs.
+- **`journal/llm_content/`** — the per-call forensic record (every mutation/fix call's full
+  prompt + raw response). Read it with local tools when auditing prompt-builder output or model
+  behavior — never guess what a prompt "probably" contained.
 
 ## Running a discovery round and grounding it
 
@@ -613,10 +671,15 @@ author the prompt directly and feed it to EITHER Azure `mutate.py` OR the
   CLOSEST existing program as the base to extend ("combine this new direction INTO this program,
   same inputs/outputs").
 - **Run it on Azure** via `mutate.py` with `model_name:"azure-gpt-5.5"`,
-  `reasoning_effort:"medium"` (the default; escalate to `azure-gpt-5.4-pro@high` only if 5.5 won't
-  land it), and **`enable_web_search:true` on EVERY grounding run** — a grounding always turns web
+  `reasoning_effort:"medium"` (the default; escalate to `model_name:"azure-gpt-5.4-pro"` +
+  `reasoning_effort:"high"` only if 5.5 won't land it — the stdin payload takes `model_name` and
+  `reasoning_effort` as two SEPARATE fields; `mutate.py` does NOT split a `model@effort` suffix),
+  **`enable_web_search:true` on EVERY grounding run** — a grounding always turns web
   search on so the model can read its reference (this `enable_web_search:true` is passed straight to
-  the standalone `mutate.py` call; it is unrelated to the inner-loop `evo.mutation_web_search` knob).
+  the standalone `mutate.py` call; it is unrelated to the inner-loop `evo.mutation_web_search` knob) —
+  and **`results_dir` + `purpose:"grounding"`** on the same payload, so the call self-logs a
+  `kind=grounding` record (full request/response + cost) straight into the journal ledger; never
+  also `append_intervention` its cost (double-count).
   The discovery-before-grounding rule is enforced at `spawn_island.py` (the PRIMARY gate, for a NOVEL
   new-island grounding) and by `subagents/grounding-engineer.md`'s refusal. If the Azure model keeps
   REFUSING the pivot, hand the SAME ingredients to `subagents/grounding-engineer.md` and let Claude
@@ -637,10 +700,11 @@ the **path (i) NOVEL executor ONLY**: path (ii) SIMILAR never calls it — that 
 `archive_record.py` with `parent_id` = the closest existing program (a lineage child in the SAME
 island), with NO spawn and the existing program left intact. `results_dir` is **REQUIRED** — it is
 what the PRIMARY gate reads: at the top of `main()` (before opening the DB) it calls
-`journal.discovery_in_interval(results_dir)` and returns `{ok:false}` / non-zero (NO island seeded)
-when no in-interval usable R1/R2 stub exists.
-`discovery_provenance` is an OPTIONAL exact-match tightener (the stub reference the grounding acted
-on). It honors `db_config.max_islands`:
+`journal.discovery_in_interval(results_dir)` and, when no in-interval usable R1/R2 stub exists,
+exits 0 with `ok:false` in the JSON envelope (NO island seeded) — check the envelope, not the
+exit code.
+`discovery_provenance` is OPTIONAL and informational — it records the stub reference the grounding
+acted on for the journal; it does not tighten the gate. It honors `db_config.max_islands`:
 at the cap it retires the worst island non-destructively (rows preserved for lineage) and
 reuses the index; island 0 and the global-best island are protected. `max_islands:0`
 (default) = unbounded.
@@ -689,11 +753,12 @@ rewrite from poisoning the run. Helpers: `harness/strategy_store.py`,
    exit — otherwise the measure window refuses on the held lock, by design.) (If the effect needs more than one window,
    mark it to check next round — rare.) **A measure window can run for many minutes
    (one full window of eval subprocesses), so survive idle-reclaim the same way the main
-   cluster does:** launch it in the BACKGROUND (it returns control by EXITING) and hold the
-   short self-wake **heartbeat** (see "Launch the inner loop and get woken") so the sandbox can't
-   idle-reap the launcher→run_window→eval group while you wait; on a kill, `--resume` recovers
-   and you re-measure. `run_window` self-caffeinates against host idle-sleep, but the heartbeat
-   is what beats sandbox idle-reclaim of a backgrounded measure window — do NOT block the
+   cluster does:** launch it in the BACKGROUND (it returns control by EXITING) — the persistent
+   **Monitor** you armed at warmup is already ticking over this `results_dir`, so the sandbox
+   can't idle-reap the launcher→run_window→eval group while you wait (no separate guard to arm);
+   on a kill, `--resume` recovers
+   and you re-measure. `run_window` self-caffeinates against host idle-sleep, but the Monitor's
+   ticks are what beat sandbox idle-reclaim of a backgrounded measure window — do NOT block the
    session waiting on it synchronously.
 6. **Accept or revert.** Call `rollback_decision.decide(prior_window_diag,
    measure_window_diag)` (pass `measure_crashed=true` if the measure subprocess crashed /
@@ -725,9 +790,12 @@ EVAL failure in-place by re-prompting with the error, up to `evo.fix_retry_budge
 
 **Repair mode** turns ON when `errored_fraction ≥ repair_trigger_fraction` (default 0.20,
 with tombstoned programs EXCLUDED so the mode RELEASES once dead programs are removed). A
-repair generation picks an errored program, uses NO inspirations, and prompts the model
+repair generation picks an errored program, uses NO inspirations — repair prompts carry no
+ancestor inspirations either (ancestors still feed the repair-aware bandit baseline) — and
+prompts the model
 with that program's own failure info. If the repair FAILS, no new child is added; the
-truncated error is appended to the errored parent's own record and its repair count goes
+error is appended to the errored parent's own record (an exhausted candidate archives its
+FULL error history in metadata `error_history`) and its repair count goes
 up. After it fails repair `repair_attempt_cap` times (default 2) the parent is
 TOMBSTONED — a non-destructive removal from the sampling pool (its row + island_idx +
 lineage are preserved, it just stops being selectable, and it's reclaimed first when an
@@ -798,8 +866,10 @@ later reference.
 - `journal/windows.jsonl` — per-window diagnostics (the trajectory).
 - `journal/interventions.jsonl` — every rewrite/decision + your work score + outcome.
 - `journal/calls.jsonl` — compact POINTER index of every external LLM call (`kind` ∈
-  `meta / dr / archive_analyst`): `{kind, timestamp, file, cost, summary}`. Full prompt + raw
-  output live in `journal/calls/<kind>_<ts>_<rand>.json`. The discovery kinds the recency gate
+  `meta / dr / archive_analyst / grounding`): `{kind, timestamp, file, cost, summary}`. Full
+  prompt + raw output live in `journal/calls/<kind>_<ts>_<rand>.json`. A standalone grounding
+  `mutate.py` call self-logs `kind=grounding` when you pass `results_dir` +
+  `purpose:"grounding"`. The discovery kinds the recency gate
   recognizes are `{dr, archive_analyst}` (each is a **discovery stub**, carrying `usable`);
   `journal.discovery_in_interval(results_dir)` returns the in-interval usable ones (the single
   source of truth for the recency rule — if empty, grounding is refused), and
@@ -811,6 +881,10 @@ later reference.
   most_similar_id, most_similar_score, candidate_score, n_compared, diff_lines, threshold}` (ids +
   numbers, never code). The per-call audit trail behind the aggregate `novelty_acceptance_rate`.
   Readers: `journal.read_novelty`, `journal.novelty_near_threshold`.
+- `journal/llm_content/` — the inner-loop forensic record: every mutation/fix call's FULL
+  prompt + raw response, one file per call (default ON via `evo.log_llm_content`; a 10GB
+  per-run cap bounds growth). This is what you read — with local tools only — when auditing
+  prompt-builder output or model behavior.
 - `journal/steps.jsonl` — the per-step oversight trace, present ONLY under tracing (warmup
   and the measure window); cleaned up after warmup.
 - `journal/islands/island_<i>.jsonl` — per-island trajectory.
@@ -865,8 +939,9 @@ transport in a strategy rewrite.
 cost books only on a TERMINAL status, so a kill leaks unlogged-but-billed spend; let it ride to the
 3600s wall, deciding for yourself with the knobs you own (reasoning effort, `@medium` vs `@high`,
 prompt scope) how to handle a pathologically slow call. (This is the Azure CALL only. To stop or pause
-a `run_window` cluster, write `<results_dir>/.stop` and let it exit at the next window boundary, then
-`--resume` — never `Stop-Process`/`Get-Process` a run by PID; see "Run identity, stopping, recovery".)
+a `run_window` cluster, write `<results_dir>/.stop` — honored between candidates, worst wait ≈ one
+candidate's mutate+eval; the stopped window skips its auto-meta round and still writes its window row —
+then `--resume` — never `Stop-Process`/`Get-Process` a run by PID; see "Run identity, stopping, recovery".)
 
 ## The run config (you author this)
 
@@ -931,6 +1006,9 @@ wake/termination cadence mid-run (cadence_policy.py is FOUNDATION).
 | `epsilon` | 0.2 | bandit exploration floor | an arm's share decaying toward 0 while it still occasionally improves → raise to 0.4–0.6 |
 | `code_embed_sim_threshold` | 0.99 | near-duplicate cosine gate, over the basis set by `novelty_embed_mode`; a near-dup is now EVALUATED then the BETTER of the pair is kept (worse dropped / tombstoned) | under the default `diff` basis the 0.99 gate rarely false-rejects; under legacy `code` basis genuine large-program edits cluster ~0.994 and are mis-flagged → switch to `diff` (preferred) or RAISE the threshold (never lower under `code`); watch `novelty_rejected_cost`. Audit per-pair via `journal/novelty.jsonl` + `journal.novelty_near_threshold`; see "Tuning the novelty threshold" |
 | `novelty_embed_mode` | diff | WHAT the gate embeds: `diff` = parent→candidate unified diff (genuine edits separate to low cosine; the per-island pool can GROW) vs `code` = legacy whole-program embedding (collapses each island to a single-survivor greedy chain on a large program) | keep `diff`; use `code` only to reproduce legacy behavior or on a resumed archive whose stored embeddings are whole-program |
+| `novelty_scope` | island | the novelty gate's comparison pool: same-island only vs the whole archive | cross-island near-dups flooding the archive (two islands converging on the same program) → `global`; if the knob isn't enough, rewrite `novelty_check.py` |
+| `prebrief_inspiration_mode` | top | which programs an island shows as inspirations before its first meta brief lands: top-scoring vs a random draw | a young island monoculturing on the incumbent elite → `random` |
+| `meta_n_recent` / `meta_code_preview_chars` | 32 / 1200 | meta-round input depth: how many recent-program rows + how much code preview the meta call sees | directions look under-informed → raise; meta cost climbing → shrink |
 | `novelty_tie_epsilon` | 0.0 | keep-the-better tie margin: an equal-scoring DISTINCT near-dup within epsilon is KEPT and the incumbent tombstoned (`>=`), so the lineage traverses score plateaus instead of dropping every tie after a full eval | raise slightly to keep more near-ties for plateau exploration |
 | `stagnation_abs_floor`/`rel_frac` | 0.001 / 0.05 | the "low window" bar | recalibrate to the task's natural per-window climb |
 | `validity_floor` | none (inert) | floors VALID parents' selection score (`sample_parent`) | many correct programs pinned at 0 and selection can't separate them |

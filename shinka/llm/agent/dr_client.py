@@ -27,7 +27,7 @@ Env vars
 The DR endpoint is **not** routed through the bandit-driven
 ``llm_models`` pool. The DR summarizer constructs a client via
 ``get_dr_async_client`` directly, which keeps DR cost separable from
-proposer/meta cost in the Azure dashboard (the ``purpose=dr_stage_*``
+proposer/meta cost in the Azure dashboard (the ``purpose=deep_research``
 tag on each call also feeds this distinction).
 """
 

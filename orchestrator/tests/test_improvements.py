@@ -1068,12 +1068,11 @@ def test_meta_summarize_parsing():
 
 
 def test_meta_direction_sampling():
-    """No global-directions channel: the dead per-gen weighted sampler
-    (_sample_meta_direction) is DELETED from run_window (brief-direction sampling lives
-    in sample_parent._sample_direction), and the per-gen composer returns a neutral
-    placeholder regardless of evo — island differentiation rides entirely on the
-    per-island briefs; the persistent failure caution rides as its own always-on
-    `failure_note` field."""
+    """No global-directions channel: run_window carries no per-gen direction sampler
+    (brief-direction sampling lives in sample_parent._sample_direction), and the per-gen
+    composer returns a neutral placeholder regardless of evo — island differentiation
+    rides entirely on the per-island briefs; the persistent failure caution rides as its
+    own always-on `failure_note` field."""
     import random as _r  # noqa: F401 (kept for parity with the sibling sampler test)
 
     sys.path.insert(0, str(_ORCH / "harness"))
@@ -1627,8 +1626,8 @@ def test_bandit_reward_ranking():
 
 def test_meta_direction_sampling_weighted():
     """M19: a brief's directions are sampled BY WEIGHT, not argmax — a 3:1 weight yields
-    roughly 3:1 frequency and the low-weight arm still appears. The sampler now lives in
-    sample_parent._sample_direction (run_window's dead global-channel copy was deleted)."""
+    roughly 3:1 frequency and the low-weight arm still appears. The one sampler lives in
+    sample_parent._sample_direction; run_window has no direction sampler of its own."""
     import random as _r
 
     sys.path.insert(0, str(_ORCH / "scripts"))

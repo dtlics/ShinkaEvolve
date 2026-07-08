@@ -66,12 +66,18 @@ valid; the evaluator routes every Z-check by exact minimum-weight T-joins.
    this machinery reproduces the published gadget exactly — 12 A_v, **7 B_p
    (five triangles + two squares)**, max check weight 7, max qubit degree 7,
    41 added elements.
-2. **Schedule**: generic greedy Tanner-graph edge coloring (the coloration
-   circuit, Tremblay–Delfosse–Beverland arXiv:2109.14609 — standard practice for
-   irregular deformed codes, cf. QUITS `zxcoloration`). Same algorithm for every
-   candidate ⇒ depth is an endogenous consequence of the gadget's degrees and
-   check weights. Scheduling is *evaluated* (through depth→idle noise and hook
-   propagation), not evolved — schedule search is its own task
+2. **Schedule**: the canonical deterministic scheduler — an **exact minimum
+   edge coloring of the bipartite Tanner graph** (König's theorem, constructive
+   alternating-path algorithm; property-tested proper and Δ-optimal in
+   [test_coloring.py](test_coloring.py)). This is
+   literally the input the coloration circuit asks for (Tremblay–Delfosse–
+   Beverland arXiv:2109.14609, Algorithm 1: "a minimum edge coloration of
+   T_X"). Depth per phase **equals the deformed Tanner graph's max degree Δ,
+   exactly** — a pure invariant of the gadget, independent of construction
+   order (the previous greedy first-fit could exceed Δ and depended on check
+   iteration order, muddying in-loop ablations; it wasted 2 ticks/phase on the
+   reference: 8/8 vs the true 6/7). Scheduling is *evaluated* (depth→idle
+   noise, hook propagation), not evolved — schedule search is its own task
    ([../bb_syndrome_sched/](../bb_syndrome_sched/)).
 3. **Protocol circuit** (stim), following Cross–He–Rall–Yoder §3.2 adapted to
    gauging: ideal MPP brackets → 1 noisy base round → gauge-in (edge qubits
@@ -82,38 +88,60 @@ valid; the evaluator routes every Z-check by exact minimum-weight T-joins.
    detectors; the ungauging byproduct enters the Z-logical observables as
    edge-readout parities. Both circuits are noiseless-deterministic (self-checked
    every eval).
-4. **Noise**: uniform circuit-level depolarizing at p = 2×10⁻³ (`GAUGE_PHYS_P`):
-   DEPOLARIZE2 after each CNOT, measure/reset flips, and per-phase aggregated
-   idle noise (p/10 per idle tick) so **schedule depth is priced**.
+4. **Noise — a three-point curve, not a single rate**: uniform circuit-level
+   depolarizing sampled at **p ∈ {1.4, 2.0, 2.8}×10⁻³** (0.7×, 1×, 1.4× the
+   gate rate `GAUGE_PHYS_P`): DEPOLARIZE2 after each CNOT, measure/reset flips,
+   and per-phase aggregated idle noise (p/10 per idle tick) so **schedule depth
+   is priced**. The hard gate lives at the center point; the score bonus
+   averages the margin over the curve; and the fitted scaling exponent
+   **d_eff ≈ 2·Δlog₁₀(LER)/Δlog₁₀(p)** is reported — a gadget that passes at
+   one noise rate but has a flat curve (collapsed effective distance) is
+   visible and under-rewarded. This is the GeneCS-style multi-p evaluation
+   made quantitative.
 5. **Decode + sample**: BP+OSD-0 (stimbposd/ldpc; 12 BP iterations, `osd0`) via
-   sinter across ~20 workers, error-budget collection (`max_errors=80`/circuit,
-   `max_shots=5000`, shot cap scaled down for oversized gadgets), fresh seed
-   per eval. Deliberately fast-but-weak (~5× faster than BP+LSD here at equal
-   observed accuracy): absolute LERs are not paper-comparable, but candidates
-   and the reference are decoded identically, so the relative gate is
-   self-consistent (same philosophy as `bb_syndrome_sched`'s `osd_order=3`). Two circuits: X-basis (measurement observable + preservation
+   one sinter fan-out over all six circuits on ~20 workers (per-point error
+   budgets `P_BUDGET = (40,1500),(45,2000),(30,800)` errors/shot-cap per
+   circuit; low-p and gate feed the score, high-p is diagnostic-only and
+   lightest; caps scaled down for oversized gadgets), fresh seed per eval.
+   Deliberately fast-but-weak (~5× faster than BP+LSD here at equal observed
+   accuracy): absolute LERs are not paper-comparable, but candidates and the
+   reference are decoded identically, so the relative gate is self-consistent
+   (same philosophy as `bb_syndrome_sched`'s `osd_order=3`). Two circuits: X-basis (measurement observable + preservation
    of the 12 X̄ logicals) and Z-basis (preservation of the 11 Z̄ logicals that
    commute with X̄_α, byproduct-corrected).
 
 ## Score
 
 ```
-Q      = edge qubits + A_v checks + B_p checks        (paper gadget: 22+12+7 = 41)
-overall = 1 - (1 - p_X)(1 - p_Z)                      (measured end-to-end)
-GATE   = 2 x LER_REF                                  (LER_REF = paper gadget under
-                                                       this harness, see below)
+Q          = edge qubits + A_v checks + B_p checks    (paper gadget: 22+12+7 = 41)
+overall(p) = 1 - (1 - p_X)(1 - p_Z)                   (measured, per curve point)
+margin(p)  = log10( 2 x LER_REFS[p] / overall(p) )    (headroom vs the calibrated
+                                                       paper-gadget curve, clamped
+                                                       at each point's resolution)
 
-crash / garbage return               ->  -1000  (correct=False)
-invalid gadget (named reason)        ->  -100
-valid, overall > GATE                ->  -8 + log10(GATE/overall)   (>= -30)
-valid, overall <= GATE (reliable)    ->  (41 - Q) + min(2, log10(GATE/overall))
+crash / garbage return                    ->  -1000  (correct=False)
+invalid gadget (named reason)             ->  -100
+valid, margin(p_gate) < 0  (unreliable)   ->  -8 + margin(p_gate)                 (>= -30)
+valid, margin(p_gate) >= 0 (reliable)     ->  (41 - Q) + min(2, ½·margin(p_lo) + ½·margin(p_gate))
 ```
 
 Reproducing the paper's gadget scores ~0..+2; every element saved below 41
-while staying reliable is +1; the capped margin bonus rewards reliability
-headroom but cannot buy unlimited structure. The frontier is the **smallest
-reliable gadget** — and "reliable" is measured on the real protocol, so
-check-weight-reducing structure (dummies, stacking) can now *pay for itself*.
+while staying reliable is +1. The bonus is the **low-p-weighted** headroom
+(low + gate points, high-p dropped) — *not* a symmetric average: over a
+log-symmetric grid the mean of all three margins algebraically cancels the
+candidate's slope (a steep design's low-p gain is offset by its high-p loss),
+so it would reward only curve *level*. Weighting toward low p makes a flat
+curve — whose low-p error barely drops below the paper's, which does drop —
+score strictly lower at the same gate-point error, so real distance-like
+protection is what earns the bonus. Each point's margin is clamped at its
+candidate-independent resolution bound, so a zero-error (floored) point can't
+claim more headroom than its shot budget resolves, nor couple the score to
+circuit size. The hard gate uses only the well-budgeted center point (gate
+flips from sampling noise stay ~7σ away); the whole bonus is a bounded ±2
+tiebreaker under the integer element-count ladder. The frontier is the
+**smallest reliable gadget** — and "reliable" is measured on the real
+protocol, so check-weight-reducing structure (dummies, stacking) can now
+*pay for itself*.
 
 ### Anti-gaming
 
@@ -126,15 +154,24 @@ spawned processes that re-import stim from disk.
 
 ## Calibration (run owner)
 
-`LER_REF` in evaluate.py is the measured overall error of the **paper reference
-gadget** (18 matching + 4 expansion edges, R=12) under this exact harness
-(p=2e-3, BP+OSD-0, coloration schedule). Recalibrate it (env `GAUGE_LER_REF`, or
-edit the constant) whenever `GAUGE_PHYS_P`, the noise model, the scheduler, the
-decoder or the protocol shape changes:
+`LER_REFS` in evaluate.py is the measured overall-error **curve** of the paper
+reference gadget (18 matching + 4 expansion edges, R=12) at the three P_GRID
+points under this exact harness (BP+OSD-0, König schedule). Recalibrate (env
+`GAUGE_LER_REF_LO/GATE/HI`, or edit the constants) whenever `GAUGE_PHYS_P`, the
+noise model, the scheduler, the decoder or the protocol shape changes:
 
 ```bash
-python tasks/gross_code_gauging/calibrate.py     # prints LER_REF and per-basis rates
+python tasks/gross_code_gauging/calibrate.py     # prints the three-point curve
 ```
+
+The evaluator **ships calibrated** (the three `LER_REFS` constants are baked
+from a run of `calibrate.py`); the boot guard in `main()` refuses to run and
+`aggregate_fn` scores every candidate −1000 only if the constants are ever
+reset to the `__CAL_*__` sentinels. The pure-structure scheduler is checked by
+`test_coloring.py` (`python tasks/gross_code_gauging/test_coloring.py`: 400
+random colorings verified proper + Δ-optimal, and `preview_gadget`'s structural
+fields verified equal to the evaluator's on the reference and matching-only
+gadgets).
 
 The paper's 4 expansion edges in label space: `(2,9) (2,4) (9,11) (10,11)`
 (= (x²,x⁵y³), (x²,x⁶), (x⁵y³,x¹¹y³), (x⁷y³,x¹¹y³), Eq. 5). These are the
@@ -167,17 +204,21 @@ python tasks/gross_code_gauging/evaluate.py \
 ```
 
 Expected: `correct=True`, `valid=1`, `elements=45`, `rounds=12`,
-`combined_score ≈ -4 + margin bonus`, plus the structural fields (depths,
-weights, cut, Fiedler) and measured `x_ler`/`z_ler`/`overall_ler`.
-Runtime ~7–8 min (sinter across ~20 workers; error-budget sampling means worse
-candidates finish faster; worst case ~11 min at the shot cap). Measured seed
-result: `overall_ler ≈ 6.1e-2`, `gate_margin ≈ +0.33` decades, score ≈ −3.7.
+`combined_score ≈ -3.7` (Q=45 → −4 elements + ~0.30 bonus), plus the
+structural fields (exact depths, weights, cut, Fiedler) and the measured noise
+curve (`ler_lo`/`overall_ler`/`ler_hi`, per-point margins, `d_eff_est`≈9). Depths
+are `depth_x=6`, `depth_z=7` (the exact Tanner max degrees). Runtime ~9–11 min
+(one sinter fan-out over 6 circuits on ~20 workers; BP+OSD-0 on ~90k-mechanism
+DEMs is the cost; error-budget sampling means worse candidates finish faster;
+worst case ~14 min at the shot caps). (If the `LER_REFS` constants have been
+reset to sentinels, the run aborts with an "UNCALIBRATED" message — run
+`calibrate.py` first; see Calibration.)
 
 ### Full evolution (as the orchestrator)
 
 Author a run config (copy `configs/orchestrator_run.default.json`), point
 `task.eval_program_path` / `task.init_program_path` at this task's files, set
-the Azure `evo.llm_models` + `budget_usd`, and `eval_time >= 00:15:00`, then:
+the Azure `evo.llm_models` + `budget_usd`, and `eval_time >= 00:16:00`, then:
 
 ```bash
 python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
@@ -193,8 +234,9 @@ conda env. No new installs.
 | File | Role |
 |---|---|
 | [initial.py](initial.py) | Fixed problem data + graph/preview tools + EVOLVE-BLOCK (matching + greedy seed). |
-| [evaluate.py](evaluate.py) | Deformed-code builder, coloration scheduler, protocol circuits, BP+OSD-0/sinter sampling, scorer. |
-| [calibrate.py](calibrate.py) | Re-measures `LER_REF` on the paper reference gadget under the current harness. |
+| [evaluate.py](evaluate.py) | Deformed-code builder, König scheduler, protocol circuits, BP+OSD-0/sinter multi-p sampling, scorer. |
+| [calibrate.py](calibrate.py) | Re-measures the `LER_REFS` curve on the paper reference gadget under the current harness. |
+| [test_coloring.py](test_coloring.py) | Property test: König coloring proper+Δ-optimal, preview ↔ evaluator consistency, protocol determinism. |
 
 ## Sources the redesign is grounded in
 

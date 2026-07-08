@@ -4,13 +4,20 @@ X_alpha on the gross code (Williamson & Yoder, arXiv:2410.02213).
 
 GOAL. Design the complete GAUGING GADGET that measures the weight-12 logical
 X_alpha of the [[144,12,12]] gross code, evaluated END-TO-END: the evaluator
-builds the deformed code from your graph, auto-schedules its syndrome
-extraction (generic Tanner-graph edge coloring -- depth follows YOUR check
-weights and degrees), runs the full measurement protocol (gauge-in -> R
-deformed rounds -> gauge-out) as a stim circuit under circuit-level
-depolarizing noise, decodes with BP+OSD, and MEASURES the protocol's error:
-the probability that the reported measurement outcome is wrong or that any of
-the other 11 logical qubits is corrupted.
+builds the deformed code from your graph, schedules its syndrome extraction
+with the CANONICAL deterministic scheduler (exact minimum edge coloring of
+the Tanner graph, Konig -- so each phase's depth EQUALS the deformed Tanner
+graph's max degree, a pure invariant of YOUR design), runs the full
+measurement protocol (gauge-in -> R deformed rounds -> gauge-out) as a stim
+circuit under circuit-level depolarizing noise at a THREE-POINT NOISE CURVE
+(p = 0.7x, 1x, 1.4x the benchmark rate), decodes with BP+OSD, and MEASURES
+the protocol's error at each point: the probability that the reported
+measurement outcome is wrong or that any of the other 11 logical qubits is
+corrupted. The reliability gate sits at the center point; the score bonus
+averages the margin over the whole curve, and the fitted scaling exponent
+d_eff (how steeply your error falls as p drops) is reported -- a design that
+merely squeaks by at one noise rate but scales flatly earns less than one
+with genuine distance-like protection.
 
 WHAT YOU RETURN (the whole design space of the paper, not just edges):
   propose_gadget() -> {"edges": [(u, v), ...], "rounds": R}
@@ -48,23 +55,35 @@ WHAT THE EVALUATOR DERIVES FOR YOU (deterministic, same for every candidate):
   schedule; the protocol circuit, detectors and byproduct corrections.
 
 SCORE (higher is better; Q = edge_qubits + A_v checks + B_p checks):
-  reliable   (error <= gate):  score = (41 - Q) + min(2, margin_decades)
-  unreliable (error >  gate):  score = -8 + margin_decades   (>= -30)
+  reliable   (gate-point margin >= 0):
+      score = (41 - Q) + min(2, 0.5*margin(p_lo) + 0.5*margin(p_gate))
+  unreliable (gate-point margin < 0):  score = -8 + gate_margin   (>= -30)
   invalid spec: -100;  crash: -1000.
-  The reference design (the paper's 22-edge graph, Q=41, R=12) scores ~0..+2.
-  Saving an element while staying reliable is +1 per element. The margin
-  bonus is capped at +2, so reliability can never buy unlimited structure --
-  but falling below the gate costs everything, so the frontier is: SMALLEST
+  margin(p) = log10(2 x reference_error(p) / your_error(p)) -- headroom vs
+  the calibrated paper-reference gadget at the same noise rate. The bonus is
+  LOW-p-WEIGHTED (low + gate points), NOT a symmetric average: over the
+  log-symmetric grid a plain mean cancels your slope, so it would reward only
+  the curve's LEVEL. Weighting low makes a FLAT curve (error barely dropping
+  as p falls, while the paper's does) score strictly lower than a STEEP one at
+  the same gate error -- real distance-like protection earns the bonus. The
+  reference design (the paper's 22-edge graph, Q=41, R=12) scores ~0..+2.
+  Saving an element while staying reliable is +1 per element. The bonus is
+  capped at +2, so reliability can never buy unlimited structure -- but
+  falling below the gate costs everything, so the frontier is: SMALLEST
   RELIABLE GADGET. Both halves are measured, not proxied.
 
 LEVERS THAT ACTUALLY MOVE THE MEASURED ERROR (all reported in feedback):
   * expansion where it matters: a logical pinches on a sparse cut of the
     graph; reinforce THAT cut (conductance/Fiedler are only heuristics);
-  * check weight & degree -> schedule depth -> idle noise: heavy routed
-    Z-checks and long flux cycles deepen every round for everyone. Dummy
-    vertices can shorten routings and chop long cycles (the paper's whole
-    reason for thickening);
+  * check weight & degree -> schedule depth -> idle noise: depth per phase
+    IS the deformed Tanner graph's max degree (exact minimum edge coloring),
+    so heavy routed Z-checks, long flux cycles and high-degree vertices
+    deepen every round for everyone. Dummy vertices can shorten routings and
+    chop long cycles (the paper's whole reason for thickening);
   * rounds R: timelike protection of the outcome vs total noise exposure;
+  * SCALING: the curve bonus and d_eff reward designs whose error falls
+    steeply at lower p (real distance-like protection), not just designs
+    tuned to the benchmark rate;
   * raw size: every edge/check is an element of Q AND another noise location.
 
 THE SEED below is the known-good flat design: the 18 matching edges (the
@@ -83,10 +102,11 @@ TOOLS PROVIDED (fixed, callable from the EVOLVE-BLOCK):
   preview_gadget(edges, R)    LOCAL structural preview mirroring the
                               evaluator: element count Q, #B_p after
                               redundancy reduction, max check weights/degree,
-                              schedule depths, worst routing, longest cycle.
-                              Costs milliseconds -- use it to screen designs
-                              BEFORE spending an evaluation. (Structure only;
-                              the measured error needs the real evaluation.)
+                              EXACT per-phase schedule depths (= Tanner max
+                              degree), worst routing, longest cycle. Costs
+                              milliseconds -- use it to screen designs BEFORE
+                              spending an evaluation. (Structure only; the
+                              measured noise curve needs the real evaluation.)
 """
 
 import itertools
@@ -249,16 +269,29 @@ def preview_gadget(edges, rounds=12):
     if set(verts) - seen:
         return {"error": f"disconnected: {sorted(set(verts) - seen)}"}
     E = len(edges); paths = _paths(verts, edges)
-    # routing of the 18 overlapping Z checks
+    nq = 2 * N + E
+    # routing of the overlapping Z checks (min-weight T-joins), captured as FULL
+    # (2N+E)-column rows [HZ0 | edge-indicator] so the cycle basis is redundancy-
+    # reduced against them over the SAME columns the evaluator uses (build_gauged
+    # reduces cycles against HZroute in the full base+edge space; a cycle is
+    # redundant only when a combination of routed rows whose BASE part cancels
+    # equals it — i.e. a BB Z-check dependency). Reducing over edge columns alone
+    # over-reduces.
     route_w, edge_use = [], {}
+    routed_rows = []
     for r in range(N):
         T = [i for i in range(12) if _HZ0[r, SUPPORT[i]]]
-        if not T: continue
-        g = _tjoin(T, paths)
-        if g is None: return {"error": "routing failed"}
-        route_w.append(len(g))
-        for j in g: edge_use[j] = edge_use.get(j, 0) + 1
-    # min cycle basis (Horton-lite), then redundancy-reduced count:
+        row = np.zeros(nq, np.int8)
+        row[:2 * N] = _HZ0[r]
+        if T:
+            g = _tjoin(T, paths)
+            if g is None: return {"error": "routing failed"}
+            route_w.append(len(g))
+            for j in g:
+                edge_use[j] = edge_use.get(j, 0) + 1
+                row[2 * N + j] = 1
+        routed_rows.append(row)
+    # min cycle basis (Horton-lite):
     dim = E - len(verts) + 1
     cands = set()
     for j, (x, y) in enumerate(edges):
@@ -274,24 +307,37 @@ def preview_gadget(edges, rounds=12):
     for j, e in enumerate(edges): bp.setdefault(e, []).append(j)
     for js in bp.values():
         for a, b in itertools.combinations(js, 2): cands.add(frozenset({a, b}))
-    basis, cur = [], np.zeros((0, E), np.int8)
+    # Redundancy reduction: keep only cycles INDEPENDENT of the routed Z rows —
+    # exactly build_gauged's rank test over [HZroute ; kept_cycles] (full cols).
+    stack = np.array(routed_rows, np.int8)
+    base_rank = _rank2(stack)
+    basis = []
     for cset in sorted(cands, key=lambda c: (len(c), sorted(c))):
-        v = np.zeros(E, np.int8)
-        for j in cset: v[j] = 1
-        t = np.vstack([cur, v.reshape(1, -1)])
-        if _rank2(t) > cur.shape[0]:
-            cur = t; basis.append(cset)
+        v = np.zeros(nq, np.int8)
+        for j in cset: v[2 * N + j] = 1
+        t = np.vstack([stack, v.reshape(1, -1)])
+        rk = _rank2(t)
+        if rk > base_rank:
+            stack, base_rank = t, rk
+            basis.append(cset)
             if len(basis) == dim: break
-    # BB Z-check redundancy removes rank(HZ0)-deficit cycles; approximate the
-    # evaluator's exact reduction with the known constant for single-logical
-    # gauging of the gross code (4 redundant cycles; exact when all 18
-    # overlapping checks are routed):
-    n_bp = max(0, dim - 4)
+    n_bp = len(basis)                          # exact kept flux-check count
     n_av = len(verts)
-    # greedy-coloring depths (checks colored by (qubit, ancilla) conflicts):
-    depth_z = max([6 + w for w in route_w] + [len(c) for c in basis] + [6]) + 3
     deg = vertex_degrees(edges)
-    depth_x = max(6, max(deg.values()) + 1) + 2
+    # EXACT schedule depths (the evaluator's minimum edge coloring achieves the
+    # Tanner graph's max degree exactly): X phase = max(original check weight 6,
+    # largest A_v weight, support-qubit column degree 4); Z phase = max(heaviest
+    # routed check, longest KEPT flux cycle, busiest edge qubit's Z-degree, 6).
+    avw_max = max((deg[v] + (1 if v < 12 else 0)) for v in verts)
+    depth_x = max(6, avw_max, 4)
+    cyc_use = {}
+    for cset in basis:
+        for j in cset:
+            cyc_use[j] = cyc_use.get(j, 0) + 1
+    edge_zdeg = max((edge_use.get(j, 0) + cyc_use.get(j, 0) for j in range(E)),
+                    default=0)
+    depth_z = max([6] + [6 + w for w in route_w] + [len(c) for c in basis]
+                  + [edge_zdeg, 3])
     Q = E + n_av + n_bp
     return {
         "elements": Q, "edge_qubits": E, "av_checks": n_av, "bp_checks": n_bp,
@@ -301,7 +347,7 @@ def preview_gadget(edges, rounds=12):
         "route_w_max": max(route_w, default=0),
         "cycle_w_max": max((len(c) for c in basis), default=0),
         "max_degree": max(deg.values()),
-        "depth_x_est": depth_x, "depth_z_est": depth_z,
+        "depth_x": depth_x, "depth_z": depth_z,
         "fiedler": round(fiedler_value(edges), 3),
         "sparsest_cut": sparsest_cut(edges),
     }

@@ -1072,7 +1072,8 @@ def test_meta_summarize_parsing():
 def test_meta_direction_sampling():
     """No global-directions channel: run_window carries no per-gen direction sampler
     (brief-direction sampling lives in sample_parent._sample_direction), and the per-gen
-    composer returns a neutral placeholder regardless of evo — island differentiation
+    composer returns None regardless of evo — a no-brief gen carries NO direction header
+    (the sampler renders EXPERT_CREATIVE_PREAMBLE instead) and island differentiation
     rides entirely on the per-island briefs; the persistent failure caution rides as its
     own always-on `failure_note` field."""
     import random as _r  # noqa: F401 (kept for parity with the sibling sampler test)
@@ -1084,13 +1085,31 @@ def test_meta_direction_sampling():
     # sampler to run_window would resurrect the phantom channel).
     assert not hasattr(run_window, "_sample_meta_direction")
 
-    # The composer returns a neutral placeholder regardless of evo.
-    ph = run_window._compose_meta_for_gen(
+    # The composer returns None regardless of evo — never a placeholder direction that
+    # would suppress the sampler's expert/creative preamble on direction-less gens.
+    assert run_window._compose_meta_for_gen(
         {"meta_directions": [{"text": "tryX", "weight": 1.0}],
-         "meta_failure_note": "watch runtime/timeouts", "seed": 0}, 3)
-    assert "no explicit direction" in ph.lower(), ph
-    assert "tryX" not in ph and "watch runtime/timeouts" not in ph, ph
-    assert run_window._compose_meta_for_gen({}, 0) == ph  # same placeholder, no global needed
+         "meta_failure_note": "watch runtime/timeouts", "seed": 0}, 3) is None
+    assert run_window._compose_meta_for_gen({}, 0) is None
+
+    # And the sampler contract downstream: no direction => the preamble rides the
+    # system prompt; a direction => the directive header rides instead.
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import construct_mutation_prompt
+    _parent = {"id": "p0", "code": "print(1)", "combined_score": 1.0,
+               "public_metrics": {}, "correct": True}
+    out_no_dir = construct_mutation_prompt.main({
+        "parent": _parent, "task_sys_msg": "task", "meta_recommendations": None,
+        "patch_types": ["diff"], "patch_type_probs": [1.0], "seed": 0,
+    })
+    assert "# Expert framing" in out_no_dir["patch_sys"], out_no_dir["patch_sys"][:400]
+    assert "# Direction for this attempt" not in out_no_dir["patch_sys"]
+    out_dir = construct_mutation_prompt.main({
+        "parent": _parent, "task_sys_msg": "task", "meta_recommendations": "try X",
+        "patch_types": ["diff"], "patch_type_probs": [1.0], "seed": 0,
+    })
+    assert "# Direction for this attempt" in out_dir["patch_sys"]
+    assert "# Expert framing" not in out_dir["patch_sys"]
     return None
 
 
@@ -1346,8 +1365,8 @@ def test_failure_note_always_rendered():
 def test_island_brief_roundtrip():
     """A per-island brief recorded for ONE island reads back for
     that island and is None for others — the mechanism that lets islands carry
-    DIFFERENT directions. Latest-wins; no brief => None (the gen then gets the constant
-    no-brief placeholder from _compose_meta_for_gen — there is no global-direction channel)."""
+    DIFFERENT directions. Latest-wins; no brief => None (the gen then carries no direction
+    header and gets the expert/creative preamble — there is no global-direction channel)."""
     from shinka.database import ProgramDatabase, DatabaseConfig
 
     sys.path.insert(0, str(_ORCH / "scripts"))
@@ -2334,6 +2353,46 @@ def test_feedback_always_fed_no_spoil_apparatus():
                 "error_traceback": "boom DETAIL", "metadata": {}}]
     meta_msg = ms._build_user_msg({"goal": "g", "use_text_feedback": False}, recents)
     assert "DETAIL" in meta_msg
+    return None
+
+
+def test_fix_prompt_ancestor_framing_honest():
+    """A fix prompt frames each ancestor by its ACTUAL correctness: the correct sampled
+    parent (immediate-fix path) renders as a known-correct behavioral reference WITH its
+    metrics, never under the 'incorrect and does not pass' banner; genuinely incorrect
+    ancestors keep the incorrect framing."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import construct_mutation_prompt as cmp
+
+    parent = {"id": "p", "code": "x=1\n", "combined_score": 0.0,
+              "metadata": {"stdout_log": "", "stderr_log": "Boom"}}
+    good_anc = {"id": "g", "code": "y=GOOD\n", "combined_score": 3.14,
+                "public_metrics": {"m": 1.0}, "correct": True}
+    bad_anc = {"id": "b", "code": "y=BAD\n", "combined_score": 0.0, "correct": False}
+
+    out = cmp.main({"parent": parent, "needs_fix": True,
+                    "ancestor_inspirations": [good_anc, bad_anc],
+                    "language": "python", "patch_types": ["diff"], "patch_type_probs": [1.0],
+                    "task_sys_msg": "t", "seed": 0})
+    msg = out.get("patch_msg", "") or ""
+    # The correct ancestor: known-correct reference block, metrics shown.
+    assert "# Known-correct ancestor (reference)" in msg, msg[:600]
+    assert "y=GOOD" in msg and "3.14" in msg, msg[:600]
+    # Its block must NOT carry the incorrect banner; the incorrect ancestor's block must.
+    _good_at = msg.index("y=GOOD")
+    _bad_at = msg.index("y=BAD")
+    _banner = "The program is incorrect and does not pass all validation tests."
+    assert _banner in msg
+    assert msg.index(_banner) > _bad_at > _good_at, (msg.index(_banner), _bad_at, _good_at)
+
+    # Correct-ancestor-only (the real immediate-fix shape): no incorrect banner anywhere.
+    out2 = cmp.main({"parent": parent, "needs_fix": True,
+                     "ancestor_inspirations": [good_anc],
+                     "language": "python", "patch_types": ["diff"], "patch_type_probs": [1.0],
+                     "task_sys_msg": "t", "seed": 0})
+    msg2 = out2.get("patch_msg", "") or ""
+    assert "# Known-correct ancestor (reference)" in msg2
+    assert _banner not in msg2, msg2[:600]
     return None
 
 

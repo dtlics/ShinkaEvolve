@@ -369,18 +369,16 @@ def _sample_patch_mode(patch_types, patch_type_probs, seed, exclude_fix=False) -
 
 
 def _compose_meta_for_gen(evo: Dict[str, Any], generation: int) -> Optional[str]:
-    """The no-brief fallback direction for THIS gen. Island differentiation is driven by the
-    per-island brief (applied in sample_parent from the meta round's per-island output); an
+    """The no-brief fallback direction for THIS gen: None. Island differentiation is driven by
+    the per-island brief (applied in sample_parent from the meta round's per-island output); an
     island that has no brief YET — a brand-new island, or any island before the first meta
-    round — gets this neutral placeholder, which is enough because the mutation prompt still
-    carries its assigned modes, any inspirations, and the task objective. There is no separate
+    round — gets NO direction header, so the sampler renders its EXPERT_CREATIVE_PREAMBLE
+    instead (a directive header wrapped around placeholder text read as a contradiction:
+    "must pursue the direction below …: No explicit direction yet"). There is no separate
     global-directions channel any more. (The persistent ``evo.meta_failure_note`` rides as its
     own always-on ``failure_note`` field, not here, so the caution is never clobbered by an
     island brief or dropped on a cross/empty gen.)"""
-    return (
-        "No explicit direction yet — follow the rest of the prompt: your assigned modes, "
-        "any inspirations shown, and the task objective."
-    )
+    return None
 
 
 def _head_tail_trunc(text: Any, cap: int = 2048) -> str:
@@ -693,8 +691,8 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         top_k_insp = _fetch(sp.get("top_k_inspiration_ids", []))
 
     # 2a. per-island DIRECTION: fetch the latest brief the orchestrator authored
-    # for THIS island so different islands carry DIFFERENT directions. None => the
-    # island falls back to the constant no-brief placeholder (_compose_meta_for_gen).
+    # for THIS island so different islands carry DIFFERENT directions. None => no
+    # direction header at all; the sampler renders EXPERT_CREATIVE_PREAMBLE instead.
     brief_text = None
     _isl = sp.get("island_idx")
     # Prefer the per-gen direction the SAMPLER drew from this island's STRUCTURED brief
@@ -715,8 +713,8 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             brief_text = None
 
     # 2. construct mutation prompt (MUTABLE policy; fix-mode picks the repair prompt)
-    # The no-brief fallback direction is a constant placeholder (_compose_meta_for_gen);
-    # island differentiation rides on the per-island brief above.
+    # No-brief gens carry no direction (None from _compose_meta_for_gen) and get the
+    # expert/creative preamble; island differentiation rides on the per-island brief above.
     _meta_for_gen = _compose_meta_for_gen(evo, generation)
     prompt = construct_mutation_prompt.main(
         {
@@ -1411,7 +1409,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         if evo.get("island_policy_driven"):
             import sys as _sys
             try:
-                _ip_res = island_policy_script.main({
+                _ip_payload = {
                     "db_path": db_path, "db_config": db_config,
                     "embedding_model": embedding_model,
                     "current_generation": (next_gen + iters_run - 1) if iters_run else next_gen,
@@ -1420,7 +1418,15 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     "last_policy_spawn_generation": _spawn_marker,
                     "policy_spawn_cooldown": evo.get("policy_spawn_cooldown", 0),
                     "apply": True,
-                })
+                }
+                # Forward the policy's OWN gates from evo.* when set (SKILL.md teaches them
+                # as config levers). Unset keys are NOT forwarded, so island_policy keeps its
+                # db_config-derived defaults for them (payload-first, back-compat).
+                for _pk in ("policy_spawn_enabled", "policy_spawn_stagnation",
+                            "policy_migrate_enabled", "policy_migrate_interval"):
+                    if evo.get(_pk) is not None:
+                        _ip_payload[_pk] = evo[_pk]
+                _ip_res = island_policy_script.main(_ip_payload)
                 _spawn_marker = (_ip_res or {}).get("last_policy_spawn_generation", _spawn_marker)
                 # SURFACE what actually ran, so the agent can
                 # tell "policy decided nothing" from "policy crashed". stderr (not log_step,

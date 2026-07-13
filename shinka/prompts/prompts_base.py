@@ -66,6 +66,7 @@ def construct_eval_history_msg(
     include_text_feedback: bool = False,
     correct: bool = True,
     for_cross: bool = False,
+    fix_reference: bool = False,
 ) -> str:
     """Construct an edit message for the given parent program and
     inspiration programs.
@@ -75,8 +76,19 @@ def construct_eval_history_msg(
     block must NOT tell the model "do not combine these" (that would contradict the
     crossover task). It stays plain background context. For diff/full it keeps the
     "eval history, not inspirations to stitch together" framing.
+
+    ``fix_reference`` (with ``correct=True``) frames the programs as the KNOWN-CORRECT
+    ancestry of a program being repaired: a behavioral reference with metrics, paired
+    with the instruction to fix the current attempt rather than revert to the ancestor.
     """
-    if correct and for_cross:
+    if correct and fix_reference:
+        inspiration_str = (
+            "Here is the known-correct ancestor this attempt was derived from. It passed "
+            "all validation tests with the metrics shown — use it as a behavioral "
+            "reference for what working output looks like. Do NOT simply revert to it: "
+            "keep the intent of the current attempt's change and fix the error instead:\n\n"
+        )
+    elif correct and for_cross:
         # cross: the crossover target is shown separately; these are just background.
         inspiration_str = (
             "For background, here are a few other prior programs from this run with "
@@ -104,6 +116,8 @@ def construct_eval_history_msg(
         if i == 0:
             if not correct:
                 inspiration_str += "# Prior programs\n\n"
+            elif fix_reference:
+                inspiration_str += "# Known-correct ancestor (reference)\n\n"
             elif for_cross:
                 inspiration_str += "# Other prior programs (background)\n\n"
             else:

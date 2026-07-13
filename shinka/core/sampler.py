@@ -282,16 +282,31 @@ class PromptSampler:
             sys_msg += "\n\n# Known failure modes to avoid\n"
             sys_msg += f"{failure_note}"
 
-        # Build eval history from ancestor inspirations (already chronological)
-        if ancestor_inspirations and len(ancestor_inspirations) > 0:
-            eval_history_msg = construct_eval_history_msg(
-                ancestor_inspirations,
+        # Build eval history from ancestor inspirations (already chronological).
+        # Frame each ancestor by its ACTUAL correctness: the immediate-fix path passes
+        # the CORRECT sampled parent here, which must read as a known-correct behavioral
+        # reference (with its metrics), never as "incorrect and does not pass" — a
+        # mislabeled parent misleads the repair and hides the working baseline.
+        _anc = list(ancestor_inspirations or [])
+        _correct_anc = [p for p in _anc if getattr(p, "correct", False)]
+        _incorrect_anc = [p for p in _anc if not getattr(p, "correct", False)]
+        _blocks = []
+        if _correct_anc:
+            _blocks.append(construct_eval_history_msg(
+                _correct_anc,
+                language=self.language,
+                include_text_feedback=self.use_text_feedback,
+                correct=True,
+                fix_reference=True,
+            ))
+        if _incorrect_anc:
+            _blocks.append(construct_eval_history_msg(
+                _incorrect_anc,
                 language=self.language,
                 include_text_feedback=self.use_text_feedback,
                 correct=False,
-            )
-        else:
-            eval_history_msg = ""
+            ))
+        eval_history_msg = "\n".join(_blocks)
 
         # Format text feedback section
         text_feedback_section = ""

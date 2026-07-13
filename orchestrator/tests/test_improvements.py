@@ -4053,6 +4053,106 @@ def test_repair_prompt_no_inspirations():
     return None
 
 
+def test_fix_prompt_stdout_capped():
+    """A chatty evaluator's stdout/stderr is head+tail-capped at PROMPT BUILD (16KB,
+    shinka.utils.general policy) so a fix prompt never fences an unbounded log; the
+    archived record is untouched (the cap is applied to the prompt copy only)."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import construct_mutation_prompt as cmp
+
+    big_out = "OUTLINE\n" + ("A" * 100_000)
+    big_err = ("B" * 100_000) + "\nValueError: the real error"
+    parent = {"id": "p", "code": "x=1\n", "combined_score": 0.0,
+              "metadata": {"stdout_log": big_out, "stderr_log": big_err}}
+    out = cmp.main({"parent": parent, "needs_fix": True, "language": "python",
+                    "patch_types": ["diff"], "patch_type_probs": [1.0],
+                    "task_sys_msg": "t", "seed": 0})
+    msg = out.get("patch_msg", "") or ""
+    assert "[stderr truncated]" in msg, "cap marker missing"
+    # Head AND tail survive; the bulk does not.
+    assert "OUTLINE" in msg and "ValueError: the real error" in msg
+    assert "A" * 20_000 not in msg and "B" * 20_000 not in msg
+    # The caller's dict is not mutated (archive stays lossless).
+    assert len(parent["metadata"]["stdout_log"]) > 100_000
+    return None
+
+
+def test_failure_histogram_deterministic():
+    """meta_summarize._failure_histogram: pure-Python counted error signatures over
+    the recent-gens window — normalization collapses numbers, old gens age out,
+    top-5 cap and 400-char cap hold, and no-failure input yields ''. """
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import meta_summarize as ms
+
+    rows = (
+        [{"generation": 30 + i, "island_idx": 0, "correct": False,
+          "error_head": f"EvaluationTerminated: time limit {1800 + i}s"} for i in range(4)]
+        + [{"generation": 33, "island_idx": 2, "correct": False,
+            "error_head": "ValueError: non-adjacent CNOT"}]
+        + [{"generation": 34, "island_idx": 1, "correct": True, "error_head": ""}]
+        + [{"generation": 1, "island_idx": 0, "correct": False,
+            "error_head": "AncientError: should age out"}]
+    )
+    hist = ms._failure_histogram(rows, recent_gens=20)
+    assert hist.startswith("Top error signatures (deterministic count"), hist
+    assert "4x" in hist and "time limit #s" in hist, hist  # numbers normalized, counted
+    assert "non-adjacent cnot" in hist, hist
+    assert "ancient" not in hist.lower(), hist  # outside the recency window
+    assert len(hist) <= 400
+    assert ms._failure_histogram([], 20) == ""
+    assert ms._failure_histogram(
+        [{"generation": 5, "correct": True, "error_head": ""}], 20) == ""
+    # Top-5 cap: 7 distinct signatures -> only 5 rendered.
+    many = [{"generation": 50, "island_idx": 0, "correct": False,
+             "error_head": f"Err{chr(65 + i)}: boom"} for i in range(7)]
+    h2 = ms._failure_histogram(many, 20)
+    assert h2.count(")") >= 5 and "5)" in h2 and "6)" not in h2, h2
+    return None
+
+
+def test_anti_inbreeding_exemplars():
+    """Exemplar selection demotes the parent's 1-hop kin (its parent + children):
+    excluded while non-kin can fill the counts, backfill otherwise."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import archive_record
+    import sample_parent
+
+    with tempfile.TemporaryDirectory() as td:
+        db_path = os.path.join(td, "programs.sqlite")
+
+        def _rec(pid, gen, score, parent_id=None, cfg=None):
+            archive_record.main({
+                "db_path": db_path, "db_config": cfg,
+                "program": {"id": pid, "code": f"# {pid}\n", "generation": gen,
+                            "combined_score": score, "correct": True,
+                            "parent_id": parent_id, "public_metrics": {}},
+            })
+
+        cfg1 = {"num_islands": 1, "archive_size": 20,
+                "num_top_k_inspirations": 1, "num_archive_inspirations": 1}
+        _rec("A", 0, 5.0, None, cfg1)          # B's parent  (kin)
+        _rec("B", 1, 4.0, "A", cfg1)           # the pinned parent
+        _rec("C", 2, 3.5, "B", cfg1)           # B's child   (kin)
+        _rec("D", 3, 3.0, "A", cfg1)           # non-kin (sibling of B)
+        _rec("E", 4, 2.0, "A", cfg1)           # non-kin
+
+        # 1+1 counts: non-kin D and E fill the panel; kin A/C excluded despite
+        # outranking them by score.
+        out = sample_parent.main({"db_path": db_path, "db_config": cfg1,
+                                  "parent_id": "B", "seed": 0})
+        assert out["parent_id"] == "B"
+        assert out["top_k_inspiration_ids"] == ["D"], out
+        assert out["archive_inspiration_ids"] == ["E"], out
+
+        # 2+2 counts: non-kin can't fill 4 slots -> kin backfill AFTER non-kin.
+        cfg2 = {**cfg1, "num_top_k_inspirations": 2, "num_archive_inspirations": 2}
+        out2 = sample_parent.main({"db_path": db_path, "db_config": cfg2,
+                                   "parent_id": "B", "seed": 0})
+        assert out2["top_k_inspiration_ids"] == ["D", "E"], out2
+        assert out2["archive_inspiration_ids"] == ["A", "C"], out2
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
@@ -4152,6 +4252,10 @@ if __name__ == "__main__":
         ("prebrief_inspiration_mode", test_prebrief_inspiration_mode),
         ("error_history_accumulation", test_error_history_accumulation),
         ("repair_prompt_no_inspirations", test_repair_prompt_no_inspirations),
+        ("fix_prompt_ancestor_framing_honest", test_fix_prompt_ancestor_framing_honest),
+        ("fix_prompt_stdout_capped", test_fix_prompt_stdout_capped),
+        ("failure_histogram_deterministic", test_failure_histogram_deterministic),
+        ("anti_inbreeding_exemplars", test_anti_inbreeding_exemplars),
     ]
     ok = True
     for name, fn in tests:

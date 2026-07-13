@@ -1561,6 +1561,8 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     # Depth knob (orchestrator lever, evo.meta_n_recent in the config):
                     # how many recent programs meta renders in depth.
                     "meta_n_recent": evo.get("meta_n_recent", 32),
+                    # Deterministic failure-histogram recency: ~the last two windows.
+                    "failure_hist_recent_gens": 2 * int(evo.get("window_size", 10) or 10),
                 }
                 if _mock.get("enabled"):  # offline runs/tests: no Azure call
                     _meta_payload["mock"] = True

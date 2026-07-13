@@ -16,6 +16,12 @@ matches shinka's WeightedSamplingStrategy on the same archive.
 Policy knobs (from db_config): parent_selection_lambda (sigmoid sharpness),
 num_archive_inspirations, num_top_k_inspirations, num_islands.
 
+Anti-inbreeding: exemplar selection DEMOTES the parent's 1-hop kin (its own
+parent + its children) — excluded while enough non-kin candidates exist,
+backfill otherwise — so exemplar slots aren't spent on near-copies of the
+parent. Direction-assigned exemplars drop kin only when a non-kin assignee
+remains (meta's realizes-this-direction pick is never emptied by the filter).
+
 INPUT (stdin JSON):
   {
     "db_path": str, "db_config": {..}, "embedding_model": str,
@@ -334,12 +340,25 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     _dirs = _load_island_directions(config, embedding_model, island_idx)
     top_k: List[str] = []
     archive_insp: List[str] = []
+    # Anti-inbreeding (1-hop exclusion): exemplar slots should not be spent on the
+    # parent's own parent or children — near-copies of the parent add little new
+    # information per token. Kin are DEMOTED (excluded when enough non-kin exist,
+    # backfill otherwise) so tiny islands still fill their counts.
+    _kin = {getattr(parent, "parent_id", None)}
+    _kin |= {p.id for p in pool if getattr(p, "parent_id", None) == parent.id}
+    _kin.discard(None)
     if _dirs:
         _dir = _sample_direction(_dirs, rng)
         sampled_direction = (str(_dir.get("text") or "").strip()) or None
         _pool_ids = {p.id for p in pool}
         _assigned = [str(x) for x in (_dir.get("assigned_program_ids") or [])
                      if str(x) in _pool_ids and str(x) != parent.id]
+        # Kin exclusion is soft here: the direction's ASSIGNED programs are meta's
+        # explicit realizes-this-direction picks, so kin are dropped only when a
+        # non-kin assignee remains (never leave a realized direction exemplar-less).
+        _non_kin = [x for x in _assigned if x not in _kin]
+        if _non_kin:
+            _assigned = _non_kin
         if _assigned:
             top_k_n = max(1, int(getattr(config, "num_top_k_inspirations", 1)))
             top_k = _assigned[:top_k_n]
@@ -356,15 +375,23 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         arch_n = int(getattr(config, "num_archive_inspirations", 1))
         if str(payload.get("prebrief_inspiration_mode") or "top") == "random":
             others = [p for p in pool if p.id != parent.id]
-            picked = rng.sample(others, k=min(top_k_n + arch_n, len(others)))
+            _non_kin = [p for p in others if p.id not in _kin]
+            # Draw from non-kin only when they alone can fill the counts; else keep
+            # the full pool (rng consumption changes only when kin exist AND thin out).
+            _draw = _non_kin if len(_non_kin) >= (top_k_n + arch_n) else others
+            picked = rng.sample(_draw, k=min(top_k_n + arch_n, len(_draw)))
             top_k = [p.id for p in picked[:top_k_n]]
             archive_insp = [p.id for p in picked[top_k_n:]]
         else:
-            # Top-k by score (excluding parent) + a couple of elites.
+            # Top-k by score (excluding parent) + a couple of elites; kin demoted to
+            # the BACK of the ranking (pure backfill — identical to before when the
+            # pool has no kin).
             ranked = sorted(pool, key=lambda p: _finite_score(getattr(p, "combined_score", 0.0)), reverse=True)  # NaN/None-safe
-            top_k = [p.id for p in ranked if p.id != parent.id][:top_k_n]
-            elite_pool = [p for p in ranked if p.id != parent.id and p.id not in top_k]
-            archive_insp = [p.id for p in elite_pool[:arch_n]]
+            _others = [p for p in ranked if p.id != parent.id]
+            _ordered = ([p for p in _others if p.id not in _kin]
+                        + [p for p in _others if p.id in _kin])
+            top_k = [p.id for p in _ordered][:top_k_n]
+            archive_insp = [p.id for p in _ordered[top_k_n:top_k_n + arch_n]]
 
     return {
         "parent_id": parent.id,

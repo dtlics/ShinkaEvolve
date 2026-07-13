@@ -93,6 +93,18 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         # program; build a repair prompt from its error + its ancestors. The
         # "when to fix" decision lives in sample_parent.needs_fix; this is the
         # "how to fix" prompt half.
+        # Cap stdout/stderr at PROMPT BUILD only (the archived record stays
+        # lossless): a chatty evaluator can emit megabytes of stdout, which
+        # sample_fix would fence verbatim into the repair prompt — token cost up,
+        # error signal drowned. Same 16KB head+tail policy as load_results'
+        # stderr cap (shinka.utils.general).
+        from shinka.utils.general import truncate_log
+
+        _md = dict(getattr(parent, "metadata", None) or {})
+        for _k in ("stdout_log", "stderr_log"):
+            if _md.get(_k):
+                _md[_k] = truncate_log(str(_md[_k]))
+        parent.metadata = _md
         ancestors = [_to_program(d) for d in payload.get("ancestor_inspirations", [])]
         patch_sys, patch_msg, patch_type = sampler.sample_fix(
             incorrect_program=parent, ancestor_inspirations=ancestors,

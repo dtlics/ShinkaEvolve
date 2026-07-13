@@ -34,7 +34,14 @@ OUTPUT CONTRACT:
                         (e.g. runtime/timeout vs correctness) and what future
                         attempts should watch for. The orchestrator writes it to
                         ``evo.meta_failure_note`` and run_window feeds it forward
-                        into EVERY gen (a persistent caution).
+                        into EVERY gen (a persistent caution). A DETERMINISTIC
+                        top-error-signature histogram (pure-Python counts over the
+                        recent failed rows, recomputed fresh each round → it
+                        self-clears when a failure mode stops) is appended to the
+                        note AFTER the LLM call, so exact counts can never be
+                        dropped or diluted by the model; the prompt tells the
+                        model to keep its prose qualitative and not duplicate
+                        counts.
 
 GUARANTEE (meta must SEE failures): if ``recent_programs`` is not supplied but
 ``db_path`` is, meta SELF-GATHERS recent attempts from the archive — explicitly
@@ -63,6 +70,8 @@ INPUT (stdin JSON):
     "best_program": {"combined_score": float, "code": str} | null,
     "meta_n_recent": 32,          # depth knob (legacy alias: n_recent)
     "meta_code_preview_chars": 1200,  # per-program code preview cap (0 disables)
+    "failure_hist_recent_gens": 20,   # histogram recency window in generations
+                                      #   (run_window passes 2 x window_size)
     "prior_recommendations": str | null,
     "max_recommendations": 5,
     "results_dir": str | null,   # if set, self-log the full call + fold cost into the ledger
@@ -113,10 +122,11 @@ _SYS = (
     "Produce STRICT JSON and nothing else:\n"
     '{{\n'
     '  "failure_note": "<2-4 sentences of PROSE: what tended to cause the recent failures '
-    '(e.g. runtime/timeout vs broken correctness) and what future attempts should be careful '
-    'about. Lead with the dominant failure class and roughly how common it was (e.g. \'Most '
-    'recent failures (~X of N) were timeouts; ...\'). Empty string if there were no '
-    'failures.>",\n'
+    '(e.g. runtime/timeout vs broken correctness), WHY, and what future attempts should be '
+    'careful about. Lead with the dominant failure class. Do NOT enumerate per-error counts '
+    '— an exact, deterministically-counted error-signature histogram is appended to your '
+    'note automatically downstream; your prose adds the interpretation it cannot. Empty '
+    'string if there were no failures.>",\n'
     '  "islands": [ {{"island_idx": <int — one of the live island ids listed below>, '
     '"directions": [ {{"text": "<a direction for THIS island; name the technique, no code>", '
     '"weight": <0..1>, "assigned_program_id": "<the id of an EXISTING program shown for THIS '
@@ -130,6 +140,53 @@ _SYS = (
     "assigned_program_id to that island's existing program id; use null for fresh ideas. "
     "Weight = your confidence it pays off; weights need not sum to 1. Output ONLY the JSON object."
 )
+
+
+# Deterministic failure-histogram bounds: the block is appended to failure_note,
+# which rides into EVERY mutation prompt — keep it compact.
+_HIST_TOP_N = 5
+_HIST_MAX_CHARS = 400
+
+
+def _norm_sig(err: str) -> str:
+    """Normalize an error head-line into a stable signature: lowercase, hex/numbers
+    collapsed to '#', whitespace collapsed, 80-char cap — so 'timeout after 1801s'
+    and 'timeout after 1804s' count as ONE signature."""
+    s = str(err or "").strip().lower()
+    s = re.sub(r"0x[0-9a-f]+", "#", s)
+    s = re.sub(r"\d+(\.\d+)?", "#", s)
+    s = re.sub(r"\s+", " ", s)
+    return s[:80]
+
+
+def _failure_histogram(compact: Optional[List[Dict[str, Any]]], recent_gens: int) -> str:
+    """Deterministic top-N error-signature histogram over the last ``recent_gens``
+    generations of live FAILED archive rows (the compact rows carry ``error_head``).
+    Pure Python — appended to failure_note AFTER the LLM call so counted failure
+    patterns can never be dropped or diluted by the model. Recomputed fresh from
+    the archive each round, so a fixed failure mode ages out on its own."""
+    rows = list(compact or [])
+    if not rows:
+        return ""
+    gens = [int(r.get("generation") or 0) for r in rows]
+    lo = (max(gens) if gens else 0) - max(int(recent_gens), 1)
+    win = [r for r in rows if not r.get("correct") and int(r.get("generation") or 0) > lo]
+    if not win:
+        return ""
+    sigs: Dict[str, Dict[str, Any]] = {}
+    for r in win:
+        sig = _norm_sig(r.get("error_head") or "") or "(no error text)"
+        ent = sigs.setdefault(sig, {"n": 0, "islands": set()})
+        ent["n"] += 1
+        if r.get("island_idx") is not None:
+            ent["islands"].add(r.get("island_idx"))
+    top = sorted(sigs.items(), key=lambda kv: (-kv[1]["n"], kv[0]))[:_HIST_TOP_N]
+    parts = [f"Top error signatures (deterministic count, last ~{int(recent_gens)} gens, "
+             f"{len(win)} failures):"]
+    for i, (sig, ent) in enumerate(top, 1):
+        isl = ",".join(str(x) for x in sorted(ent["islands"]))
+        parts.append(f"{i}) {ent['n']}x \"{sig}\"" + (f" [isl {isl}]" if isl else ""))
+    return " ".join(parts)[:_HIST_MAX_CHARS]
 
 
 def _gather_recent(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -465,6 +522,14 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "degraded": True, "error": str(exc),
         }
     parsed = _parse_meta(text, n)
+    # Append the deterministic failure histogram AFTER the LLM call (the prompt told
+    # the model to keep its prose qualitative): counted error signatures ride the same
+    # always-on failure_note channel into every gen and cannot be dropped/diluted.
+    _hist = _failure_histogram(
+        compact, int(payload.get("failure_hist_recent_gens", 20) or 20))
+    if _hist:
+        parsed["failure_note"] = (
+            (str(parsed.get("failure_note") or "").strip() + "\n" + _hist).strip())
     # Legacy joined string — handy for logging and for any caller that still wants
     # a single blob (back-compat); the structured fields are the real output.
     joined = "\n".join(f"{i+1}. {d['text']}" for i, d in enumerate(parsed["directions"]))

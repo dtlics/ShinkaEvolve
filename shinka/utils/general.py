@@ -31,6 +31,12 @@ def _truncate_log(text: str, max_bytes: int = _STDERR_LOG_MAX_BYTES) -> str:
     return text[:head] + _TRUNCATED_MARKER + text[-tail:]
 
 
+# Public alias: prompt-side callers (construct_mutation_prompt's fix branch) cap
+# stdout/stderr with the SAME policy as load_results' stderr cap, so no prompt
+# ever fences an unbounded log while the archived record stays lossless.
+truncate_log = _truncate_log
+
+
 def load_configs_from_yaml(config_path: str):
     """
     Loads configs from a YAML file.

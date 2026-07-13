@@ -4154,6 +4154,79 @@ def test_failure_histogram_deterministic():
     return None
 
 
+def test_cached_pricing_and_cache_key_plumbing():
+    """Caching riders: (1) cached tokens bill at FULL input price while pricing.csv
+    carries no verified cached rate (byte-identical ledger — overcount-safe), and at
+    the cached rate once a rate is filled in; (2) _cached_input_tokens reads attr-
+    and dict-shaped usage details; (3) mutate forwards payload.prompt_cache_key into
+    bg_query; (4) the window-pinned FULL-format variant is deterministic."""
+    from types import SimpleNamespace as NS
+
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import _azure
+    import mutate
+    import construct_mutation_prompt as cmp
+    from shinka.llm.providers import pricing
+
+    # (1) No verified rate: cached tokens change NOTHING (conservative fallback).
+    base = pricing.calculate_cost("gpt-5.5", 10_000, 1_000)
+    assert pricing.calculate_cost("gpt-5.5", 10_000, 1_000, cached_input_tokens=8_000) == base
+    # With a rate on file: (in - cached)*full + cached*rate; cached clamped to input.
+    try:
+        pricing._PRICING_DF.loc["gpt-5.5", "cached_input_price"] = 0.5 / pricing.M
+        ic, _ = pricing.calculate_cost("gpt-5.5", 10_000, 0, cached_input_tokens=8_000)
+        assert abs(ic - (2_000 * 5.0 + 8_000 * 0.5) / pricing.M) < 1e-12, ic
+        ic2, _ = pricing.calculate_cost("gpt-5.5", 1_000, 0, cached_input_tokens=9_999)
+        assert abs(ic2 - 1_000 * 0.5 / pricing.M) < 1e-12, ic2
+    finally:
+        pricing._PRICING_DF.loc["gpt-5.5", "cached_input_price"] = float("nan")
+
+    # (2) usage-details shapes.
+    assert _azure._cached_input_tokens(NS(input_tokens_details=NS(cached_tokens=42))) == 42
+    assert _azure._cached_input_tokens(NS(input_tokens_details={"cached_tokens": 7})) == 7
+    assert _azure._cached_input_tokens(NS()) == 0
+    assert _azure._cached_input_tokens(NS(input_tokens_details=NS(cached_tokens=None))) == 0
+
+    # (3) mutate forwards prompt_cache_key to the transport.
+    captured = {}
+    full_reply = ("<NAME>n</NAME><DESCRIPTION>d</DESCRIPTION>"
+                  "<CODE>\n```python\n# EVOLVE-BLOCK-START\nx = 2\n"
+                  "# EVOLVE-BLOCK-END\n```\n</CODE>")
+
+    def fake_bg(model_name, system_msg, user_msg, reasoning_effort=None,
+                call_metadata=None, **kw):
+        captured.update(kw)
+        return full_reply, 0.0
+
+    orig = _azure.bg_query
+    try:
+        _azure.bg_query = fake_bg
+        with tempfile.TemporaryDirectory() as td:
+            out = mutate.main({
+                "parent_code": "# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n",
+                "patch_sys": "s", "patch_msg": "m", "patch_type": "full",
+                "patch_dir": td, "language": "python",
+                "model_name": "azure-gpt-5.5", "prompt_cache_key": "run1:isl0",
+            })
+        assert captured.get("prompt_cache_key") == "run1:isl0", captured
+        assert out["applied"] is True, out
+    finally:
+        _azure.bg_query = orig
+
+    # (4) window-pinned FULL variant: same index => identical system prompt;
+    # different index => different format tail.
+    parent = {"id": "p", "code": "x=1\n", "combined_score": 0.0, "public_metrics": {}}
+    def _sys_for(variant):
+        return cmp.main({"parent": parent, "task_sys_msg": "t",
+                         "patch_types": ["full"], "patch_type_probs": [1.0],
+                         "forced_patch_type": "full", "full_format_variant": variant,
+                         "seed": 0})["patch_sys"]
+    assert _sys_for(3) == _sys_for(3)
+    assert _sys_for(3) != _sys_for(4)
+    assert _sys_for(8) == _sys_for(3)  # mod-5 wraparound
+    return None
+
+
 def test_anti_inbreeding_exemplars():
     """Exemplar selection demotes the parent's 1-hop kin (its parent + children):
     excluded while non-kin can fill the counts, backfill otherwise."""
@@ -4300,6 +4373,7 @@ if __name__ == "__main__":
         ("meta_global_insights_roundtrip", test_meta_global_insights_roundtrip),
         ("fix_prompt_stdout_capped", test_fix_prompt_stdout_capped),
         ("failure_histogram_deterministic", test_failure_histogram_deterministic),
+        ("cached_pricing_and_cache_key_plumbing", test_cached_pricing_and_cache_key_plumbing),
         ("anti_inbreeding_exemplars", test_anti_inbreeding_exemplars),
     ]
     ok = True

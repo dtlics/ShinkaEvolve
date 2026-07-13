@@ -500,6 +500,8 @@ def _attempt_immediate_fixes(
             "run_id": cfg.get("run_id"),
             "generation": generation,
             "verbose": cfg.get("verbose", False),
+            # Fix prompts share the task_sys_msg prefix with each other — co-route them.
+            "prompt_cache_key": (f"{cfg.get('run_id')}:fix" if cfg.get("run_id") else None),
         }
         if enable_web_search:
             fix_payload["enable_web_search"] = True  # plumbed through mutate into the Azure call
@@ -748,6 +750,10 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             # Per-eval budget → bounded runtime caution when the parent/an inspiration ran slow.
             "eval_budget_sec": _eval_budget_sec(task),
             "seed": gseed,
+            # Pin ONE full-rewrite format variant per WINDOW (instead of per-call
+            # random): removes prefix-cache noise from the system prompt's tail while
+            # windows still rotate through all variants across the run.
+            "full_format_variant": counters.get("window_index"),
         }
     )
     _trace({"step": "prompt", "patch_type": prompt.get("patch_type"),
@@ -835,6 +841,11 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         "run_id": cfg.get("run_id"),
         "generation": generation,
         "verbose": cfg.get("verbose", False),
+        # Cache-routing hint: same run + same island share the longest prompt prefix
+        # (task_sys_msg + direction/failure-note), so co-route them onto one warm
+        # cache machine. Azure prompt caching itself is automatic; this only steers.
+        "prompt_cache_key": (f"{cfg.get('run_id')}:isl{sp.get('island_idx')}"
+                             if cfg.get("run_id") else None),
     }
     if mock.get("enabled"):
         mut_payload["mock"] = True

@@ -45,11 +45,22 @@ def _load_pricing_dataframe() -> pd.DataFrame:
     # Convert tier threshold to numeric (empty/NaN stays as NaN)
     df["tier_threshold"] = pd.to_numeric(df["tier_threshold"], errors="coerce")
 
+    # Cached-input price (per 1M, e.g. Azure/OpenAI prompt-cache discount rate).
+    # Empty/NaN => no verified cached rate; calculate_cost then bills cached tokens
+    # at the FULL input price (conservative: the ledger never undercounts).
+    if "cached_input_price" in df.columns:
+        df["cached_input_price"] = pd.to_numeric(
+            df["cached_input_price"].replace("N/A", ""), errors="coerce"
+        )
+    else:  # tolerate an older CSV without the column
+        df["cached_input_price"] = float("nan")
+
     # Convert prices from per-1M-tokens to per-token
     df["input_price"] = df["input_price"] / M
     df["output_price"] = df["output_price"] / M
     df["input_price_tier2"] = df["input_price_tier2"] / M
     df["output_price_tier2"] = df["output_price_tier2"] / M
+    df["cached_input_price"] = df["cached_input_price"] / M
 
     # Convert is_reasoning to boolean
     df["is_reasoning"] = df["is_reasoning"] == "True"
@@ -109,14 +120,20 @@ def get_model_prices(model_name: str, input_tokens: Optional[int] = None) -> dic
         input_price = row["input_price"]
         output_price = row["output_price"]
 
+    cached_price = row.get("cached_input_price")
     return {
         "input_price": input_price,
         "output_price": output_price,
+        # None when no verified cached rate exists for the model.
+        "cached_input_price": (
+            None if cached_price is None or pd.isna(cached_price) else cached_price
+        ),
     }
 
 
 def calculate_cost(
-    model_name: str, input_tokens: int, output_tokens: int
+    model_name: str, input_tokens: int, output_tokens: int,
+    cached_input_tokens: int = 0,
 ) -> Tuple[float, float]:
     """Calculate input and output costs for a model with tiered pricing support.
 
@@ -124,16 +141,30 @@ def calculate_cost(
     the input token count. If input_tokens exceeds the tier threshold, tier 2
     prices are used for BOTH input and output.
 
+    ``cached_input_tokens`` (a subset of ``input_tokens``, e.g. the Responses API's
+    ``usage.input_tokens_details.cached_tokens``) is billed at the model's
+    ``cached_input_price`` when pricing.csv carries a VERIFIED rate; with no rate
+    on file, cached tokens bill at the full input price — identical to the
+    pre-cached-pricing behavior, so the ledger can overcount but never undercount.
+
     Args:
         model_name: The name of the model.
-        input_tokens: Number of input tokens.
+        input_tokens: Number of input tokens (TOTAL, including cached).
         output_tokens: Number of output tokens (including thinking tokens).
+        cached_input_tokens: Cache-hit portion of input_tokens.
 
     Returns:
         Tuple of (input_cost, output_cost).
     """
     prices = get_model_prices(model_name, input_tokens=input_tokens)
-    input_cost = prices["input_price"] * input_tokens
+    cached = max(0, min(int(cached_input_tokens or 0), int(input_tokens)))
+    cached_price = prices.get("cached_input_price")
+    if cached and cached_price is not None:
+        input_cost = (
+            prices["input_price"] * (input_tokens - cached) + cached_price * cached
+        )
+    else:
+        input_cost = prices["input_price"] * input_tokens
     output_cost = prices["output_price"] * output_tokens
     return input_cost, output_cost
 

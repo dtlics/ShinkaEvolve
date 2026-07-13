@@ -28,6 +28,8 @@ INPUT (stdin JSON):
     "patch_type_probs": [0.6,0.3,0.1],
     "language": "python",
     "forced_patch_type": str | null, # the patch MODE run_window sampled (diff/full/cross); null = sampler samples internally
+    "full_format_variant": int | null, # window-pinned FULL-rewrite variant index (mod 5);
+                                       #   null = legacy per-call random draw
     "objective_brief": str | null,   # orchestrator-authored objective/score-shape gloss (what we optimize + constraints)
     "inspiration_sort_order": "ascending",
     "extra_guidance": str | null,   # appended to the system prompt (rewrite lever)
@@ -134,6 +136,9 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             failure_note=payload.get("failure_note"),
             objective_brief=payload.get("objective_brief"),
             forced_patch_type=payload.get("forced_patch_type"),
+            # Window-pinned full-rewrite variant (prefix-cache-stable system tail);
+            # None keeps the legacy per-call random draw.
+            full_format_variant=payload.get("full_format_variant"),
         )
 
     # Rewrite lever: orchestrator-supplied guidance is appended to the system

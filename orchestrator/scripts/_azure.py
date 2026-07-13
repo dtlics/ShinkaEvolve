@@ -66,16 +66,44 @@ def _extract_text(response: Any) -> str:
     return ""
 
 
+def _cached_input_tokens(usage: Any) -> int:
+    """The prompt-cache-hit slice of input tokens (Responses API:
+    usage.input_tokens_details.cached_tokens; attr- or dict-shaped). 0 when absent."""
+    details = getattr(usage, "input_tokens_details", None)
+    if details is None:
+        return 0
+    if isinstance(details, dict):
+        val = details.get("cached_tokens", 0)
+    else:
+        val = getattr(details, "cached_tokens", 0)
+    try:
+        return max(int(val or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _usage_cost(response: Any, api_model_name: str) -> float:
     usage = getattr(response, "usage", None)
     if usage is None:
         return 0.0
     in_tok = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0) or 0
     out_tok = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", 0) or 0
+    cached_tok = _cached_input_tokens(usage)
+    if cached_tok:
+        # Observability for the caching economics: how much of the prompt actually
+        # hit the prefix cache. Priced at the cached rate only once pricing.csv
+        # carries a VERIFIED cached_input_price for the model (else full price —
+        # the ledger overcounts rather than undercounts).
+        logger.info(
+            "Azure prompt cache hit: %s of %s input tokens cached (model=%s)",
+            cached_tok, in_tok, api_model_name,
+        )
     try:
         from shinka.llm.providers.pricing import calculate_cost
 
-        ic, oc = calculate_cost(api_model_name, int(in_tok), int(out_tok))
+        ic, oc = calculate_cost(
+            api_model_name, int(in_tok), int(out_tok), cached_input_tokens=cached_tok
+        )
         cost = float(ic) + float(oc)
     except Exception as e:
         # A billed response that fails to price (unknown/renamed/typo'd deployment)
@@ -100,6 +128,7 @@ async def _bg_call(
     client, api_model_name, system_msg, user_msg, reasoning_effort, call_metadata,
     poll_interval, poll_timeout, max_output_tokens, tools=None,
     per_request_timeout=_PER_REQUEST_TIMEOUT_SEC,
+    prompt_cache_key=None,
 ) -> Tuple[str, float]:
     create_kwargs: Dict[str, Any] = {
         "model": api_model_name,
@@ -107,6 +136,11 @@ async def _bg_call(
         "input": user_msg,
         "background": True,
     }
+    if prompt_cache_key:
+        # Steers Azure's prefix-hash routing so calls sharing a long prompt prefix
+        # (same run + island) co-route to a warm cache machine. Purely an economics
+        # hint — never affects model output.
+        create_kwargs["prompt_cache_key"] = str(prompt_cache_key)
     if reasoning_effort and reasoning_effort != "disabled":
         create_kwargs["reasoning"] = {"effort": reasoning_effort}
     if call_metadata:
@@ -196,6 +230,7 @@ def bg_query(
     enable_web_search: bool = False,
     tools: Optional[list] = None,
     per_request_timeout: float = _PER_REQUEST_TIMEOUT_SEC,
+    prompt_cache_key: Optional[str] = None,
 ) -> Tuple[str, float]:
     """One Azure background-mode call. Returns (text, cost). Azure/OpenAI only.
 
@@ -206,6 +241,10 @@ def bg_query(
     (or pass an explicit `tools` list). OFF by default — the two sanctioned uses are
     DR and pro nailing a DR reference. Tool support is per-deployment; enable it
     deliberately for the model you've confirmed supports it.
+
+    `prompt_cache_key` (optional) co-routes calls sharing a long identical prompt
+    prefix onto the same cache machine (Azure prompt caching is otherwise automatic:
+    >=1,024-token identical prefix required). An economics hint only.
     """
     from shinka.llm.client import get_async_client_llm
     from shinka.llm.providers.model_resolver import resolve_model_backend
@@ -223,5 +262,6 @@ def bg_query(
             client, api_model_name, system_msg, user_msg,
             reasoning_effort, call_metadata, poll_interval, poll_timeout,
             max_output_tokens, tools, per_request_timeout,
+            prompt_cache_key=prompt_cache_key,
         )
     )

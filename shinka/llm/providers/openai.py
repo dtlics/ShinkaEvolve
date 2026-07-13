@@ -66,6 +66,10 @@ def get_openai_costs(response, model):
         thinking_tokens = response.usage.output_tokens_details.reasoning_tokens
     except Exception:
         thinking_tokens = 0
+    try:
+        cached_tokens = int(response.usage.input_tokens_details.cached_tokens or 0)
+    except Exception:
+        cached_tokens = 0
     all_out_tokens = response.usage.output_tokens
     out_tokens = response.usage.output_tokens - thinking_tokens
 
@@ -83,7 +87,9 @@ def get_openai_costs(response, model):
                 getattr(cost_details, "upstream_inference_output_cost", 0.0) or 0.0
             )
     elif model_exists(model):
-        input_cost, output_cost = calculate_cost(model, in_tokens, all_out_tokens)
+        input_cost, output_cost = calculate_cost(
+            model, in_tokens, all_out_tokens, cached_input_tokens=cached_tokens
+        )
     else:
         logger.warning(
             "Model '%s' has no pricing entry and response cost metadata is absent. "

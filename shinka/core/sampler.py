@@ -86,6 +86,7 @@ class PromptSampler:
         failure_note: Optional[str] = None,
         objective_brief: Optional[str] = None,
         forced_patch_type: Optional[str] = None,
+        full_format_variant: Optional[int] = None,
     ) -> Tuple[str, str, str]:
         if self.task_sys_msg is None:
             sys_msg = BASE_SYSTEM_MSG
@@ -164,8 +165,14 @@ class PromptSampler:
         if patch_type == "diff":
             sys_msg += DIFF_SYS_FORMAT
         elif patch_type == "full":
-            # Randomly sample from different full rewrite variants
-            full_variant_idx = np.random.randint(0, len(FULL_SYS_FORMATS))
+            # Full-rewrite format variant: pinned by the caller when provided (the
+            # harness pins one per WINDOW — stable system-prompt tail = usable prompt
+            # cache prefix; windows rotate through all variants across the run), else
+            # the legacy per-call random draw.
+            if full_format_variant is not None:
+                full_variant_idx = int(full_format_variant) % len(FULL_SYS_FORMATS)
+            else:
+                full_variant_idx = np.random.randint(0, len(FULL_SYS_FORMATS))
             selected_format = FULL_SYS_FORMATS[full_variant_idx]
             sys_msg += selected_format
         elif patch_type == "cross":

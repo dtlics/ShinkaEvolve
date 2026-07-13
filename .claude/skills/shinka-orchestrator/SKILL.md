@@ -312,7 +312,18 @@ abstract caution that each eval has a runtime budget so the code must stay effic
 numbers — reinforced in-loop by the numeric runtime-budget caution when a candidate runs slow). The
 harness REFUSES to start with a missing / empty / placeholder `task_sys_msg` (the starter ships the
 sentinel `__UNSET_AUTHOR_AT_BOOT__`); `task.require_sys_msg:false` overrides for a bare debug smoke,
-and `--warmup` flips it off for its throwaway run only.
+and `--warmup` flips it off for its throwaway run only. **Length note (free money):** Azure prompt
+caching is automatic but only fires when the first **1,024 tokens** of a prompt are identical
+across calls — and `task_sys_msg` is the ONLY content stable across every mutation. Author it (it
+leads the system prompt) comfortably past ~1,024 tokens of genuinely useful problem statement
+(never padding), and same-run calls get the discount on that whole slice. The harness already
+pins one FULL-format variant per window and sends a run+island `prompt_cache_key` to co-route
+same-prefix calls. The ledger reads `cached_tokens` but bills them at FULL input price until a
+VERIFIED cached rate is filled into `pricing.csv`'s `cached_input_price` column (per 1M tokens) —
+to activate the discount, confirm the number once from the Azure pricing page or a live bill
+(watch the `Azure prompt cache hit` log line for observed `cached_tokens`), then fill the column;
+never assume OpenAI parity unverified. The conservative default can overcount spend, never
+undercount it.
 
 **2. Author `task.objective_brief` — do not skip it.** It is a qualitative gloss rendered directly
 above the live metric numbers in every mutation/fix prompt, and it is the ONE slot that tells the

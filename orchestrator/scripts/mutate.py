@@ -242,6 +242,9 @@ def _mutate(payload: Dict[str, Any]) -> Dict[str, Any]:
                 raw, cost = _azure.bg_query(
                     model_name, patch_sys, patch_msg, reasoning_effort, call_metadata,
                     enable_web_search=enable_web_search,
+                    # Cache-routing hint (run+island scoped, threaded by run_window);
+                    # absent => omitted, byte-identical request to before.
+                    prompt_cache_key=payload.get("prompt_cache_key"),
                 )
                 transport = "background"
             except Exception as exc:

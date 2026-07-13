@@ -4154,6 +4154,57 @@ def test_failure_histogram_deterministic():
     return None
 
 
+def test_evolve_marker_post_apply_validation():
+    """Marker-count validation after apply. The appliers already defend most vectors
+    (apply_full rebuilds prefix/suffix from the PARENT, so markers can't be eaten;
+    apply_diff strips marker LINES from the patch) — but an INLINE marker inside a
+    diff REPLACE text (e.g. 'x = 2  # EVOLVE-BLOCK-END ...') survives the cleaner
+    and lands in the child, silently truncating the descendant's mutable range for
+    every future diff patch. The post-apply count check rejects it as an apply
+    failure (feeds the bounded retry loop); clean patches still apply."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import mutate
+
+    parent = "# header\n# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n# footer\n"
+
+    with tempfile.TemporaryDirectory() as td:
+        # Marker-preserving full rewrite -> applies.
+        ok = mutate.main({
+            "parent_code": parent, "patch_dir": td, "language": "python",
+            "patch_type": "full", "mock": True,
+            "mock_patch": ("<NAME>n</NAME><DESCRIPTION>d</DESCRIPTION>"
+                           "<CODE>\n```python\n# EVOLVE-BLOCK-START\nx = 2\n"
+                           "# EVOLVE-BLOCK-END\n```\n</CODE>"),
+        })
+        assert ok["applied"] is True and "x = 2" in ok["candidate_code"], ok
+
+        # Clean diff patch -> applies.
+        ok_diff = mutate.main({
+            "parent_code": parent, "patch_dir": td, "language": "python",
+            "patch_type": "diff", "mock": True,
+            "mock_patch": "<<<<<<< SEARCH\nx = 1\n=======\nx = 9\n>>>>>>> REPLACE\n",
+        })
+        assert ok_diff["applied"] is True and "x = 9" in ok_diff["candidate_code"], ok_diff
+
+        # Diff REPLACE smuggling an INLINE marker -> the applier lets it through
+        # (verified live: child ends with 1 START / 2 END), the post-apply check
+        # rejects it with a marker-naming error.
+        inject = mutate.main({
+            "parent_code": parent, "patch_dir": td, "language": "python",
+            "patch_type": "diff", "mock": True,
+            "mock_patch": ("<<<<<<< SEARCH\nx = 1\n=======\n"
+                           "x = 2  # EVOLVE-BLOCK-END trailing\n>>>>>>> REPLACE\n"),
+        })
+        assert inject["applied"] is False, inject
+        assert "EVOLVE-BLOCK" in (inject.get("error") or ""), inject
+
+    # Helper unit checks: equal counts pass (including zero); any drift mismatches.
+    assert mutate._marker_mismatch(parent, parent) is None
+    assert mutate._marker_mismatch(parent, parent + parent) is not None
+    assert mutate._marker_mismatch("no markers", "still none") is None
+    return None
+
+
 def test_cached_pricing_and_cache_key_plumbing():
     """Caching riders: (1) cached tokens bill at FULL input price while pricing.csv
     carries no verified cached rate (byte-identical ledger — overcount-safe), and at
@@ -4374,6 +4425,7 @@ if __name__ == "__main__":
         ("fix_prompt_stdout_capped", test_fix_prompt_stdout_capped),
         ("failure_histogram_deterministic", test_failure_histogram_deterministic),
         ("cached_pricing_and_cache_key_plumbing", test_cached_pricing_and_cache_key_plumbing),
+        ("evolve_marker_post_apply_validation", test_evolve_marker_post_apply_validation),
         ("anti_inbreeding_exemplars", test_anti_inbreeding_exemplars),
     ]
     ok = True

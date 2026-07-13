@@ -88,6 +88,24 @@ def _ext(language: str) -> str:
         return {"python": "py", "cpp": "cpp", "c": "c", "rust": "rs"}.get(language, "py")
 
 
+_EVOLVE_MARKERS = ("EVOLVE-BLOCK-START", "EVOLVE-BLOCK-END")
+
+
+def _marker_mismatch(parent: str, updated: str) -> Optional[str]:
+    """EVOLVE-marker post-apply validation. A rewrite that eats (or duplicates) the
+    markers silently poisons the lineage: every later DIFF patch on a descendant
+    fails to apply (SEARCH/REPLACE edits are marker-scoped), burning apply-retries
+    on every slot that samples it. Marker counts must match the parent exactly;
+    a mismatch is treated as an apply failure so the bounded retry loop corrects
+    it in-flight. Returns the error string, or None when counts match."""
+    for m in _EVOLVE_MARKERS:
+        pn, un = parent.count(m), updated.count(m)
+        if pn != un:
+            return (f"candidate has {un} {m!r} marker(s) but the parent has {pn} — "
+                    "reproduce the EVOLVE-BLOCK markers exactly as in the original code")
+    return None
+
+
 def _apply(patch_type, patch_str, original, patch_dir, language, verbose) -> Tuple:
     from shinka.edit.apply_diff import apply_diff_patch
     from shinka.edit.apply_full import apply_full_patch
@@ -97,10 +115,15 @@ def _apply(patch_type, patch_str, original, patch_dir, language, verbose) -> Tup
     # Routing "fix" to apply_diff_patch would make every repair a paid no-op (its
     # SEARCH/REPLACE regex never matches a full-code reply) -> applied=False always.
     func = apply_full_patch if patch_type in ("full", "cross", "fix") else apply_diff_patch
-    return func(
+    updated, n, out_path, err, _t, _d = func(
         patch_str=patch_str, original_str=original,
         patch_dir=patch_dir, language=language, verbose=verbose,
     )
+    if n and updated is not None:
+        mm = _marker_mismatch(original, updated)
+        if mm:
+            return None, 0, out_path, mm, _t, _d
+    return updated, n, out_path, err, _t, _d
 
 
 def _write_candidate(patch_dir: str, language: str, code: str) -> str:

@@ -10,7 +10,8 @@
     "language": "python",
     "eval_time": "00:35:00"
   },
-  "db_config": {"num_islands": 4, "archive_size": 40, "parent_selection_lambda": 10.0},
+  "db_config": {"num_islands": 4, "archive_size": 40, "parent_selection_lambda": 10.0,
+                "num_top_k_inspirations": 2, "num_archive_inspirations": 2},
   "evo": {
     "window_size": 10,
     "patch_types": ["diff", "full", "cross", "fix"],

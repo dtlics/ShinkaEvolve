@@ -12,9 +12,17 @@ It composes the scripts in ``../scripts`` in the canonical Shinka per-candidate 
     -> immediate-fix -> archive_record -> reward/bandit-update   [repeat W times]
     -> diagnostics
 
-The driver is sequential (one candidate at a time), the clean reference order;
-it writes to the same ``programs.sqlite`` schema shinka uses, so the real
-ShinkaEvolveRunner could resume from a harness-produced archive.
+The driver runs a window's candidates through a SLOT STATE MACHINE: up to
+``evo.parallel_slots`` slots in flight (default 1 = the sequential reference
+order, byte-identical to the historical driver), every shared-state mutation
+(archive, bandit, counters, journal) serialized under ONE window mutex that is
+released only around the long blocking stages (LLM call / embed / eval — see
+``_stage_call``), ``evo.parallel_eval_slots`` bounding concurrent evals, a
+repair slot always running SOLO, and all in-flight slots DRAINED before the
+window boundary (diagnostics/meta see a quiesced archive exactly as before).
+Slot lifecycle is journaled to ``journal/slots.jsonl`` (landing order = file
+order). It writes to the same ``programs.sqlite`` schema shinka uses, so the
+real ShinkaEvolveRunner could resume from a harness-produced archive.
 
 MUTABILITY: this is harness plumbing — not a strategy file. Do not rewrite it as
 part of a strategy rewrite (rewrite the ``scripts/*.py`` policies instead).
@@ -34,8 +42,10 @@ import math
 import os
 import random
 import sys
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -381,6 +391,28 @@ def _compose_meta_for_gen(evo: Dict[str, Any], generation: int) -> Optional[str]
     return None
 
 
+def _stage_call(locks: Optional[Dict[str, Any]], sem_key: Optional[str], fn, *args, **kwargs):
+    """Run a long BLOCKING stage (LLM call / embed / eval) OUTSIDE the window slot
+    mutex so other slots can progress — the inverse-GIL pattern: every piece of
+    shared state (counters, archive, bandit pkl, journal) mutates only while the
+    mutex is held, and the mutex is released exactly around the calls where the
+    wall-clock goes. ``sem_key`` names an extra concurrency gate ("eval" bounds
+    simultaneous eval subprocesses to evo.parallel_eval_slots). Args are evaluated
+    at the call site (mutex still held), so snapshotting shared values into the
+    payload is race-free. locks=None (the sequential driver) => a plain call."""
+    if not locks:
+        return fn(*args, **kwargs)
+    sem = locks.get(sem_key) if sem_key else None
+    locks["mutex"].release()
+    try:
+        if sem is not None:
+            with sem:
+                return fn(*args, **kwargs)
+        return fn(*args, **kwargs)
+    finally:
+        locks["mutex"].acquire()
+
+
 def _head_tail_trunc(text: Any, cap: int = 2048) -> str:
     """Head+tail truncation for ONE error-history entry — same shape as the
     error_traceback bound, at a smaller per-entry cap so the whole history fits
@@ -407,6 +439,7 @@ def _attempt_immediate_fixes(
     counters: Dict[str, Any],
     enable_web_search: bool = False,
     error_history: Optional[List[str]] = None,
+    locks: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
     """IMMEDIATE correctness repair (MUTABLE fix concern).
 
@@ -505,7 +538,9 @@ def _attempt_immediate_fixes(
         }
         if enable_web_search:
             fix_payload["enable_web_search"] = True  # plumbed through mutate into the Azure call
-        fix_mut = mutate.main(fix_payload)
+        # A fix round re-enters the LLM stage: run it outside the slot mutex so
+        # concurrent slots keep moving while this repair thinks.
+        fix_mut = _stage_call(locks, None, mutate.main, fix_payload)
         _c = float(fix_mut.get("cost", 0.0) or 0.0)
         fix_cost += _c
         counters["cost"] = counters.get("cost", 0.0) + _c
@@ -529,8 +564,9 @@ def _attempt_immediate_fixes(
                     f"(fix attempt {fix_used}) patch did not apply: {fix_mut.get('error')}"
                 ))
             continue  # patch didn't apply; spend counted, retry if budget remains
-        ev = _evaluate_candidate(
-            cfg, fix_mut["candidate_path"], results_dir, counters["iter_index"], generation
+        ev = _stage_call(
+            locks, "eval", _evaluate_candidate,
+            cfg, fix_mut["candidate_path"], results_dir, counters["iter_index"], generation,
         )
         if ev.get("correct"):
             counters["fix_success"] = counters.get("fix_success", 0) + 1
@@ -543,7 +579,9 @@ def _attempt_immediate_fixes(
 
 
 def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str, int],
-                       repair: bool = False) -> None:
+                       repair: bool = False,
+                       locks: Optional[Dict[str, Any]] = None,
+                       slot_ctx: Optional[Dict[str, Any]] = None) -> None:
     db_path = cfg["db_path"]
     db_config = cfg["db_config"]
     evo = cfg["evo"]
@@ -613,6 +651,25 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     # The 5% fix mode reuses the full repair machinery (escalation, attempt accounting,
     # tombstoning) since fixing an incorrect parent IS repair.
     _repair_gen = bool(_want_fix and sp.get("needs_fix"))
+    # In-flight duplicate-parent guard (parallel slots only): concurrent slots sample
+    # from one archive snapshot and the children-count bonus can't see in-flight
+    # children, so two slots can draw the SAME parent. Resample with a perturbed seed
+    # a couple of times; a persistent duplicate is accepted (siblings are legal).
+    # Repair slots are exempt (deterministic newest-errored pick + they run solo).
+    _inflight_parents = (slot_ctx or {}).get("inflight_parents")
+    if _inflight_parents is not None and not sp.get("needs_fix"):
+        for _r in range(2):
+            if sp.get("parent_id") not in _inflight_parents:
+                break
+            _sp_payload["seed"] = ((gseed or 0) + 104729 * (_r + 1))
+            sp = sample_parent.main(_sp_payload)
+    if slot_ctx is not None:
+        # Pin this slot's parent for the window's shared in-flight set: the
+        # keep-the-better eviction must not tombstone a program another slot is
+        # actively deriving from. The slot task discards the pin when it lands.
+        slot_ctx["parent_id"] = sp.get("parent_id")
+        if _inflight_parents is not None and sp.get("parent_id"):
+            _inflight_parents.add(sp["parent_id"])
     # The forced patch MODE for a NON-fix slot. If a "fix" draw found no errored parent
     # (needs_fix False), fall back to a diff/full/cross draw (perturbed seed so it isn't "fix"
     # again); cross-with-no-inspirations suppression is handled inside the sampler.
@@ -854,7 +911,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         if seq is not None:
             mut_payload["mock_code"] = seq[counters["iter_index"] % len(seq)]
         # else identity copy of parent
-    mut = mutate.main(mut_payload)
+    mut = _stage_call(locks, None, mutate.main, mut_payload)
     # Account the mutation LLM cost immediately — it was incurred even if the
     # candidate is later rejected by novelty.
     _mut_cost = float(mut.get("cost", 0.0) or 0.0)
@@ -916,17 +973,21 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         # Embed the parent->candidate DIFF (default) instead of the whole program,
         # so a genuine improvement is NOT false-flagged as a near-dup of its parent.
         _slot_diff_lines = _unified_diff_line_count(parent.get("code", ""), mut["candidate_code"])
-        code_embedding, _embed_cost = _embed(
-            cfg, _novelty_embed_text(evo, parent.get("code", ""), mut["candidate_code"])
+        code_embedding, _embed_cost = _stage_call(
+            locks, None, _embed,
+            cfg, _novelty_embed_text(evo, parent.get("code", ""), mut["candidate_code"]),
         )
         _slot_embed_cost = float(_embed_cost or 0.0)
         counters["cost"] = counters.get("cost", 0.0) + _slot_embed_cost
         if code_embedding is None:  # novelty gate is blind for this slot — make it visible
             counters["embed_failures"] = counters.get("embed_failures", 0) + 1
 
-    # 4. evaluate (IMMUTABLE plumbing)
-    ev = _evaluate_candidate(
-        cfg, mut["candidate_path"], results_dir, counters["iter_index"], generation
+    # 4. evaluate (IMMUTABLE plumbing) — the eval stage: outside the slot mutex,
+    # bounded by the eval semaphore (evo.parallel_eval_slots) so concurrent slots
+    # never oversubscribe the machine's cores.
+    ev = _stage_call(
+        locks, "eval", _evaluate_candidate,
+        cfg, mut["candidate_path"], results_dir, counters["iter_index"], generation,
     )
     # 4a. IMMEDIATE FIX (MUTABLE fix concern). On an eval failure, repair the
     # candidate in-place by re-prompting the same model with the error, up to
@@ -954,6 +1015,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             # repair model consult the web (like the other policy switches).
             enable_web_search=bool(evo.get("fix_web_search", False)),
             error_history=_err_history,
+            locks=locks,
         )
         _slot_mut_cost += _fix_cost  # attribute the repair spend to the same arm
         # Re-embed only if a fix actually changed the code, so the archived
@@ -962,8 +1024,9 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             # Re-embed the (post-fix) parent->candidate diff, consistent with the
             # pre-fix embed above, so the stored embedding matches the gate's basis.
             _slot_diff_lines = _unified_diff_line_count(parent.get("code", ""), mut["candidate_code"])
-            code_embedding, _re_embed_cost = _embed(
-                cfg, _novelty_embed_text(evo, parent.get("code", ""), mut["candidate_code"])
+            code_embedding, _re_embed_cost = _stage_call(
+                locks, None, _embed,
+                cfg, _novelty_embed_text(evo, parent.get("code", ""), mut["candidate_code"]),
             )
             counters["cost"] = counters.get("cost", 0.0) + float(_re_embed_cost or 0.0)
             if code_embedding is None:  # re-embed failed → gate blind for this slot
@@ -1115,6 +1178,17 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             # lineage are preserved; it just leaves the archive + sampling pool).
             counters["novelty_accepts"] += 1
             counters["novelty_kept_better"] = counters.get("novelty_kept_better", 0) + 1
+            _pinned_inflight = (slot_ctx or {}).get("inflight_parents") or ()
+            if _inc_id is not None and _inc_id in _pinned_inflight:
+                # The incumbent is PINNED as another in-flight slot's parent —
+                # skip the eviction (keep both near-dups) rather than tombstone a
+                # program a concurrent slot is actively deriving from; the gate
+                # self-corrects on a later comparison.
+                _trace({"step": "framework_decision",
+                        "action": "kept_better_evict_skipped_pinned",
+                        "incumbent": _inc_id,
+                        "max_similarity": nov.get("max_similarity")})
+                _inc_id = None
             if _inc_id is not None:
                 try:
                     repair_record_script.main({
@@ -1395,22 +1469,110 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 _wf.write(str(os.getpid()))
         except Exception:
             pass
-        try:
-            for i in range(window_size):
-                if budget is not None and (prior_total + counters["cost"]) >= float(budget):
-                    budget_hit = True
-                    break
+        # SLOT STATE MACHINE. Up to evo.parallel_slots candidates in flight (default 1
+        # = the sequential reference order — the plain loop below runs the IDENTICAL
+        # task body on the main thread). All shared state (counters, archive, bandit,
+        # journal) mutates only under ONE mutex, released around the long blocking
+        # stages (_stage_call: LLM / embed / eval); evo.parallel_eval_slots bounds
+        # concurrent evals; a repair slot runs SOLO; every in-flight slot DRAINS
+        # before the window boundary; `.stop` stops ADMITTING and drains (in-flight
+        # Azure calls are never killed). Admission re-checks the budget with an
+        # in-flight estimate (in-flight count x the worst committed slot cost so far
+        # — approximate under concurrency, exact at parallel_slots=1), so worst-case
+        # overshoot stays ~parallel_slots candidates. Lifecycle is journaled to
+        # journal/slots.jsonl (landing order = file order).
+        _par = max(1, int(evo.get("parallel_slots", 1) or 1))
+        _epar = max(1, min(int(evo.get("parallel_eval_slots", 1) or 1), _par))
+        _locks = ({"mutex": threading.Lock(), "eval": threading.Semaphore(_epar)}
+                  if _par > 1 else None)
+        _inflight_parents: set = set()
+        _wstate: Dict[str, Any] = {"budget_hit": False, "inflight": 0,
+                                   "max_slot_cost": 0.0, "iters_run": 0,
+                                   "crashed": False}
+
+        def _slot_event(event: str, i: int, extra: Optional[Dict[str, Any]] = None) -> None:
+            try:
+                journal.log_slot_event(cfg["results_dir"], {
+                    "window_index": widx, "slot": i, "generation": next_gen + i,
+                    "event": event, "inflight": _wstate["inflight"], **(extra or {}),
+                })
+            except Exception:
+                pass
+
+        def _slot_task(i: int) -> None:
+            # The whole task body runs with the mutex held (when parallel); the
+            # long stages inside _run_one_candidate release it via _stage_call.
+            if _locks:
+                _locks["mutex"].acquire()
+            try:
+                # ---- admission (mutex held) ----
+                if _coop_stop["hit"] or _wstate["crashed"]:
+                    return
+                _est = _wstate["inflight"] * _wstate["max_slot_cost"]
+                if budget is not None and (
+                    prior_total + counters["cost"] + _est
+                ) >= float(budget):
+                    _wstate["budget_hit"] = True
+                if _wstate["budget_hit"]:
+                    return
                 counters["iter_index"] = i
-                _run_one_candidate(cfg, next_gen + i, counters, repair=(repair_on and i == 0))
-                iters_run += 1
-                # Cooperative stop BETWEEN candidates (also honored mid-warmup via stop_dir):
-                # each candidate commits atomically before _run_one_candidate returns, so exiting
-                # here never half-writes the archive. The cluster loop reads _coop_stop and
-                # returns "cooperative_stop" (non-terminal — no finalize, no control_return row).
-                if _stop_requested(stop_dir, run_id):
-                    _coop_stop["hit"] = True
-                    break
+                _wstate["inflight"] += 1
+                _cost_before = counters["cost"]
+                _slot_event("admitted", i)
+                _slot_ctx = {"inflight_parents": _inflight_parents, "parent_id": None}
+                try:
+                    _run_one_candidate(cfg, next_gen + i, counters,
+                                       repair=(repair_on and i == 0),
+                                       locks=_locks, slot_ctx=_slot_ctx)
+                    _wstate["iters_run"] += 1
+                except BaseException:
+                    # First crash aborts the window like the sequential driver did:
+                    # queued slots stop admitting, in-flight slots drain.
+                    _wstate["crashed"] = True
+                    raise
+                finally:
+                    _wstate["inflight"] -= 1
+                    if _slot_ctx.get("parent_id"):
+                        _inflight_parents.discard(_slot_ctx["parent_id"])
+                    _wstate["max_slot_cost"] = max(
+                        _wstate["max_slot_cost"], counters["cost"] - _cost_before)
+                    # Cooperative stop BETWEEN candidates (also honored mid-warmup via
+                    # stop_dir): each slot commits atomically before this point, so
+                    # stopping admissions here never half-writes the archive. The
+                    # cluster loop reads _coop_stop and returns "cooperative_stop".
+                    if _stop_requested(stop_dir, run_id):
+                        _coop_stop["hit"] = True
+                    _slot_event("committed", i, {
+                        "slot_cost": round(counters["cost"] - _cost_before, 6)})
+            finally:
+                if _locks:
+                    _locks["mutex"].release()
+
+        try:
+            if _par <= 1:
+                for i in range(window_size):
+                    _slot_task(i)
+                    if _coop_stop["hit"] or _wstate["budget_hit"]:
+                        break
+            else:
+                with ThreadPoolExecutor(
+                    max_workers=_par, thread_name_prefix="slot"
+                ) as _pool:
+                    _start = 0
+                    if repair_on and window_size > 0:
+                        # Repair slot runs SOLO (its repair_record read-modify-write
+                        # and deterministic errored-parent pick must not race).
+                        _pool.submit(_slot_task, 0).result()
+                        _start = 1
+                    # map() submits all remaining slots; workers start them in
+                    # order, admission flags (stop/budget/crash) are monotonic, so
+                    # executed slots form a prefix. Iterating the results re-raises
+                    # the first slot exception (window aborts, in-flight drained by
+                    # the executor's shutdown).
+                    list(_pool.map(_slot_task, range(_start, window_size)))
         finally:
+            budget_hit = _wstate["budget_hit"]
+            iters_run = _wstate["iters_run"]
             try:
                 os.remove(_wact)
             except OSError:

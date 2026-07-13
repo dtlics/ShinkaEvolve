@@ -987,7 +987,8 @@ then `--resume` — never `Stop-Process`/`Get-Process` a run by PID; see "Run id
                 "num_top_k_inspirations": 2, "num_archive_inspirations": 2,
                 "migration_interval": 10, "enable_dynamic_islands": false,
                 "max_islands": 0, "island_evict_strategy": "worst_best_fitness"},
-  "evo": {"window_size": 10, "patch_types": ["diff","full","cross","fix"], "patch_type_probs": [0.55,0.3,0.1,0.05],
+  "evo": {"window_size": 10, "parallel_slots": 2, "parallel_eval_slots": 1,
+          "patch_types": ["diff","full","cross","fix"], "patch_type_probs": [0.55,0.3,0.1,0.05],
           "llm_models": ["azure-gpt-5.4-mini","azure-gpt-5.5"], "llm_dynamic_selection_kwargs": {"cost_aware_coef": 0.25, "epsilon": 0.2},
           "reasoning_effort": "medium", "max_patch_attempts": 3, "fix_retry_budget": 1, "reward_mode": "absolute",
           "auto_meta": true, "meta_model": "azure-gpt-5.5", "meta_reasoning_effort": "medium",
@@ -1030,6 +1031,8 @@ wake/termination cadence mid-run (cadence_policy.py is FOUNDATION).
 | `repair_attempt_cap` | 2 | failed repairs before a parent is tombstoned | raise to give a hard failure more tries |
 | `repair_escalation_model` | null | stronger model on the last repair before removal | set to e.g. `azure-gpt-5.4-pro@high` for a stubborn class |
 | `fix_retry_budget` | 1 | immediate eval-failure repairs per slot | raise for a hard task |
+| `parallel_slots` | 2 shipped (code fallback 1 = sequential) | max window slots in flight — the assembly line: slot N+1's mutate overlaps slot N's eval. All shared state stays serialized under one window mutex (released only during LLM/embed/eval); commits land in completion order (`journal/slots.jsonl` audits the lifecycle); a repair slot always runs SOLO; the window boundary DRAINS all slots, so meta/diagnostics/stagnation see a quiesced archive exactly as before. `.stop` stops ADMITTING and drains — in-flight Azure calls are never killed. Crash exposure: ≤ `parallel_slots` unlogged-but-billed calls (vs 1 sequentially) — keep ≤ 3 | 1 to restore the strict sequential reference driver (e.g. when auditing a suspected ordering bug); 3 only after `parallel_eval_slots` ≥ 2 is safe (below) |
+| `parallel_eval_slots` | 1 | max CONCURRENT evaluations (≤ `parallel_slots`). 1 = zero eval CPU contention — the safe default: two evals sharing cores can slow each other and flip a pass into a timeout, corrupting the score signal | raise to 2 ONLY after measuring that one eval leaves >half the machine idle on the actual task (pin threads via the job config's `numeric_threads_per_job`) |
 | `mutation_web_search` / `fix_web_search` | false | web search on the INNER-LOOP mutation / fix calls | rarely needed and unused in practice (no run config has set it). NOT the grounding signal: a grounding run passes `enable_web_search:true` straight to the standalone `mutate.py` call, and discovery-before-grounding is enforced at `spawn_island.py` (PRIMARY gate) + the grounding-engineer refusal — not via this knob |
 | `cost_aware_coef` | 0.25 shipped (engine default 0.0 when `llm_dynamic_selection_kwargs` is unset) | bandit reward-vs-cheapness blend | raise→0.7 if cheapness should dominate; lower→0 if a pricier arm is the only one improving and is being starved |
 | `epsilon` | 0.2 | bandit exploration floor | an arm's share decaying toward 0 while it still occasionally improves → raise to 0.4–0.6 |

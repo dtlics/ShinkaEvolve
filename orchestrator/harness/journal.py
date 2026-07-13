@@ -423,6 +423,21 @@ def log_step(results_dir: str, record: Dict[str, Any]) -> None:
     _append_jsonl(os.path.join(journal_dir(results_dir), "steps.jsonl"), rec)
 
 
+def log_slot_event(results_dir: str, record: Dict[str, Any]) -> None:
+    """Append ONE slot-lifecycle event to journal/slots.jsonl — the audit trail that
+    keeps a PARALLEL window (evo.parallel_slots > 1) as readable as the sequential
+    driver's implicit ordering. Events: 'admitted' (the slot passed the budget/stop
+    admission checks and started) and 'committed' (its commit phase landed —
+    landing order IS file order). Schema:
+      {timestamp, window_index, slot, generation, event, inflight (concurrent
+       slots at emit time), slot_cost (committed only; approximate under
+       concurrency — slots share one window cost counter, so it is an upper
+       bound — and exact when parallel_slots=1)}
+    ids + numbers only; folds NO cost."""
+    rec = {**record, "timestamp": record.get("timestamp", time.time())}
+    _append_jsonl(os.path.join(journal_dir(results_dir), "slots.jsonl"), rec)
+
+
 def log_novelty(results_dir: str, record: Dict[str, Any]) -> None:
     """Append ONE per-candidate novelty-comparison record to journal/novelty.jsonl.
 

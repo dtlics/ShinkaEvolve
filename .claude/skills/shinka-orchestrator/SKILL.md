@@ -466,8 +466,9 @@ optionally tagged with an `assigned_program_id` — the existing program that al
 Every direction is assigned to exactly one island (none duplicated across islands). Those per-island
 directions + their program assignments are auto-recorded as each island's brief (`structured_json`),
 and the SAMPLER reads them so islands diverge in BOTH their prompt direction AND the exemplar code
-shown — not text alone. A brand-new island with no brief yet just carries a neutral placeholder, and
-that is enough: its mutation prompt still has its modes, inspirations, and the task message. You
+shown — not text alone. A brand-new island with no brief yet carries no direction header (its
+prompt gets the expert/creative preamble instead), and that is enough: it still has its modes,
+inspirations, and the task message. You
 don't hand-author briefs. Your meta levers: `evo.meta_model` / `evo.meta_reasoning_effort` (default
 `azure-gpt-5.5` medium; to escalate set `meta_model: azure-gpt-5.4-pro` AND `meta_reasoning_effort:
 high` — two knobs, NOT a `model@effort` suffix; pro rejects `low`); `evo.meta_n_recent` (default
@@ -475,6 +476,21 @@ high` — two knobs, NOT a `model@effort` suffix; pro rejects `low`); `evo.meta_
 (default 1200 — shrink if meta cost climbs); or `evo.auto_meta:false` (suppresses the whole round;
 islands keep their last brief). Its cost folds automatically; budget-gated and wrapped so a meta
 failure never aborts a window.
+
+Two deterministic riders on the round's output (both land in the SAME always-on channels — no
+new prompt surface): (1) a pure-Python **error-signature histogram** (top-5 counted signatures
+over ~the last 2 windows, numbers normalized) is appended to `failure_note` AFTER the LLM call,
+so exact failure counts can never be dropped or diluted; the meta prompt keeps the model's prose
+qualitative. (2) The round maintains a **rolling `global_insights` scratchpad** (≤12 lines,
+code-capped): each round receives its previous blob and returns an updated one — merge, drop
+stale, add ≤3 new lines — so long-horizon lessons survive beyond the `meta_n_recent` recency
+window. The scratchpad feeds the NEXT meta round only (never the mutation prompts; briefs +
+`failure_note` remain the only meta→mutation channels). It persists as
+`evo.meta_global_insights`, is journal-logged with every meta call, and re-hydrates at cluster
+relaunch like `meta_failure_note`. **Outer-loop use:** read it at a control-return as a
+diagnostic (it is the meta round's memory, and a good stagnation post-mortem input); if it has
+collapsed into repetition or bloat, rewrite the update/pruning instruction in
+`meta_summarize.py` (a [B] strategy rewrite) — never hand-edit the blob content itself.
 
 ## Is a model never being picked? (the framework-audit check)
 

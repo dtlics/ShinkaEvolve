@@ -4053,6 +4053,50 @@ def test_repair_prompt_no_inspirations():
     return None
 
 
+def test_meta_global_insights_roundtrip():
+    """The rolling scratchpad: parsed from the meta reply and code-capped (12 lines /
+    1500 chars), the previous blob + window index render into the meta user message,
+    and the journal round-trip (log_external_call -> recent_meta_output) re-hydrates
+    it at relaunch exactly like failure_note."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import json as _json
+    import meta_summarize as ms
+    import journal
+    import _common
+
+    # Parse + cap via the mock path.
+    long_blob = "\\n".join(f"W{i}: lesson {i}" for i in range(20))
+    txt = _json.dumps({"failure_note": "fn", "islands": [],
+                       "global_insights": long_blob.replace("\\n", "\n")})
+    out = ms.main({"mock": True, "mock_text": txt, "goal": "g"})
+    got = out["global_insights"]
+    assert got.splitlines()[0] == "W0: lesson 0"
+    assert len(got.splitlines()) == 12, len(got.splitlines())
+    assert ms._cap_insights("x" * 5000) == "x" * 1500
+    assert ms._cap_insights(None) == "" and ms._cap_insights("") == ""
+
+    # The previous blob + window index render into the user message.
+    msg = ms._build_user_msg({"goal": "g", "global_insights_prev": "W3: CNOT ladders pay off",
+                              "window_index": 7}, [])
+    assert "W3: CNOT ladders pay off" in msg
+    assert "Current window index: 7" in msg
+    msg_empty = ms._build_user_msg({"goal": "g"}, [])
+    assert "(empty — first round)" in msg_empty
+
+    # Journal round-trip: the rehydration helper reads global_insights back.
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "x"})
+        _common.log_external_call(
+            td, "meta", {"system": "s", "user": "u"},
+            {"directions": [], "failure_note": "note",
+             "global_insights": "W1: greedy synthesis always times out"},
+            cost=0.0, summary="t")
+        mh = _common.recent_meta_output(td)
+        assert mh.get("global_insights") == "W1: greedy synthesis always times out", mh
+        assert mh.get("failure_note") == "note"
+    return None
+
+
 def test_fix_prompt_stdout_capped():
     """A chatty evaluator's stdout/stderr is head+tail-capped at PROMPT BUILD (16KB,
     shinka.utils.general policy) so a fix prompt never fences an unbounded log; the
@@ -4253,6 +4297,7 @@ if __name__ == "__main__":
         ("error_history_accumulation", test_error_history_accumulation),
         ("repair_prompt_no_inspirations", test_repair_prompt_no_inspirations),
         ("fix_prompt_ancestor_framing_honest", test_fix_prompt_ancestor_framing_honest),
+        ("meta_global_insights_roundtrip", test_meta_global_insights_roundtrip),
         ("fix_prompt_stdout_capped", test_fix_prompt_stdout_capped),
         ("failure_histogram_deterministic", test_failure_histogram_deterministic),
         ("anti_inbreeding_exemplars", test_anti_inbreeding_exemplars),

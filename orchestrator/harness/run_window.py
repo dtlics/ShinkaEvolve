@@ -1299,15 +1299,18 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     if _boot_embed_cost:
         journal.add_cost(cfg["results_dir"], _boot_embed_cost)
 
-    # The persistent failure_note rides into every gen's prompt but lives only in the in-memory
-    # cfg, so it is LOST at every cluster relaunch (each early-phase window runs in a fresh
-    # process). Re-hydrate it from the last logged meta round so the caution survives a relaunch;
-    # this window's meta round overwrites it. (Island directions live per-island as briefs in the
-    # archive, read directly by the sampler — nothing else to rehydrate.)
-    if not evo.get("meta_failure_note"):
+    # The persistent failure_note (every gen's prompt) and the rolling global_insights
+    # scratchpad (the meta round's cross-window memory) live only in the in-memory cfg, so
+    # they are LOST at every cluster relaunch (each early-phase window runs in a fresh
+    # process). Re-hydrate both from the last logged meta round so they survive a relaunch;
+    # this window's meta round overwrites them. (Island directions live per-island as briefs
+    # in the archive, read directly by the sampler — nothing else to rehydrate.)
+    if not evo.get("meta_failure_note") or not evo.get("meta_global_insights"):
         _mh = _common.recent_meta_output(cfg["results_dir"])
-        if _mh.get("failure_note"):
+        if not evo.get("meta_failure_note") and _mh.get("failure_note"):
             evo["meta_failure_note"] = _mh["failure_note"]
+        if not evo.get("meta_global_insights") and _mh.get("global_insights"):
+            evo["meta_global_insights"] = _mh["global_insights"]
 
     window_state = cfg.get("window_state", {}) or {}
     window_index = int(window_state.get("window_index", 0))
@@ -1567,6 +1570,10 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     "meta_n_recent": evo.get("meta_n_recent", 32),
                     # Deterministic failure-histogram recency: ~the last two windows.
                     "failure_hist_recent_gens": 2 * int(evo.get("window_size", 10) or 10),
+                    # Rolling scratchpad: hand meta its own previous blob to UPDATE
+                    # (cross-window memory; "" on the first round of a fresh run).
+                    "global_insights_prev": evo.get("meta_global_insights") or "",
+                    "window_index": widx,
                 }
                 if _mock.get("enabled"):  # offline runs/tests: no Azure call
                     _meta_payload["mock"] = True
@@ -1583,6 +1590,13 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     # non-empty prior with None); it rides into every gen as failure_note.
                     if _meta.get("failure_note"):
                         evo["meta_failure_note"] = _meta["failure_note"]
+                    # The updated scratchpad REPLACES the previous one wholesale (the
+                    # prompt's merge/drop/add rules make it self-pruning); an empty
+                    # return keeps the prior blob — accidental wipe loses the only
+                    # cross-window memory, while a stale line just gets dropped by a
+                    # later round.
+                    if _meta.get("global_insights"):
+                        evo["meta_global_insights"] = _meta["global_insights"]
                     # Auto-record ONE brief per live island so islands diverge. Prefer the RICH
                     # per-island output: persist directions + assigned program ids into
                     # structured_json so the SAMPLER can be direction-oriented; fall back to the

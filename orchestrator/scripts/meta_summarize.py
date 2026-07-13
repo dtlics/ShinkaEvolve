@@ -20,7 +20,8 @@ user message carries the FULL archive as compact one-line rows, plus code for th
 top/recent programs AND each island's best, all under a bounded budget — the depth
 knobs (``meta_n_recent``, ``meta_code_preview_chars``) are orchestrator levers. It
 is NOT the per-gen idea source: each gen reads its island's brief, and an island
-with no brief yet gets a neutral placeholder. Default model ``azure-gpt-5.5`` at
+with no brief yet carries no direction header (the sampler renders its
+expert/creative preamble). Default model ``azure-gpt-5.5`` at
 ``medium`` effort, mutable to a stronger model (e.g. pro@high).
 
 OUTPUT CONTRACT:
@@ -42,6 +43,16 @@ OUTPUT CONTRACT:
                         dropped or diluted by the model; the prompt tells the
                         model to keep its prose qualitative and not duplicate
                         counts.
+  * ``global_insights`` — the ROLLING cross-window scratchpad (upstream design:
+                        the meta summarizer's persistent memory). Each round
+                        receives the previous blob (``global_insights_prev``)
+                        and returns an UPDATED one — merge, drop stale, add ≤3
+                        new lines — code-capped at 12 lines / 1500 chars. It
+                        feeds the NEXT meta round only (never the mutation
+                        prompts — briefs + failure_note remain the only
+                        meta→mutation channels); run_window persists it as
+                        ``evo.meta_global_insights`` and re-hydrates it from the
+                        journal at relaunch, like ``meta_failure_note``.
 
 GUARANTEE (meta must SEE failures): if ``recent_programs`` is not supplied but
 ``db_path`` is, meta SELF-GATHERS recent attempts from the archive — explicitly
@@ -73,6 +84,9 @@ INPUT (stdin JSON):
     "failure_hist_recent_gens": 20,   # histogram recency window in generations
                                       #   (run_window passes 2 x window_size)
     "prior_recommendations": str | null,
+    "global_insights_prev": str | null,  # the previous rolling scratchpad blob (run_window
+                                         #   threads evo.meta_global_insights; "" first round)
+    "window_index": int | null,          # rendered so new scratchpad lines carry 'W<idx>:'
     "max_recommendations": 5,
     "results_dir": str | null,   # if set, self-log the full call + fold cost into the ledger
     "mock": false, "mock_text": str | null,
@@ -132,6 +146,14 @@ _SYS = (
     '"weight": <0..1>, "assigned_program_id": "<the id of an EXISTING program shown for THIS '
     'island that ALREADY realizes this direction, or null if it is a NEW/untried idea>"}}, '
     '... 1 to 3 per island ]}}, ... EXACTLY ONE entry per live island id ]\n'
+    ',\n  "global_insights": "<the UPDATED cross-window insights scratchpad: at most 12 short '
+    "lines, one insight per line, each prefixed 'W<window>: ' with the window it was last "
+    "confirmed. START from the previous scratchpad shown in the user message and UPDATE it — "
+    "do not regrow it from scratch: merge duplicates, keep lines the archive still supports "
+    "(refresh their W prefix only if re-confirmed now), DROP lines that are stale or refuted, "
+    "and add at most 3 NEW lines for genuinely new durable lessons (approach families that "
+    "always fail/pay off, recurring traps, budget realities). This is your only memory that "
+    'survives across windows — invest in it. Empty string only if nothing durable is known.>"\n'
     '}}\n'
     "Rules: make the islands explore genuinely DIFFERENT families/approaches from each other "
     "and from prior recommendations. Assign EVERY direction to exactly ONE island (the "
@@ -146,6 +168,18 @@ _SYS = (
 # which rides into EVERY mutation prompt — keep it compact.
 _HIST_TOP_N = 5
 _HIST_MAX_CHARS = 400
+
+# Rolling scratchpad bounds — enforced in CODE after parse (the prompt asks for
+# <=12 lines, but the cap must hold even when the model regrows it).
+_INSIGHTS_MAX_LINES = 12
+_INSIGHTS_MAX_CHARS = 1500
+
+
+def _cap_insights(text: str) -> str:
+    """Deterministic cap for the global_insights scratchpad: first 12 non-empty
+    lines, 1500 chars total — self-pruning regardless of what the model returned."""
+    lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
+    return "\n".join(lines[:_INSIGHTS_MAX_LINES])[:_INSIGHTS_MAX_CHARS]
 
 
 def _norm_sig(err: str) -> str:
@@ -351,6 +385,18 @@ def _build_user_msg(payload: Dict[str, Any], recents: List[Dict[str, Any]],
             parts.append("\n# Best program per island (code previews)\n" + "\n".join(blocks))
     if prior:
         parts.append(f"\n# Prior recommendations (avoid repeating)\n{prior}")
+    # Rolling cross-window scratchpad: show the PREVIOUS blob so this round can
+    # UPDATE it (merge/drop/add per the system-prompt rules) instead of re-deriving
+    # long-horizon lessons from the recency-bounded rows above.
+    _wi = payload.get("window_index")
+    _wi_txt = f" Current window index: {int(_wi)}." if _wi is not None else ""
+    prev_insights = str(payload.get("global_insights_prev") or "").strip()
+    parts.append(
+        "\n# Previous global insights scratchpad (UPDATE per the rules — merge, drop "
+        "stale, add at most 3 new lines; this is the only memory that survives across "
+        f"windows).{_wi_txt}\n"
+        + (prev_insights if prev_insights else "(empty — first round)")
+    )
     return "\n".join(parts)
 
 
@@ -365,6 +411,7 @@ def _parse_meta(text: str, max_n: int) -> Dict[str, Any]:
     island_directions: List[Dict[str, Any]] = []
     islands_rich: List[Dict[str, Any]] = []
     failure_note = ""
+    global_insights = ""
     blob = text or ""
     fenced = re.search(r"```(?:json)?\s*(.*?)```", blob, re.DOTALL)
     if fenced:
@@ -389,6 +436,7 @@ def _parse_meta(text: str, max_n: int) -> Dict[str, Any]:
             elif isinstance(d, str) and d.strip():
                 directions.append({"text": d.strip(), "weight": 1.0})
         failure_note = str(data.get("failure_note") or "").strip()
+        global_insights = _cap_insights(data.get("global_insights"))
         for d in (data.get("island_directions") or []):
             if isinstance(d, dict) and d.get("text") is not None:
                 try:
@@ -443,7 +491,8 @@ def _parse_meta(text: str, max_n: int) -> Dict[str, Any]:
         if txt:
             directions = [{"text": txt[:2000], "weight": 1.0}]
     return {"directions": directions, "failure_note": failure_note,
-            "island_directions": island_directions, "islands": islands_rich}
+            "island_directions": island_directions, "islands": islands_rich,
+            "global_insights": global_insights}
 
 
 def main(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -467,6 +516,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             "failure_note": parsed["failure_note"],
             "island_directions": parsed["island_directions"],
             "islands": parsed["islands"],
+            "global_insights": parsed["global_insights"],
             "recommendations": text,
             "cost": 0.0,
             "model": model,
@@ -481,7 +531,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         _est = float(payload.get("meta_estimated_cost_usd", payload.get("estimated_cost_usd", 1.0)))
         if _rem is not None and _rem < _est:
             return {"directions": [], "failure_note": None, "island_directions": [],
-                    "islands": [], "recommendations": "", "cost": 0.0, "model": model,
+                    "islands": [], "global_insights": None,
+                    "recommendations": "", "cost": 0.0, "model": model,
                     "skipped": "budget", "budget_remaining": _rem, "estimated_cost": _est}
     # Auto-populate prior_recommendations from recent meta calls so meta doesn't
     # re-propose directions it already gave (an explicit caller value always wins).
@@ -518,6 +569,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
         return {
             "directions": [], "failure_note": None, "island_directions": [], "islands": [],
+            "global_insights": None,
             "recommendations": "", "cost": _cost, "model": model,
             "degraded": True, "error": str(exc),
         }
@@ -540,17 +592,20 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         {"system": system_msg, "user": user_msg, "model": model,
          "reasoning_effort": effort},
         {"directions": parsed["directions"], "failure_note": parsed["failure_note"],
-         "island_directions": parsed["island_directions"], "raw_text": text},
+         "island_directions": parsed["island_directions"],
+         "global_insights": parsed["global_insights"], "raw_text": text},
         cost=float(cost),
         summary=f"{len(parsed['directions'])} directions, "
         f"{len(parsed['island_directions'])} island"
-        + ("; +failure_note" if parsed["failure_note"] else ""),
+        + ("; +failure_note" if parsed["failure_note"] else "")
+        + ("; +insights" if parsed["global_insights"] else ""),
     )
     return {
         "directions": parsed["directions"],
         "failure_note": parsed["failure_note"],
         "island_directions": parsed["island_directions"],
         "islands": parsed["islands"],
+        "global_insights": parsed["global_insights"],
         "recommendations": joined,
         "cost": float(cost),
         "model": model,

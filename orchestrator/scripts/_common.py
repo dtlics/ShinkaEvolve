@@ -283,10 +283,11 @@ def recent_meta_directions(results_dir, k=3):
 
 
 def recent_meta_output(results_dir):
-    """The LAST logged meta round's global output {directions, failure_note} from
-    journal/calls — so a fresh cluster process can RE-HYDRATE evo.meta_directions /
-    evo.meta_failure_note (the in-memory-only global channel that is otherwise lost at every
-    relaunch — i.e. every window of the failure-heavy early phase). Best-effort -> {}."""
+    """The LAST logged meta round's global output {directions, failure_note,
+    global_insights} from journal/calls — so a fresh cluster process can RE-HYDRATE
+    evo.meta_failure_note / evo.meta_global_insights (the in-memory-only global
+    channel that is otherwise lost at every relaunch — i.e. every window of the
+    failure-heavy early phase). Best-effort -> {}."""
     if not results_dir:
         return {}
     j = _lazy_journal()
@@ -298,8 +299,10 @@ def recent_meta_output(results_dir):
             resp = (detail or {}).get("response") or {}
             dirs = resp.get("directions") or []
             note = resp.get("failure_note")
-            if dirs or note:
-                return {"directions": dirs, "failure_note": note}
+            insights = resp.get("global_insights")
+            if dirs or note or insights:
+                return {"directions": dirs, "failure_note": note,
+                        "global_insights": insights}
     except Exception:
         return {}
     return {}

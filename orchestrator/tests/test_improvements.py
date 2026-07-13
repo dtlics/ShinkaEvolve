@@ -4278,6 +4278,60 @@ def test_cached_pricing_and_cache_key_plumbing():
     return None
 
 
+def test_error_head_and_lineage_gamma_contracts():
+    """Two review fixes: (1) archive_query._error_head picks the real exception line
+    from a format_exc traceback (not the generic banner) and falls back to
+    text_feedback for tracebackless domain failures; (2) lineage_gamma=0.0 is a
+    LEGAL value (lineage credit off), not coerced to the 0.8 default."""
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    import archive_query
+    import sample_parent
+
+    tb = ("Traceback (most recent call last):\n"
+          "  File \"x.py\", line 3, in solve\n"
+          "    raise ValueError('bad L=5 grid')\n"
+          "ValueError: bad L=5 grid\n")
+    assert archive_query._error_head(tb, None) == "ValueError: bad L=5 grid"
+    assert archive_query._error_head(
+        "EvaluationTerminated: time limit", None) == "EvaluationTerminated: time limit"
+    assert archive_query._error_head(
+        None, "distance dropped below 3\nmore detail", correct=False
+    ) == "distance dropped below 3"
+    assert archive_query._error_head(None, None, correct=False) == ""
+    assert archive_query._error_head(None, "irrelevant", correct=True) == ""
+
+    from types import SimpleNamespace as NS
+    pool = [NS(id="A", parent_id=None, generation=0),
+            NS(id="B", parent_id="A", generation=1)]
+    # gamma=0.0 must neutralize lineage credit (U == s for non-negative scores).
+    assert sample_parent._lineage_values(pool, [1.0, 2.0], 0.0) == [1.0, 2.0]
+    with tempfile.TemporaryDirectory() as td:
+        db_path = os.path.join(td, "programs.sqlite")
+        base = {"num_islands": 1, "archive_size": 20,
+                "parent_selection_strategy": "lineage_weighted"}
+        import archive_record
+        # A 2-program pool is degenerate for this check (median/MAD normalization
+        # gives any two distinct scores the same sigmoid args) — use a chain + a
+        # childless anchor so gamma visibly reshapes the distribution.
+        for pid, gen, score, par in (("A", 0, 1.0, None), ("B", 1, 2.0, "A"),
+                                     ("C", 2, 3.0, "B"), ("D", 3, 2.5, None)):
+            archive_record.main({"db_path": db_path, "db_config": base,
+                                 "program": {"id": pid, "code": f"# {pid}\n",
+                                             "generation": gen, "combined_score": score,
+                                             "correct": True, "parent_id": par,
+                                             "public_metrics": {}}})
+        out_zero = sample_parent.main({"db_path": db_path, "db_config": base,
+                                       "seed": 0, "lineage_gamma": 0.0})
+        out_weighted = sample_parent.main(
+            {"db_path": db_path, "seed": 0,
+             "db_config": dict(base, parent_selection_strategy="weighted")})
+        assert out_zero["selection_probs"] == out_weighted["selection_probs"], (
+            out_zero["selection_probs"], out_weighted["selection_probs"])
+        out_default = sample_parent.main({"db_path": db_path, "db_config": base, "seed": 0})
+        assert out_default["selection_probs"] != out_zero["selection_probs"]
+    return None
+
+
 def test_anti_inbreeding_exemplars():
     """Exemplar selection demotes the parent's 1-hop kin (its parent + children):
     excluded while non-kin can fill the counts, backfill otherwise."""
@@ -4426,6 +4480,7 @@ if __name__ == "__main__":
         ("failure_histogram_deterministic", test_failure_histogram_deterministic),
         ("cached_pricing_and_cache_key_plumbing", test_cached_pricing_and_cache_key_plumbing),
         ("evolve_marker_post_apply_validation", test_evolve_marker_post_apply_validation),
+        ("error_head_and_lineage_gamma_contracts", test_error_head_and_lineage_gamma_contracts),
         ("anti_inbreeding_exemplars", test_anti_inbreeding_exemplars),
     ]
     ok = True

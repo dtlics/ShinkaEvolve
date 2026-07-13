@@ -59,7 +59,8 @@ proves stable (see the taper, below).
   LLM cost (mutation, the automatic meta round, deep research, standalone grounding calls —
   self-logged when you pass `results_dir` — and embeddings) plus the
   interventions you log. The harness **hard-stops** the moment cumulative spend ≥
-  `budget_usd` (`return_reason="budget_exhausted"`; overshoot ≤ one slot). The ledger is
+  `budget_usd` (`return_reason="budget_exhausted"`; overshoot ≤ ~`parallel_slots` slots'
+  cost — the shipped config runs 2 slots in flight; exactly one at `parallel_slots:1`). The ledger is
   crash-durable: `run.json` is written atomically and a missing/corrupt one is rebuilt by
   recomputing `total_cost` from the durable journal streams — so a crash mid-write can
   never silently zero the ledger and defeat the cap. The one accepted gap: a boot-time
@@ -113,8 +114,8 @@ This is the single source of truth; the rest of this doc expands each step.
    the program that realizes it) plus what looks promising — and a common eval-failure caution.
    Every direction is assigned to exactly one island (none duplicated), so islands evolve in
    different directions BY DEFAULT; these are auto-recorded as per-island briefs. A brand-new island
-   with no brief yet just gets a neutral placeholder ("no explicit direction yet — follow the rest of
-   the prompt"), which is enough because the mutation prompt still carries its modes, inspirations,
+   with no brief yet carries NO direction header — its mutation prompt renders the expert/creative
+   preamble instead — which is enough because the prompt still carries its modes, inspirations,
    and the task message. Meta is NOT an orchestrator action and does NOT count as an intervention.
 4. **WHEN CONTROL RETURNS you make two checks at the same time:** (a) the **framework-audit check**
    (rewrite a mutable strategy file if a flaw is found), and (b) the **discovery check** — if the
@@ -904,7 +905,7 @@ later reference.
   `work_grounding`) so a grounding-without-discovery stretch is detectable.
 - `journal/novelty.jsonl` — ONE compact record per EVALUATED CORRECT candidate whose novelty gate
   ran: `{window_index, generation, candidate_id, parent_id, island_idx, decision in
-  {accepted_novel|kept_better_evicted|dropped_worse|idle_no_compare}, max_similarity,
+  {accepted_novel|kept_better_evicted|kept_better_evict_failed|kept_better_evict_skipped_pinned|kept_better_no_incumbent|dropped_worse|idle_no_compare}, max_similarity,
   most_similar_id, most_similar_score, candidate_score, n_compared, diff_lines, threshold}` (ids +
   numbers, never code). The per-call audit trail behind the aggregate `novelty_acceptance_rate`.
   Readers: `journal.read_novelty`, `journal.novelty_near_threshold`.
@@ -1031,7 +1032,7 @@ wake/termination cadence mid-run (cadence_policy.py is FOUNDATION).
 | `repair_attempt_cap` | 2 | failed repairs before a parent is tombstoned | raise to give a hard failure more tries |
 | `repair_escalation_model` | null | stronger model on the last repair before removal | set to e.g. `azure-gpt-5.4-pro@high` for a stubborn class |
 | `fix_retry_budget` | 1 | immediate eval-failure repairs per slot | raise for a hard task |
-| `parallel_slots` | 2 shipped (code fallback 1 = sequential) | max window slots in flight — the assembly line: slot N+1's mutate overlaps slot N's eval. All shared state stays serialized under one window mutex (released only during LLM/embed/eval); commits land in completion order (`journal/slots.jsonl` audits the lifecycle); a repair slot always runs SOLO; the window boundary DRAINS all slots, so meta/diagnostics/stagnation see a quiesced archive exactly as before. `.stop` stops ADMITTING and drains — in-flight Azure calls are never killed. Crash exposure: ≤ `parallel_slots` unlogged-but-billed calls (vs 1 sequentially) — keep ≤ 3 | 1 to restore the strict sequential reference driver (e.g. when auditing a suspected ordering bug); 3 only after `parallel_eval_slots` ≥ 2 is safe (below) |
+| `parallel_slots` | 2 shipped (code fallback 1 = sequential) | max window slots in flight — the assembly line: slot N+1's mutate overlaps slot N's eval. All shared state stays serialized under one window mutex (released only during LLM/embed/eval); commits land in completion order (`journal/slots.jsonl` audits the lifecycle); the errored-fraction-latch repair slot runs SOLO, and a pooled 5%-draw fix slot falls back to a normal mutation when its errored parent is already being repaired in flight (never two blind repairs of one parent); the window boundary DRAINS all slots, so meta/diagnostics/stagnation see a quiesced archive exactly as before. `.stop` stops ADMITTING and drains — in-flight Azure calls are never killed. Crash exposure: ≤ `parallel_slots` unlogged-but-billed calls (vs 1 sequentially) — keep ≤ 3 | 1 to restore the strict sequential reference driver (e.g. when auditing a suspected ordering bug); 3 only after `parallel_eval_slots` ≥ 2 is safe (below) |
 | `parallel_eval_slots` | 1 | max CONCURRENT evaluations (≤ `parallel_slots`). 1 = zero eval CPU contention — the safe default: two evals sharing cores can slow each other and flip a pass into a timeout, corrupting the score signal | raise to 2 ONLY after measuring that one eval leaves >half the machine idle on the actual task (pin threads via the job config's `numeric_threads_per_job`) |
 | `sibling_samples` | 1 (off; cap 2) | K-sibling fan-out: window slots pair (lead, sibling); the sibling REPRODUCES the lead's prepare (pinned parent + prompt seed + arm ⇒ identical prompt, staggered `sibling_stagger_sec` 30s so the lead's call prefills the Azure prompt cache — the sibling pays ~cached input on the WHOLE prompt). Both children flow the NORMAL novelty/archive/bandit path — keep-all, never SimpleTES best-of-K discard (the archive is built to keep paid-for information; the 0.99 gate auto-dedups true copies). Repair slots never pair | 2 on a strong-parent exploitation phase (variance reduction on a good lineage — it competes with drawing distinct parents, so keep it off while coverage matters); watch per-window distinct-parent counts and turn it back off if diversity sags |
 | `mutation_web_search` / `fix_web_search` | false | web search on the INNER-LOOP mutation / fix calls | rarely needed and unused in practice (no run config has set it). NOT the grounding signal: a grounding run passes `enable_web_search:true` straight to the standalone `mutate.py` call, and discovery-before-grounding is enforced at `spawn_island.py` (PRIMARY gate) + the grounding-engineer refusal — not via this knob |
@@ -1097,7 +1098,10 @@ orchestrator OWNS this knob and re-checks it on a control-return when the popula
 
 **THE DATA.** Every evaluated correct candidate writes ONE `journal/novelty.jsonl` row
 `{window_index, generation, candidate_id, parent_id, island_idx, decision in
-{accepted_novel|kept_better_evicted|dropped_worse|idle_no_compare}, max_similarity, most_similar_id,
+{accepted_novel|kept_better_evicted|dropped_worse|idle_no_compare} — plus the rarer
+kept_better_evict_failed (eviction raised; BOTH near-dups left live),
+kept_better_evict_skipped_pinned (incumbent is another in-flight slot's parent; both kept), and
+kept_better_no_incumbent (defensive: gate named no incumbent) — max_similarity, most_similar_id,
 most_similar_score, candidate_score, n_compared, diff_lines, threshold}` pairing it with its single
 most-similar program (`most_similar_id`) + both scores + `max_similarity` + `n_compared` +
 `diff_lines` + the threshold in force. The per-window `novelty_sim_histogram` (bins

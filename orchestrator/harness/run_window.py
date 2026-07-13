@@ -17,8 +17,10 @@ The driver runs a window's candidates through a SLOT STATE MACHINE: up to
 order, byte-identical to the historical driver), every shared-state mutation
 (archive, bandit, counters, journal) serialized under ONE window mutex that is
 released only around the long blocking stages (LLM call / embed / eval — see
-``_stage_call``), ``evo.parallel_eval_slots`` bounding concurrent evals, a
-repair slot always running SOLO, and all in-flight slots DRAINED before the
+``_stage_call``), ``evo.parallel_eval_slots`` bounding concurrent evals, the
+errored-fraction-latch repair slot running SOLO (a pooled 5%-draw fix slot falls
+back to a normal mutation when its errored parent is already being repaired in
+flight), and all in-flight slots DRAINED before the
 window boundary (diagnostics/meta see a quiesced archive exactly as before).
 Slot lifecycle is journaled to ``journal/slots.jsonl`` (landing order = file
 order). It writes to the same ``programs.sqlite`` schema shinka uses, so the
@@ -440,6 +442,7 @@ def _attempt_immediate_fixes(
     enable_web_search: bool = False,
     error_history: Optional[List[str]] = None,
     locks: Optional[Dict[str, Any]] = None,
+    iter_index: Optional[int] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any], float]:
     """IMMEDIATE correctness repair (MUTABLE fix concern).
 
@@ -566,7 +569,9 @@ def _attempt_immediate_fixes(
             continue  # patch didn't apply; spend counted, retry if budget remains
         ev = _stage_call(
             locks, "eval", _evaluate_candidate,
-            cfg, fix_mut["candidate_path"], results_dir, counters["iter_index"], generation,
+            cfg, fix_mut["candidate_path"], results_dir,
+            (iter_index if iter_index is not None else counters.get("iter_index", 0)),
+            generation,
         )
         if ev.get("correct"):
             counters["fix_success"] = counters.get("fix_success", 0) + 1
@@ -600,7 +605,18 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     # pairing makes the common case → the sibling's call hits the Azure prompt
     # cache on the WHOLE prompt) while the candidate itself still varies. All
     # children flow the NORMAL novelty/archive/bandit path — no best-of-K discard.
+    # Per-slot iteration index. counters["iter_index"] is a window-global field a
+    # concurrent slot can overwrite between mutex-released stages; the slot's own
+    # index (threaded via slot_ctx) is race-free. Fallback keeps direct callers
+    # (tests) working.
+    _iter_idx = int((slot_ctx or {}).get("slot_index",
+                                         counters.get("iter_index", 0)) or 0)
     _sib = (slot_ctx or {}).get("sibling_prepare") or None
+    if _sib and not _sib.get("sp"):
+        # A prepare payload without the leader's sample output can't reproduce the
+        # prompt (re-sampling with a pinned parent skips the island/parent RNG
+        # draws and diverges the direction/inspiration draws) — run fresh instead.
+        _sib = None
     if _sib and _sib.get("gseed") is not None:
         gseed = _sib["gseed"]
 
@@ -642,36 +658,64 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     # the errfrac repair latch — pairs with an INCORRECT parent (select="errored" + the repair
     # path); the other modes pair with a CORRECT parent and the chosen mode is forced downstream.
     _mode = _sample_patch_mode(evo.get("patch_types"), evo.get("patch_type_probs"), gseed)
-    # A sibling is always a NORMAL mutation of its leader's (correct, pinned)
-    # parent — never a repair, even if the reproduced seed would draw "fix"
-    # against a changed errored pool.
+    # A sibling is always a NORMAL mutation of its leader's (correct) parent —
+    # never a repair, even if the reproduced seed would draw "fix" against a
+    # changed errored pool.
     _want_fix = (bool(repair) or (_mode == "fix")) and not _sib
-    if _sib and _sib.get("parent_id"):
-        _sp_payload["parent_id"] = _sib["parent_id"]
     if _want_fix:
         _sp_payload["select"] = "errored"
         _sp_payload["repair_attempt_cap"] = int(evo.get("repair_attempt_cap", 2) or 2)
-    try:
-        sp = sample_parent.main(_sp_payload)
-    except RuntimeError as _exc:
-        # The live population is empty (every row tombstoned mid-cluster) — sample_parent
-        # can't pick a parent. Re-seed from init_program_path (fold its embed cost) and retry
-        # once; if it STILL fails the run is genuinely unrecoverable, so re-raise.
-        if "archive is empty" not in str(_exc):
-            raise
-        counters["cost"] = counters.get("cost", 0.0) + float(_bootstrap_initial(cfg) or 0.0)
-        sp = sample_parent.main(_sp_payload)
+    if _sib:
+        # Sibling: REUSE the leader's whole sample output (parent + island +
+        # direction + inspiration ids) instead of re-sampling. Re-running the
+        # sampler with just a pinned parent would SKIP the island/parent RNG
+        # draws the leader consumed, so the direction/inspiration draws would
+        # diverge — a different prompt (no whole-prompt cache hit) mislabeled as
+        # a sibling. Archive rows are immutable, so re-fetching the same ids
+        # below reproduces the leader's prompt byte-for-byte.
+        sp = {**_sib["sp"], "needs_fix": False}
+    else:
+        try:
+            sp = sample_parent.main(_sp_payload)
+        except RuntimeError as _exc:
+            # The live population is empty (every row tombstoned mid-cluster) — sample_parent
+            # can't pick a parent. Re-seed from init_program_path (fold its embed cost) and retry
+            # once; if it STILL fails the run is genuinely unrecoverable, so re-raise.
+            if "archive is empty" not in str(_exc):
+                raise
+            counters["cost"] = counters.get("cost", 0.0) + float(_bootstrap_initial(cfg) or 0.0)
+            sp = sample_parent.main(_sp_payload)
     # A repair generation = a fix was wanted (the 5% fix mode OR the errfrac repair latch) AND
     # the sampler returned an errored parent (empty errored pool → needs_fix False → normal slot).
     # The 5% fix mode reuses the full repair machinery (escalation, attempt accounting,
     # tombstoning) since fixing an incorrect parent IS repair.
     _repair_gen = bool(_want_fix and sp.get("needs_fix"))
+    # The in-flight parent pins are a REFCOUNT map (two slots may legally share one
+    # parent — every sibling pair does), maintained under the window mutex.
+    _inflight_parents = (slot_ctx or {}).get("inflight_parents")
+    # Concurrent-repair guard: the errored-parent pick is DETERMINISTIC (newest
+    # errored), so two pooled 5%-fix draws would repair the SAME parent blind to
+    # each other — double-charging repair_attempt_cap and skipping the strike-two
+    # escalation. If that parent is already pinned by an in-flight slot, fall back
+    # to a NORMAL mutation slot. (The errfrac-latch repair on slot 0 runs solo and
+    # is unaffected.)
+    if (_repair_gen and _inflight_parents is not None
+            and _inflight_parents.get(sp.get("parent_id"), 0) > 0):
+        _want_fix = False
+        _repair_gen = False
+        _mode = _sample_patch_mode(
+            evo.get("patch_types"), evo.get("patch_type_probs"),
+            (gseed + 15013) if gseed is not None else None, exclude_fix=True,
+        )
+        for _k in ("select", "repair_attempt_cap"):
+            _sp_payload.pop(_k, None)
+        sp = sample_parent.main(_sp_payload)
     # In-flight duplicate-parent guard (parallel slots only): concurrent slots sample
     # from one archive snapshot and the children-count bonus can't see in-flight
     # children, so two slots can draw the SAME parent. Resample with a perturbed seed
     # a couple of times; a persistent duplicate is accepted (siblings are legal).
-    # Repair slots are exempt (deterministic newest-errored pick + they run solo).
-    _inflight_parents = (slot_ctx or {}).get("inflight_parents")
+    # Repair slots are exempt (deterministic newest-errored pick + the same-parent
+    # fallback above).
     if _inflight_parents is not None and not sp.get("needs_fix") and not _sib:
         for _r in range(2):
             if sp.get("parent_id") not in _inflight_parents:
@@ -679,12 +723,15 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             _sp_payload["seed"] = ((gseed or 0) + 104729 * (_r + 1))
             sp = sample_parent.main(_sp_payload)
     if slot_ctx is not None:
-        # Pin this slot's parent for the window's shared in-flight set: the
-        # keep-the-better eviction must not tombstone a program another slot is
-        # actively deriving from. The slot task discards the pin when it lands.
+        # Pin this slot's parent in the shared refcount map: keep-the-better
+        # eviction must not tombstone a program ANOTHER slot is actively deriving
+        # from (the eviction check subtracts this slot's own pin, so a slot can
+        # still evict its own parent exactly as the sequential driver always did).
+        # The slot task decrements the pin when it lands.
         slot_ctx["parent_id"] = sp.get("parent_id")
         if _inflight_parents is not None and sp.get("parent_id"):
-            _inflight_parents.add(sp["parent_id"])
+            _pid = sp["parent_id"]
+            _inflight_parents[_pid] = _inflight_parents.get(_pid, 0) + 1
     # The forced patch MODE for a NON-fix slot. If a "fix" draw found no errored parent
     # (needs_fix False), fall back to a diff/full/cross draw (perturbed seed so it isn't "fix"
     # again); cross-with-no-inspirations suppression is handled inside the sampler.
@@ -888,15 +935,20 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                 evo.get("repair_escalation_model"), evo.get("reasoning_effort"))
             _escalated = True
 
-    # LEAD-slot publish (sibling pairing): expose this slot's prepare so its paired
-    # sibling slot can reproduce the identical prompt. Normal non-repair slots only;
-    # a leader that never reaches this point publishes None from the slot task's
-    # finally, and the sibling falls back to a fresh prepare.
+    # LEAD-slot publish (sibling pairing): expose this slot's WHOLE sample output —
+    # parent + island + sampled direction + inspiration ids — plus the prompt seed
+    # and arm, so the paired sibling reproduces the identical prompt without
+    # re-sampling (re-sampling would diverge the RNG draws). Normal non-repair
+    # slots only; a leader that never reaches this point publishes None from the
+    # slot task's finally, and the sibling falls back to a fresh prepare.
     if (slot_ctx or {}).get("publish_prepare") and not _repair_gen and not needs_fix:
         try:
             slot_ctx["publish_prepare"]({
-                "parent_id": sp.get("parent_id"), "gseed": gseed,
-                "arm_id": arm_id, "ts": time.time(),
+                "sp": {k: sp.get(k) for k in (
+                    "parent_id", "island_idx", "sampled_island_idx",
+                    "archive_inspiration_ids", "top_k_inspiration_ids",
+                    "sampled_direction", "n_candidates", "selection_probs")},
+                "gseed": gseed, "arm_id": arm_id, "ts": time.time(),
             })
         except Exception:
             pass
@@ -942,7 +994,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         mut_payload["mock_cost"] = mock.get("mutate_cost", 0.0)  # offline budget tests
         seq = mock.get("mutate_code_sequence")
         if seq is not None:
-            mut_payload["mock_code"] = seq[counters["iter_index"] % len(seq)]
+            mut_payload["mock_code"] = seq[_iter_idx % len(seq)]
         # else identity copy of parent
     # Sibling stagger: give the leader's identical-prefix call a head start so it
     # prefills the Azure prompt cache (prefill completes in seconds; the stagger is
@@ -1034,7 +1086,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     # never oversubscribe the machine's cores.
     ev = _stage_call(
         locks, "eval", _evaluate_candidate,
-        cfg, mut["candidate_path"], results_dir, counters["iter_index"], generation,
+        cfg, mut["candidate_path"], results_dir, _iter_idx, generation,
     )
     # 4a. IMMEDIATE FIX (MUTABLE fix concern). On an eval failure, repair the
     # candidate in-place by re-prompting the same model with the error, up to
@@ -1063,6 +1115,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             enable_web_search=bool(evo.get("fix_web_search", False)),
             error_history=_err_history,
             locks=locks,
+            iter_index=_iter_idx,
         )
         _slot_mut_cost += _fix_cost  # attribute the repair spend to the same arm
         # Re-embed only if a fix actually changed the code, so the archived
@@ -1224,19 +1277,24 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             # near-duplicate so the population doesn't carry both (the incumbent's row +
             # lineage are preserved; it just leaves the archive + sampling pool).
             counters["novelty_accepts"] += 1
-            counters["novelty_kept_better"] = counters.get("novelty_kept_better", 0) + 1
-            _pinned_inflight = (slot_ctx or {}).get("inflight_parents") or ()
-            if _inc_id is not None and _inc_id in _pinned_inflight:
-                # The incumbent is PINNED as another in-flight slot's parent —
+            # Pin check SUBTRACTS this slot's own pin: a slot may evict its OWN
+            # parent (the sequential driver always could — parity preserved); only
+            # a pin held by ANOTHER in-flight slot blocks the eviction.
+            _pins = (slot_ctx or {}).get("inflight_parents") or {}
+            _own_pin = 1 if (_inc_id is not None and _inc_id == sp.get("parent_id")) else 0
+            if _inc_id is not None and (_pins.get(_inc_id, 0) - _own_pin) > 0:
+                # The incumbent is pinned as ANOTHER in-flight slot's parent —
                 # skip the eviction (keep both near-dups) rather than tombstone a
                 # program a concurrent slot is actively deriving from; the gate
                 # self-corrects on a later comparison.
+                counters["novelty_evict_skipped_pinned"] = (
+                    counters.get("novelty_evict_skipped_pinned", 0) + 1)
                 _trace({"step": "framework_decision",
                         "action": "kept_better_evict_skipped_pinned",
                         "incumbent": _inc_id,
                         "max_similarity": nov.get("max_similarity")})
-                _inc_id = None
-            if _inc_id is not None:
+                _log_nov("kept_better_evict_skipped_pinned")
+            elif _inc_id is not None:
                 try:
                     repair_record_script.main({
                         "db_path": db_path, "db_config": db_config,
@@ -1247,16 +1305,23 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
                         "program_id": _inc_id, "action": "tombstone", "reason": "novelty_evict",
                     })
                     # Make the eviction OBSERVABLE — it is the activity that reveals a
-                    # near-dup flood. novelty_kept_better is surfaced into the diag below.
+                    # near-dup flood. novelty_kept_better counts ACTUAL evictions only
+                    # and is surfaced into the diag below.
+                    counters["novelty_kept_better"] = counters.get("novelty_kept_better", 0) + 1
                     _trace({"step": "framework_decision", "action": "kept_better_evicted",
                             "incumbent": _inc_id, "max_similarity": nov.get("max_similarity")})
+                    _log_nov("kept_better_evicted")
                 except Exception as _exc:
                     # A FAILED eviction leaves BOTH near-dups live — count + trace it
                     # (do NOT silently pass), but never crash the window.
                     counters["novelty_evict_fail_count"] = counters.get("novelty_evict_fail_count", 0) + 1
                     _trace({"step": "framework_decision", "action": "kept_better_evict_failed",
                             "incumbent": _inc_id, "error": repr(_exc)})
-            _log_nov("kept_better_evicted")
+                    _log_nov("kept_better_evict_failed")
+            else:
+                # Defensive: the gate said not-novel but named no incumbent —
+                # the newcomer is kept, nothing to evict.
+                _log_nov("kept_better_no_incumbent")
 
     # 4b. compute reward (MUTABLE — scoring concern, generation half)
     # On a REPAIR gen the parent is the ERRORED program (score ≈ 0), so crediting
@@ -1495,7 +1560,9 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         # HARD budget railguard (immutable safety, NOT a strategy knob): stop
         # starting candidates once cumulative spend (this window so far + all
         # prior windows + orchestrator interventions, from the ledger) reaches
-        # the budget. Overshoot is at most one candidate's cost.
+        # the budget. Overshoot is at most ~parallel_slots candidates' cost
+        # (exactly one at parallel_slots=1) — see the slot-machine admission
+        # note below.
         prior_total = journal.total_cost(cfg["results_dir"])
         budget_hit = False
         iters_run = 0  # actual candidates attempted (may be < window_size on budget break)
@@ -1532,7 +1599,10 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         _epar = max(1, min(int(evo.get("parallel_eval_slots", 1) or 1), _par))
         _locks = ({"mutex": threading.Lock(), "eval": threading.Semaphore(_epar)}
                   if _par > 1 else None)
-        _inflight_parents: set = set()
+        # REFCOUNT map {parent_id: n in-flight slots deriving from it} — a plain
+        # set cannot represent two slots sharing one parent (every sibling pair
+        # does), where the first slot to land would strip the other's protection.
+        _inflight_parents: Dict[str, int] = {}
         _wstate: Dict[str, Any] = {"budget_hit": False, "inflight": 0,
                                    "max_slot_cost": 0.0, "iters_run": 0,
                                    "crashed": False}
@@ -1583,8 +1653,10 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 counters["iter_index"] = i
                 _wstate["inflight"] += 1
                 _cost_before = counters["cost"]
+                _landed = False
                 _slot_event("admitted", i)
-                _slot_ctx = {"inflight_parents": _inflight_parents, "parent_id": None}
+                _slot_ctx = {"inflight_parents": _inflight_parents,
+                             "parent_id": None, "slot_index": i}
                 if _lead_prep is not None:
                     def _publish(payload, _p=_lead_prep):
                         _p["payload"] = payload
@@ -1603,6 +1675,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                                        repair=(repair_on and i == 0),
                                        locks=_locks, slot_ctx=_slot_ctx)
                     _wstate["iters_run"] += 1
+                    _landed = True
                 except BaseException:
                     # First crash aborts the window like the sequential driver did:
                     # queued slots stop admitting, in-flight slots drain.
@@ -1610,8 +1683,13 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     raise
                 finally:
                     _wstate["inflight"] -= 1
-                    if _slot_ctx.get("parent_id"):
-                        _inflight_parents.discard(_slot_ctx["parent_id"])
+                    _pid = _slot_ctx.get("parent_id")
+                    if _pid:  # decrement the refcounted pin; drop the key at zero
+                        _n = _inflight_parents.get(_pid, 0) - 1
+                        if _n > 0:
+                            _inflight_parents[_pid] = _n
+                        else:
+                            _inflight_parents.pop(_pid, None)
                     _wstate["max_slot_cost"] = max(
                         _wstate["max_slot_cost"], counters["cost"] - _cost_before)
                     # Cooperative stop BETWEEN candidates (also honored mid-warmup via
@@ -1620,7 +1698,9 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     # cluster loop reads _coop_stop and returns "cooperative_stop".
                     if _stop_requested(stop_dir, run_id):
                         _coop_stop["hit"] = True
-                    _slot_event("committed", i, {
+                    # 'committed' ONLY when the commit phase actually landed; a slot
+                    # that raised is journaled as 'crashed'.
+                    _slot_event("committed" if _landed else "crashed", i, {
                         "slot_cost": round(counters["cost"] - _cost_before, 6)})
             finally:
                 # A lead slot that exits by ANY path (admission skip, crash, or a
@@ -1647,11 +1727,15 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                         # and deterministic errored-parent pick must not race).
                         _pool.submit(_slot_task, 0).result()
                         _start = 1
-                    # map() submits all remaining slots; workers start them in
-                    # order, admission flags (stop/budget/crash) are monotonic, so
-                    # executed slots form a prefix. Iterating the results re-raises
-                    # the first slot exception (window aborts, in-flight drained by
-                    # the executor's shutdown).
+                    # map() submits all remaining slots; workers pick them up in
+                    # order and the admission flags (stop/budget/crash) are
+                    # monotonic, so executed slots form a prefix under normal
+                    # scheduling. (The mutex is not fairness-ordered, so extreme
+                    # scheduler skew exactly at a flag flip can skip a lower slot
+                    # while a higher one already admitted runs — accounting stays
+                    # correct because gens are per-slot; the hole is only cosmetic.)
+                    # Iterating the results re-raises the first slot exception
+                    # (window aborts, in-flight drained by the executor's shutdown).
                     list(_pool.map(_slot_task, range(_start, window_size)))
         finally:
             budget_hit = _wstate["budget_hit"]

@@ -39,6 +39,9 @@ INPUT (stdin JSON):
     "model_name": str,                       # azure-* etc.
     "reasoning_effort": "medium" | null,     # for reasoning models
     "enable_web_search": false,              # attach web_search_preview (DR-ref grounding / fix)
+    "prompt_cache_key": str|null,            # optional cache-routing hint forwarded to
+                                             #   bg_query (run_window sends run+island /
+                                             #   run:fix scoped keys); absent => omitted
     "max_attempts": 3,
     "mock": false, "mock_code": str|null, "mock_patch": str|null, "mock_cost": 0.0,
     "run_id": str|null, "generation": int|null, "verbose": false,

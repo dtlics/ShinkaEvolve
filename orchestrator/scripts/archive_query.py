@@ -41,6 +41,28 @@ except ImportError:
     import _common  # type: ignore
 
 
+def _error_head(error_traceback, text_feedback, correct=False):
+    """One-line failure signature for a compact row (feeds the meta round's
+    deterministic error histogram). wrap_eval stores raw format_exc() whose FIRST
+    line is the generic 'Traceback (most recent call last):' banner — the real
+    exception is the LAST line, so pick that (mirrors meta_summarize._err_reason).
+    Domain failures (correct=False with no traceback) fall back to the first line
+    of text_feedback so they carry a real signature instead of '(no error text)'."""
+    err = str(error_traceback or "").strip()
+    lines = [ln.strip() for ln in err.splitlines() if ln.strip()]
+    if lines:
+        pick = lines[-1] if lines[0].startswith("Traceback (most recent call last)") else lines[0]
+        return pick[:120]
+    if not correct:
+        fb = text_feedback
+        if isinstance(fb, list):
+            fb = "\n".join(str(x) for x in fb)
+        fb_lines = [ln.strip() for ln in str(fb or "").splitlines() if ln.strip()]
+        if fb_lines:
+            return fb_lines[0][:120]
+    return ""
+
+
 def _summ(payload, program):
     return _common.program_summary(
         program,
@@ -110,8 +132,6 @@ def _dispatch(db, query_type: str, payload: Dict[str, Any]):
         chosen = live[-n:] if n > 0 else live
         rows = []
         for p in chosen:
-            err = str(getattr(p, "error_traceback", None) or "").strip()
-            lines = [ln.strip() for ln in err.splitlines() if ln.strip()]
             sc = getattr(p, "combined_score", None)
             rows.append({
                 "id": getattr(p, "id", None),
@@ -119,7 +139,11 @@ def _dispatch(db, query_type: str, payload: Dict[str, Any]):
                 "island_idx": getattr(p, "island_idx", None),
                 "combined_score": round(float(sc), 4) if sc is not None else None,
                 "correct": bool(getattr(p, "correct", False)),
-                "error_head": (lines[0][:120] if lines else ""),
+                "error_head": _error_head(
+                    getattr(p, "error_traceback", None),
+                    getattr(p, "text_feedback", None),
+                    correct=bool(getattr(p, "correct", False)),
+                ),
             })
         return rows
 

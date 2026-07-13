@@ -399,7 +399,8 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     if strategy == "power_law":
         probs = _power_law_probs(scores, float(getattr(config, "exploitation_alpha", 1.0)))
     elif strategy == "lineage_weighted":
-        _gamma = float(payload.get("lineage_gamma", _LINEAGE_GAMMA) or _LINEAGE_GAMMA)
+        _g = payload.get("lineage_gamma")  # 0.0 is a LEGAL value (lineage credit off)
+        _gamma = _LINEAGE_GAMMA if _g is None else float(_g)
         probs = _weighted_probs(_lineage_values(pool, scores, _gamma), children, lam)
     else:
         probs = _weighted_probs(scores, children, lam)

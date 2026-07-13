@@ -427,8 +427,9 @@ def log_slot_event(results_dir: str, record: Dict[str, Any]) -> None:
     """Append ONE slot-lifecycle event to journal/slots.jsonl — the audit trail that
     keeps a PARALLEL window (evo.parallel_slots > 1) as readable as the sequential
     driver's implicit ordering. Events: 'admitted' (the slot passed the budget/stop
-    admission checks and started) and 'committed' (its commit phase landed —
-    landing order IS file order). Schema:
+    admission checks and started), 'committed' (its commit phase landed —
+    landing order IS file order), and 'crashed' (the slot raised; nothing was
+    committed for it and the window aborts). Schema:
       {timestamp, window_index, slot, generation, event, inflight (concurrent
        slots at emit time), slot_cost (committed only; approximate under
        concurrency — slots share one window cost counter, so it is an upper
@@ -447,7 +448,12 @@ def log_novelty(results_dir: str, record: Dict[str, Any]) -> None:
     evo.code_embed_sim_threshold from real pairs. ids + numbers only, NEVER code. Folds
     NO cost. Schema (see SKILL.md 'Tuning the novelty threshold'):
       {timestamp, window_index, generation, candidate_id, parent_id, island_idx,
-       decision in {accepted_novel|kept_better_evicted|dropped_worse|idle_no_compare},
+       decision in {accepted_novel|kept_better_evicted|kept_better_evict_failed|
+                    kept_better_evict_skipped_pinned|kept_better_no_incumbent|
+                    dropped_worse|idle_no_compare}
+       — the kept_better_* variants distinguish a REAL eviction from a failed one
+       (both near-dups left live) and from a deliberate skip (the incumbent is
+       another in-flight slot's parent),
        max_similarity, most_similar_id, most_similar_score, candidate_score,
        n_compared, diff_lines, threshold}
     The most_similar_id link + both scores is the point: it lets the orchestrator fetch

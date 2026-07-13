@@ -196,11 +196,61 @@ def test_sibling_fanout_pairs_share_parent():
     return None
 
 
+def test_own_parent_eviction_not_blocked_by_own_pin():
+    """The in-flight parent pin must NOT block a slot from evicting its OWN parent
+    (the eviction check subtracts the slot's own pin): a better-scoring near-dup of
+    its parent tombstones the parent exactly as the historical sequential driver
+    did. Regression for the self-pin bug found in adversarial review."""
+    with tempfile.TemporaryDirectory() as ws:
+        run_dir = os.path.join(ws, "run_evict")
+        os.makedirs(run_dir, exist_ok=True)
+        init_path = os.path.join(ws, "initial.py")
+        with open(init_path, "w", encoding="utf-8") as f:
+            f.write("# EVOLVE-BLOCK-START\ndef solve():\n    return 1\n# EVOLVE-BLOCK-END\n")
+        cfg = {
+            "results_dir": run_dir,
+            "task": {"eval_program_path": "unused.py", "init_program_path": init_path,
+                     "task_sys_msg": "evict smoke", "language": "python"},
+            "db_config": {"num_islands": 1, "archive_size": 20},
+            "evo": {"window_size": 1, "patch_types": ["diff"], "patch_type_probs": [1.0],
+                    "embedding_model": "text-embedding-3-small", "seed": 0,
+                    # whole-code embeddings + identity mock mutation => the candidate
+                    # is an exact near-dup (sim 1.0) of its OWN parent (the seed).
+                    "enable_novelty": True, "novelty_embed_mode": "code"},
+            # no mutate_code_sequence => identity copy of the parent; gen 1 scores
+            # HIGHER than the seed, so keep-the-better must EVICT the seed.
+            "mock": {"enabled": True,
+                     "scores_by_generation": {"0": 1.0, "1": 1.5}},
+            "window_state": {"window_index": 0, "prior_low_streak": 0},
+            "windows": 1, "iters": 1,
+        }
+        d = run_window.main(cfg)
+        assert d["iters_completed"] == 1, d
+        progs = archive_query.main({
+            "db_path": os.path.join(run_dir, "programs.sqlite"),
+            "db_config": {"num_islands": 1, "archive_size": 20},
+            "embedding_model": "text-embedding-3-small",
+            "query_type": "all", "include_metadata": True,
+        })["result"]
+        by_gen = {int(p["generation"]): p for p in progs}
+        assert (by_gen[0].get("metadata") or {}).get("repair_tombstoned") is True, (
+            "own parent must be evicted (keep-the-better), not protected by its "
+            "own slot's pin", by_gen[0])
+        assert by_gen[1].get("in_archive"), by_gen[1]
+        # novelty.jsonl records the REAL outcome.
+        nov_path = os.path.join(run_dir, "journal", "novelty.jsonl")
+        with open(nov_path, encoding="utf-8") as f:
+            decisions = [json.loads(ln)["decision"] for ln in f if ln.strip()]
+        assert "kept_better_evicted" in decisions, decisions
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         ("parallel slots parity + invariants", test_parallel_slots_parity_and_invariants),
         ("budget admission stops mid-window", test_budget_admission_stops_midwindow),
         ("sibling fan-out pairs share parent", test_sibling_fanout_pairs_share_parent),
+        ("own-parent eviction not blocked by own pin", test_own_parent_eviction_not_blocked_by_own_pin),
     ]
     ok = True
     for name, fn in tests:

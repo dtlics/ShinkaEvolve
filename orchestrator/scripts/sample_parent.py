@@ -13,6 +13,18 @@ sigmoid-weighted sampling math and the inspiration choice — in-script, so a
 rewrite is self-contained. test_parity.py asserts the probability vector here
 matches shinka's WeightedSamplingStrategy on the same archive.
 
+Strategy dispatch (``db_config.parent_selection_strategy``):
+  * ``weighted``         — the parity port above.
+  * ``lineage_weighted`` — shipped DEFAULT: same weight formula fed the RPUCG-lite
+                           lineage value U_i = max(s_i, γ·max_child U_j) (γ=0.8,
+                           payload lever ``lineage_gamma``) instead of the raw
+                           score, so fertile-but-mediocre ancestors become
+                           re-branch points. Childless pool ⇒ identical to
+                           ``weighted`` (warmup parity).
+  * ``power_law``        — shinka's rank-based P(i) ∝ (i+1)^-``exploitation_alpha``;
+                           flip to it when score compression (MAD→0) flattens the
+                           sigmoid weights. (``beam_search`` is not implemented.)
+
 Policy knobs (from db_config): parent_selection_lambda (sigmoid sharpness),
 num_archive_inspirations, num_top_k_inspirations, num_islands.
 
@@ -29,6 +41,7 @@ INPUT (stdin JSON):
     "parent_id": str | null,      # PIN this archived-correct program as the parent (its island drives the pool); for the COMBINE/grounding run. Invalid pin => fall back to normal sampling.
     "seed": int | null,           # for deterministic sampling (tests/parity)
     "validity_floor": float | null,  # lever: floor VALID parents' scores; null = inert
+    "lineage_gamma": float | null,   # RPUCG-lite decay for "lineage_weighted" (default 0.8)
     "select": "errored" | null,   # repair mode: pick an ERRORED parent to fix in place
                                   #   (no inspirations, needs_fix=True); skips tombstoned +
                                   #   attempt-cap-reached rows. null = normal selection.
@@ -119,6 +132,66 @@ def _weighted_probs(scores: List[float], children: List[int], lam: float) -> Lis
         return [w / total for w in weights]
     n = len(scores)
     return [1.0 / n] * n if n else []
+
+
+def _power_law_probs(scores: List[float], alpha: float) -> List[float]:
+    """Port of shinka's PowerLawSamplingStrategy math (sample_with_powerlaw): pool
+    ranked by score DESC, P(rank i) ∝ (i+1)^-alpha (alpha=0 → uniform). Returns
+    probabilities PARALLEL TO THE INPUT ORDER so the caller keeps one pool ordering
+    for the selection_probs debug/parity output. Rank-based → scale-free: the
+    escape hatch when the sigmoid weights flatten under score compression (MAD→0)."""
+    n = len(scores)
+    if not n:
+        return []
+    order = sorted(range(n), key=lambda i: scores[i], reverse=True)
+    raw = [0.0] * n
+    for rank, idx in enumerate(order):
+        raw[idx] = float(rank + 1) ** (-float(alpha))
+    total = sum(raw)
+    if total <= 0 or not math.isfinite(total):
+        return [1.0 / n] * n
+    return [w / total for w in raw]
+
+
+# RPUCG-lite lineage-credit decay (SimpleTES rpucg gamma). Payload-overridable via
+# ``lineage_gamma`` (evo lever); 0.8 is the SimpleTES default.
+_LINEAGE_GAMMA = 0.8
+
+
+def _lineage_values(pool, scores: List[float], gamma: float) -> List[float]:
+    """RPUCG-lite lineage credit: U_i = max(s_i, gamma * max_{pool-child j} U_j),
+    computed bottom-up over the pool's parent_id edges (children strictly outrank
+    their parent in generation, so a generation-DESC pass finalizes every child
+    before its parent; ties broken by id for determinism). A pool with no
+    parent→child edges returns ``scores`` unchanged (U ≡ s) — so on a childless
+    pool ``lineage_weighted`` selection is byte-identical to ``weighted``.
+
+    Why: the weighted strategy sees only a node's OWN score, and its
+    1/(1+children_count) factor actively penalizes fertile parents — a
+    mediocre-scoring node whose descendants turned out strong is invisible as a
+    re-branch point. U makes "this subtree pays off" a first-class signal while
+    the children factor keeps coverage pressure."""
+    by_id = {p.id: i for i, p in enumerate(pool)}
+    children_of: Dict[int, List[int]] = {}
+    for i, p in enumerate(pool):
+        j = by_id.get(getattr(p, "parent_id", None))
+        if j is not None and j != i:
+            children_of.setdefault(j, []).append(i)
+    if not children_of:
+        return list(scores)
+    u = list(scores)
+    order = sorted(
+        range(len(pool)),
+        key=lambda i: (int(getattr(pool[i], "generation", 0) or 0), str(pool[i].id)),
+        reverse=True,
+    )
+    for i in order:
+        kids = children_of.get(i)
+        if kids:
+            mx = max(u[j] for j in kids)
+            if gamma * mx > u[i]:
+                u[i] = gamma * mx
+    return u
 
 
 def _select_island(archived_correct, islands, config, rng):
@@ -313,7 +386,23 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         scores = [max(s, float(_vfloor)) for s in scores]
     children = [int(getattr(p, "children_count", 0) or 0) for p in pool]
     lam = float(getattr(config, "parent_selection_lambda", 10.0))
-    probs = _weighted_probs(scores, children, lam)
+    # Strategy dispatch (db_config.parent_selection_strategy — a live config lever):
+    #   "weighted"         — the parity-faithful WeightedSamplingStrategy port.
+    #   "lineage_weighted" — shipped DEFAULT: the same sigmoid×children weight, fed
+    #                        the RPUCG-lite lineage value U instead of the raw score
+    #                        (identical to "weighted" on a childless pool).
+    #   "power_law"        — rank-based (i+1)^-exploitation_alpha; the escape hatch
+    #                        when score compression flattens the sigmoid weights.
+    # (upstream's "beam_search" is NOT implemented here — it needed the async
+    # runner's beam-state sync; an unknown value falls back to "weighted".)
+    strategy = str(getattr(config, "parent_selection_strategy", "weighted") or "weighted")
+    if strategy == "power_law":
+        probs = _power_law_probs(scores, float(getattr(config, "exploitation_alpha", 1.0)))
+    elif strategy == "lineage_weighted":
+        _gamma = float(payload.get("lineage_gamma", _LINEAGE_GAMMA) or _LINEAGE_GAMMA)
+        probs = _weighted_probs(_lineage_values(pool, scores, _gamma), children, lam)
+    else:
+        probs = _weighted_probs(scores, children, lam)
 
     # Sample a parent by the weighted probabilities — or use the explicit pin when given.
     parent = _pinned if _pinned is not None else rng.choices(pool, weights=probs, k=1)[0]

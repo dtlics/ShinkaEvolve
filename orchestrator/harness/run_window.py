@@ -584,6 +584,10 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         # "random". Orchestrator lever (docs teach it); sample_parent implements it.
         "prebrief_inspiration_mode": evo.get("prebrief_inspiration_mode", "top"),
     }
+    # RPUCG-lite decay for the lineage_weighted strategy (evo lever; sample_parent
+    # defaults to 0.8 when unset — forward only when the config actually sets it).
+    if evo.get("lineage_gamma") is not None:
+        _sp_payload["lineage_gamma"] = evo["lineage_gamma"]
     # Sample the patch MODE first (diff/full/cross + the 5% fix mode). A "fix" draw — or
     # the errfrac repair latch — pairs with an INCORRECT parent (select="errored" + the repair
     # path); the other modes pair with a CORRECT parent and the chosen mode is forced downstream.

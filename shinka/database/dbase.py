@@ -92,9 +92,11 @@ class DatabaseConfig:
         "worst_best_fitness"  # which island to retire at the cap: "worst_best_fitness" | "fewest_members"
     )
 
-    # Parent selection parameters
+    # Parent selection parameters. The orchestrator sampler (sample_parent.py)
+    # implements "weighted" / "lineage_weighted" / "power_law"; "beam_search" is
+    # upstream-only. The shipped run config sets "lineage_weighted".
     parent_selection_strategy: str = (
-        "weighted"  # "weighted"/"power_law" / "beam_search"
+        "weighted"  # "weighted"/"lineage_weighted"/"power_law" ("beam_search": upstream-only)
     )
 
     # Power-law parent selection parameters

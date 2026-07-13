@@ -171,9 +171,121 @@ def test_island_policy_stagnation_parity():
         return None
 
 
+def _seed_lineage(db_path, db_config, specs):
+    """specs: (pid, gen, score, parent_id). Records each as a correct program with an
+    explicit id + parent edge (archive_record bumps the parent's children_count)."""
+    for pid, gen, score, par in specs:
+        archive_record.main({
+            "db_path": db_path, "db_config": db_config,
+            "program": {"id": pid, "code": f"# {pid}\n", "generation": gen,
+                        "combined_score": score, "correct": True,
+                        "parent_id": par, "public_metrics": {}},
+        })
+
+
+def test_sample_parent_power_law_parity():
+    """power_law strategy: probs match shinka's sample_with_powerlaw math — rank the
+    pool by score DESC, P(rank i) ∝ (i+1)^-exploitation_alpha — mapped back to pool
+    order; alpha=0 degenerates to uniform."""
+    with tempfile.TemporaryDirectory() as td:
+        db_path = os.path.join(td, "programs.sqlite")
+        db_config = {"num_islands": 1, "archive_size": 20,
+                     "parent_selection_strategy": "power_law", "exploitation_alpha": 2.0}
+        _seed_archive(db_path, db_config, [(1.0, None), (2.0, None), (1.5, None)])
+
+        out = sample_parent.main({"db_path": db_path, "db_config": db_config, "seed": 0})
+        probs = out["selection_probs"]
+
+        progs = archive_query.main(
+            {"db_path": db_path, "db_config": db_config, "query_type": "all"}
+        )["result"]
+        pool = [p for p in progs if p.get("in_archive") and p.get("correct")]
+        scores = [p["combined_score"] for p in pool]
+        order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
+        raw = [0.0] * len(scores)
+        for rank, idx in enumerate(order):
+            raw[idx] = float(rank + 1) ** (-2.0)
+        tot = sum(raw)
+        ref = [x / tot for x in raw]
+        assert all(abs(a - b) < 1e-9 for a, b in zip(probs, ref)), (probs, ref)
+
+        out0 = sample_parent.main(
+            {"db_path": db_path,
+             "db_config": dict(db_config, exploitation_alpha=0.0), "seed": 0})
+        n = len(out0["selection_probs"])
+        assert n and all(abs(p - 1.0 / n) < 1e-9 for p in out0["selection_probs"])
+        return None
+
+
+def test_sample_parent_lineage_childless_parity():
+    """lineage_weighted on a CHILDLESS pool is byte-identical to weighted (U ≡ s) —
+    the warmup-parity guarantee that makes the shipped default safe from gen 0."""
+    with tempfile.TemporaryDirectory() as td:
+        db_path = os.path.join(td, "programs.sqlite")
+        base = {"num_islands": 1, "archive_size": 20, "parent_selection_lambda": 10.0}
+        _seed_archive(db_path, base, [(1.0, None), (2.0, None), (1.5, None)])
+        outw = sample_parent.main(
+            {"db_path": db_path, "seed": 0,
+             "db_config": dict(base, parent_selection_strategy="weighted")})
+        outl = sample_parent.main(
+            {"db_path": db_path, "seed": 0,
+             "db_config": dict(base, parent_selection_strategy="lineage_weighted")})
+        assert outw["selection_probs"] == outl["selection_probs"], (outw, outl)
+        assert outw["parent_id"] == outl["parent_id"]
+        return None
+
+
+def test_sample_parent_lineage_fertile_upweight():
+    """RPUCG-lite: _lineage_values matches the closed form (γ-decayed, multi-level),
+    and a mediocre ancestor with a strong descendant chain gains real selection mass
+    under lineage_weighted vs weighted."""
+    from types import SimpleNamespace as NS
+
+    pool = [NS(id="A", parent_id=None, generation=0),
+            NS(id="B", parent_id="A", generation=1),
+            NS(id="C", parent_id="B", generation=2),
+            NS(id="D", parent_id=None, generation=1)]
+    u = sample_parent._lineage_values(pool, [1.0, 2.0, 5.0, 4.0], 0.8)
+    assert abs(u[2] - 5.0) < 1e-12 and abs(u[3] - 4.0) < 1e-12, u
+    assert abs(u[1] - 4.0) < 1e-12, u            # max(2, 0.8*5)
+    assert abs(u[0] - 3.2) < 1e-12, u            # max(1, 0.8*4): two-level propagation
+    # No edges => U is exactly the scores list (the childless-parity guard).
+    lone = [NS(id="X", parent_id=None, generation=0),
+            NS(id="Y", parent_id=None, generation=1)]
+    assert sample_parent._lineage_values(lone, [1.0, 2.0], 0.8) == [1.0, 2.0]
+
+    with tempfile.TemporaryDirectory() as td:
+        db_path = os.path.join(td, "programs.sqlite")
+        base = {"num_islands": 1, "archive_size": 20}
+        # A -> B -> C is the strong chain (A itself scores low); D/E/F are childless
+        # anchors that keep the median low so lineage credit visibly lifts A.
+        _seed_lineage(db_path, base, [("A", 0, 0.5, None), ("B", 1, 0.6, "A"),
+                                      ("C", 2, 5.0, "B"), ("D", 3, 0.4, None),
+                                      ("E", 4, 0.45, None), ("F", 5, 0.55, None)])
+
+        def _probs(strategy):
+            out = sample_parent.main(
+                {"db_path": db_path, "seed": 0,
+                 "db_config": dict(base, parent_selection_strategy=strategy)})
+            progs = archive_query.main(
+                {"db_path": db_path, "db_config": base, "query_type": "all"})["result"]
+            ids = [p["id"] for p in progs if p.get("in_archive") and p.get("correct")]
+            return dict(zip(ids, out["selection_probs"]))
+
+        pw = _probs("weighted")
+        pl = _probs("lineage_weighted")
+        assert abs(sum(pl.values()) - 1.0) < 1e-9
+        assert pl["A"] > 10 * pw["A"], (pw["A"], pl["A"])   # fertile ancestor re-branchable
+        assert pl["C"] > 0.1                                 # the actual best stays strong
+        return None
+
+
 if __name__ == "__main__":
     tests = [
         ("sample_parent weighted", test_sample_parent_weighted_parity),
+        ("sample_parent power_law", test_sample_parent_power_law_parity),
+        ("sample_parent lineage childless parity", test_sample_parent_lineage_childless_parity),
+        ("sample_parent lineage fertile upweight", test_sample_parent_lineage_fertile_upweight),
         ("novelty_check cosine", test_novelty_check_cosine_parity),
         ("select_llm bandit", test_select_llm_bandit_parity),
         ("island_policy stagnation", test_island_policy_stagnation_parity),

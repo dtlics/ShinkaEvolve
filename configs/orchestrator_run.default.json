@@ -17,6 +17,7 @@
     "window_size": 10,
     "parallel_slots": 2,
     "parallel_eval_slots": 1,
+    "sibling_samples": 1,
     "patch_types": ["diff", "full", "cross", "fix"],
     "patch_type_probs": [0.55, 0.3, 0.1, 0.05],
     "llm_models": ["azure-gpt-5.4-mini", "azure-gpt-5.5"],

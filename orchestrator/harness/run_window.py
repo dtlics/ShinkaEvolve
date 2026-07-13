@@ -593,6 +593,16 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     # exploration draw every generation (operator-mix collapse). None => unseeded.
     _seed = evo.get("seed")
     gseed = (int(_seed) + generation) if _seed is not None else None
+    # SIBLING slot (evo.sibling_samples, opt-in): reproduce the LEADER's prepare —
+    # its prompt seed + pinned parent + arm — so the patch-mode draw, direction
+    # sampling, inspiration choice and the full prompt string come out identical
+    # (byte-identical while the archive is unchanged between the pair, which the
+    # pairing makes the common case → the sibling's call hits the Azure prompt
+    # cache on the WHOLE prompt) while the candidate itself still varies. All
+    # children flow the NORMAL novelty/archive/bandit path — no best-of-K discard.
+    _sib = (slot_ctx or {}).get("sibling_prepare") or None
+    if _sib and _sib.get("gseed") is not None:
+        gseed = _sib["gseed"]
 
     # Per-step oversight trace — written ONLY when tracing is on (warmup, and the
     # framework-audit measuring window via --trace-steps); a harmless no-op otherwise.
@@ -632,7 +642,12 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     # the errfrac repair latch — pairs with an INCORRECT parent (select="errored" + the repair
     # path); the other modes pair with a CORRECT parent and the chosen mode is forced downstream.
     _mode = _sample_patch_mode(evo.get("patch_types"), evo.get("patch_type_probs"), gseed)
-    _want_fix = bool(repair) or (_mode == "fix")
+    # A sibling is always a NORMAL mutation of its leader's (correct, pinned)
+    # parent — never a repair, even if the reproduced seed would draw "fix"
+    # against a changed errored pool.
+    _want_fix = (bool(repair) or (_mode == "fix")) and not _sib
+    if _sib and _sib.get("parent_id"):
+        _sp_payload["parent_id"] = _sib["parent_id"]
     if _want_fix:
         _sp_payload["select"] = "errored"
         _sp_payload["repair_attempt_cap"] = int(evo.get("repair_attempt_cap", 2) or 2)
@@ -657,7 +672,7 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     # a couple of times; a persistent duplicate is accepted (siblings are legal).
     # Repair slots are exempt (deterministic newest-errored pick + they run solo).
     _inflight_parents = (slot_ctx or {}).get("inflight_parents")
-    if _inflight_parents is not None and not sp.get("needs_fix"):
+    if _inflight_parents is not None and not sp.get("needs_fix") and not _sib:
         for _r in range(2):
             if sp.get("parent_id") not in _inflight_parents:
                 break
@@ -826,7 +841,12 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
     llm_models = evo.get("llm_models")
     state_path = os.path.join(cfg["results_dir"], "bandit_state.pkl")
     arm_id = evo.get("model_name")  # bandit arm identity (may be "model@effort")
-    if llm_models:
+    if _sib and _sib.get("arm_id"):
+        # Sibling reuses the leader's ARM (no fresh bandit pull — its completion
+        # update below still credits/charges the arm; upstream counts in-flight
+        # pulls the same way).
+        arm_id = _sib["arm_id"]
+    elif llm_models:
         sel = select_llm_script.main(
             {
                 "mode": "select", "models": llm_models, "state_path": state_path,
@@ -867,6 +887,19 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             model_name, reasoning_effort = _parse_arm(
                 evo.get("repair_escalation_model"), evo.get("reasoning_effort"))
             _escalated = True
+
+    # LEAD-slot publish (sibling pairing): expose this slot's prepare so its paired
+    # sibling slot can reproduce the identical prompt. Normal non-repair slots only;
+    # a leader that never reaches this point publishes None from the slot task's
+    # finally, and the sibling falls back to a fresh prepare.
+    if (slot_ctx or {}).get("publish_prepare") and not _repair_gen and not needs_fix:
+        try:
+            slot_ctx["publish_prepare"]({
+                "parent_id": sp.get("parent_id"), "gseed": gseed,
+                "arm_id": arm_id, "ts": time.time(),
+            })
+        except Exception:
+            pass
 
     # NOTE: there is no run_window "secondary grounding gate". Canonical
     # grounding is a STANDALONE mutate.py call the orchestrator makes BETWEEN clusters
@@ -911,7 +944,21 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
         if seq is not None:
             mut_payload["mock_code"] = seq[counters["iter_index"] % len(seq)]
         # else identity copy of parent
-    mut = _stage_call(locks, None, mutate.main, mut_payload)
+    # Sibling stagger: give the leader's identical-prefix call a head start so it
+    # prefills the Azure prompt cache (prefill completes in seconds; the stagger is
+    # noise against a minutes-long call). Skipped when the leader published long
+    # enough ago (e.g. the sequential driver, where the leader already finished).
+    _sib_stagger = 0.0
+    if _sib and not mock.get("enabled"):
+        _sst = float(evo.get("sibling_stagger_sec", 30) or 0)
+        _sib_stagger = max(0.0, _sst - (time.time() - float(_sib.get("ts", 0) or 0)))
+
+    def _mutate_stage():
+        if _sib_stagger > 0:
+            time.sleep(_sib_stagger)
+        return mutate.main(mut_payload)
+
+    mut = _stage_call(locks, None, _mutate_stage)
     # Account the mutation LLM cost immediately — it was incurred even if the
     # candidate is later rejected by novelty.
     _mut_cost = float(mut.get("cost", 0.0) or 0.0)
@@ -1489,6 +1536,22 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         _wstate: Dict[str, Any] = {"budget_hit": False, "inflight": 0,
                                    "max_slot_cost": 0.0, "iters_run": 0,
                                    "crashed": False}
+        # SIBLING pairing (evo.sibling_samples, default 1 = off, cap 2): slots pair
+        # (lead, sibling); the sibling reproduces the lead's prepare — identical
+        # prompt → its call pays ~cached input — and its child flows the NORMAL
+        # novelty/archive/bandit path (keep-all, never best-of-K). A repair slot
+        # never pairs.
+        _sibs = max(1, min(int(evo.get("sibling_samples", 1) or 1), 2))
+        _sib_leader: Dict[int, int] = {}
+        if _sibs > 1:
+            _i = 1 if repair_on else 0
+            while _i + 1 < window_size:
+                _sib_leader[_i + 1] = _i
+                _i += 2
+        _preps: Dict[int, Dict[str, Any]] = {
+            lead: {"event": threading.Event(), "payload": None}
+            for lead in set(_sib_leader.values())
+        }
 
         def _slot_event(event: str, i: int, extra: Optional[Dict[str, Any]] = None) -> None:
             try:
@@ -1502,6 +1565,8 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         def _slot_task(i: int) -> None:
             # The whole task body runs with the mutex held (when parallel); the
             # long stages inside _run_one_candidate release it via _stage_call.
+            _lead_prep = _preps.get(i)          # set when THIS slot leads a sibling
+            _my_leader = _sib_leader.get(i)     # set when THIS slot IS a sibling
             if _locks:
                 _locks["mutex"].acquire()
             try:
@@ -1520,6 +1585,19 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 _cost_before = counters["cost"]
                 _slot_event("admitted", i)
                 _slot_ctx = {"inflight_parents": _inflight_parents, "parent_id": None}
+                if _lead_prep is not None:
+                    def _publish(payload, _p=_lead_prep):
+                        _p["payload"] = payload
+                        _p["event"].set()
+                    _slot_ctx["publish_prepare"] = _publish
+                if _my_leader is not None:
+                    # Wait for the leader's prepare OUTSIDE the mutex (prepare is
+                    # local work, normally sub-second; 60s cap). A skipped/crashed
+                    # leader publishes None / times out → run as a fresh slot.
+                    _p = _preps[_my_leader]
+                    _stage_call(_locks, None, _p["event"].wait, 60)
+                    if _p.get("payload"):
+                        _slot_ctx["sibling_prepare"] = _p["payload"]
                 try:
                     _run_one_candidate(cfg, next_gen + i, counters,
                                        repair=(repair_on and i == 0),
@@ -1545,6 +1623,11 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                     _slot_event("committed", i, {
                         "slot_cost": round(counters["cost"] - _cost_before, 6)})
             finally:
+                # A lead slot that exits by ANY path (admission skip, crash, or a
+                # prepare that never reached the publish point) must unblock its
+                # sibling — an unset event with payload None = "run fresh".
+                if _lead_prep is not None and not _lead_prep["event"].is_set():
+                    _lead_prep["event"].set()
                 if _locks:
                     _locks["mutex"].release()
 

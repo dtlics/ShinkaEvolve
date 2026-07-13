@@ -44,7 +44,7 @@ _MUTATE_COST = 0.5
 _WINDOW = 6
 
 
-def _mk_cfg(ws: str, tag: str, parallel_slots=None, budget=None):
+def _mk_cfg(ws: str, tag: str, parallel_slots=None, budget=None, sibling_samples=None):
     run_dir = os.path.join(ws, f"run_{tag}")
     os.makedirs(run_dir, exist_ok=True)
     init_path = os.path.join(ws, "initial.py")
@@ -62,6 +62,9 @@ def _mk_cfg(ws: str, tag: str, parallel_slots=None, budget=None):
     if parallel_slots is not None:
         evo["parallel_slots"] = parallel_slots
         evo["parallel_eval_slots"] = 1
+    if sibling_samples is not None:
+        evo["sibling_samples"] = sibling_samples
+        evo["sibling_stagger_sec"] = 0
     cfg = {
         "results_dir": run_dir,
         "task": {"eval_program_path": "unused.py", "init_program_path": init_path,
@@ -164,10 +167,40 @@ def test_budget_admission_stops_midwindow():
     return None
 
 
+def _parents_by_gen(run_dir):
+    progs = archive_query.main({
+        "db_path": os.path.join(run_dir, "programs.sqlite"),
+        "db_config": {"num_islands": 2, "archive_size": 20},
+        "embedding_model": "text-embedding-3-small",
+        "query_type": "all",
+    })["result"]
+    return {int(p["generation"]): p.get("parent_id")
+            for p in progs if int(p.get("generation") or 0) > 0}
+
+
+def test_sibling_fanout_pairs_share_parent():
+    """evo.sibling_samples=2: slots pair (lead, sibling); the sibling reproduces the
+    lead's prepare, so each pair's two children share ONE parent — and both are
+    archived (keep-all, no best-of-K discard). Works in both the parallel and the
+    sequential driver."""
+    with tempfile.TemporaryDirectory() as ws:
+        for tag, par in (("sib2", 2), ("sib1", 1)):
+            cfg, run_dir = _mk_cfg(ws, tag, parallel_slots=par, sibling_samples=2)
+            d = run_window.main(cfg)
+            assert d["iters_completed"] == _WINDOW, (tag, d)
+            par_of = _parents_by_gen(run_dir)
+            assert sorted(par_of) == list(range(1, _WINDOW + 1)), (tag, par_of)
+            # Window slots 0..5 => gens 1..6; pairs (0,1),(2,3),(4,5).
+            for lead_gen in (1, 3, 5):
+                assert par_of[lead_gen + 1] == par_of[lead_gen], (tag, lead_gen, par_of)
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         ("parallel slots parity + invariants", test_parallel_slots_parity_and_invariants),
         ("budget admission stops mid-window", test_budget_admission_stops_midwindow),
+        ("sibling fan-out pairs share parent", test_sibling_fanout_pairs_share_parent),
     ]
     ok = True
     for name, fn in tests:

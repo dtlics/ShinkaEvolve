@@ -168,9 +168,11 @@ def run_offline_smoke(verbose: bool = True) -> dict:
         check("A: scripts unchanged (no deploy)", ss.current_hash(target) == hash_before)
 
         # Intervention B: valid rewrite (regresses) -> deploy, window 3 J worse, ROLLBACK.
+        # Strategy files are UTF-8 Python; be explicit so the Windows cp1252 default
+        # can't crash on non-ASCII source (validate_strategy reads utf-8 the same way).
         valid_cand = os.path.join(ws, "valid_sample_parent.py")
-        original_src = (Path(scripts_dir) / target).read_text()
-        with open(valid_cand, "w") as f:
+        original_src = (Path(scripts_dir) / target).read_text(encoding="utf-8")
+        with open(valid_cand, "w", encoding="utf-8") as f:
             f.write(original_src + "\n# rewrite: tweak exploration (smoke)\n")
         vresult_ok = vs.main({"candidate_path": valid_cand, "target_filename": target})
         check("B: valid rewrite passes validation", vresult_ok["valid"] is True)

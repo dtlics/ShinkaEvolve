@@ -70,12 +70,19 @@ Do not edit the original source tree unless the user explicitly requests in-plac
    - Keep CLI behavior intact where practical.
    - Ensure the evolvable candidate entry file is named `initial.<ext>` so the run config can point at it.
    - Add tight `EVOLVE-BLOCK-START` / `EVOLVE-BLOCK-END` markers.
+   - If the codebase already contains SEVERAL genuinely distinct competing implementations of the
+     evolvable region (different algorithmic families, not parameter variants), emit one seed per
+     family — `initial_0.<ext>`, `initial_1.<ext>`, … with identical markers + I/O contract — and
+     use `task.init_program_paths` in step 7 (each must pass the step-8 smoke test; seed i roots
+     island i at boot and `db_config.num_islands` must be ≥ the seed count).
 6. Generate the evaluator path.
    - Python: prefer exposing `run_experiment(...)` and use `run_shinka_eval`.
    - Non-Python: use `subprocess` and write `metrics.json` plus `correct.json`.
 7. Write the run config (`orchestrator_run.json`).
    - Copy `configs/orchestrator_run.default.json`; set `task.eval_program_path` /
-     `task.init_program_path` / `task.language` to match the candidate file.
+     `task.init_program_path` / `task.language` to match the candidate file (or
+     `task.init_program_paths` = the ordered seed list for a multi-seed conversion — exactly
+     ONE of the two keys may be set, and `db_config.num_islands` must be ≥ the seed count).
    - Set `budget_usd`, the Azure `evo.llm_models`, and a precise `task_sys_msg`. The
      starter ships `task_sys_msg` as the sentinel `__UNSET_AUTHOR_AT_BOOT__` — the harness
      REFUSES to start until the orchestrator authors a real goal. Keep the evaluator from

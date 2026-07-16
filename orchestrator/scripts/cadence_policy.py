@@ -9,6 +9,12 @@ so the rewrite cycle (snapshot/deploy) refuses it. The cadence/termination KNOBS
 `termination_streak`) remain tunable but BOOT-ONLY (set in run.json before the run, never edited
 mid-run). It embeds NO LLM call.
 
+NOTE: the termination CHECK itself does NOT live here — it lives in run_window's
+--until-decision preamble + journal.termination_streak (verified from code artifacts:
+foundation-recomputed stagnation over windows.jsonl, attributed strategy deploys,
+in-interval usable discovery stubs, config_lever_hash flips). This file only decides
+the wake cadence (when a cluster returns control).
+
 In `--until-decision` mode the harness runs windows autonomously and, after each
 window, asks this policy whether to hand control back. The cadence is TWO-STAGE:
 

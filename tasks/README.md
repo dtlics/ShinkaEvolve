@@ -7,6 +7,9 @@ Each subdirectory here is a self-contained ShinkaEvolve task. Use the `shinka-se
 ```
 tasks/<task_name>/
 ├── initial.<ext>          # seed solution; mark the optimizable region with EVOLVE-BLOCK markers
+│                          #   (multi-seed tasks: several initial_<k>.<ext> files, identical
+│                          #   markers + I/O contract, listed in task.init_program_paths —
+│                          #   each seed roots its own island at boot; boot-only, opt-in)
 ├── evaluate.py            # scoring harness; returns the metrics dict for shinka
 ├── results/               # gitignored — per-task run artifacts (programs.sqlite, journal/, logs)
 └── (run config)           # an orchestrator_run.json lives next to the run, not checked in

@@ -13,18 +13,30 @@ two hats** for the evolutionary system in [`orchestrator/`](orchestrator/), and 
 **at the same moment** — when a window-cluster returns control to you (between clusters, and
 before the first / after the last). You are not in the path of every mutation.
 
-- **ORCHESTRATOR** (operational — the run can't proceed without it): author the goal; when the
-  search needs outside knowledge, write a **discovery-round query prompt**, then triage each
-  returned idea into one of three paths. **Only a DISCOVERY ROUND produces a triageable idea** —
-  a *discovery round* (== *DR round*) is one discovery pass via EXACTLY ONE OF **R1** (Azure deep
-  research, `deep_research.py`) or **R2** (the `archive-analyst` subagent). A technique you merely
-  brainstormed is NOT discovery. **Trust and ground — never kill an idea by reading its name:**
-  novel → ground it in a new island (`spawn_island.py`); similar-to-existing → combine it into the
-  closest program (`archive_record` `parent_id`=closest, no new island, the existing program kept —
-  never a kill); genuinely useless → ignore. A discovery round returns one or more (direction,
-  citation) pairs; **ground EACH of them, up to a max of 3** — not just the single best. Each
-  grounding runs as an Azure grounding call or via the grounding-engineer subagent, both with web
-  search ON so the technique is grounded against its reference.
+- **ORCHESTRATOR** (operational — the run can't proceed without it): author the goal, and own
+  the discovery → triage → grounding pipeline when the search needs outside knowledge:
+  - **Discover.** Only a DISCOVERY ROUND produces a triageable idea — one pass via EXACTLY ONE OF
+    **R1** (Azure deep research, `deep_research.py` — the ONLY route you may fire autonomously)
+    or **R2** (the `archive-analyst` subagent — STEERING-ONLY: it runs solely on a recorded user
+    steer, never on your own initiative). A technique you merely brainstormed is NOT discovery.
+    Fire R1 on the WHOLE task or on a declared SUB-TASK (a recurring bottleneck subroutine /
+    separable core); either way the DR prompt is ONE self-contained research task drafted in its
+    own terms, with main-task context added only when it helps — the `subtask` payload on
+    `deep_research.py` is stub PROVENANCE, never prompt plumbing.
+  - **Triage — trust and ground, never kill an idea by reading its name:** novel → its own
+    island (`spawn_island.py`); similar-to-existing → combine into the closest program
+    (`archive_record` `parent_id`=closest, no new island, the existing program kept — never a
+    kill); genuinely useless → ignore. A round returns one or more (direction, citation) pairs —
+    **ground EACH of them, up to a max of 3**, not just the single best.
+  - **Ground BY SCOPE, always with web search ON:** a whole-task direction that translates
+    directly → the Azure grounding call; a SUB-TASK-scoped direction → the grounding-engineer
+    subagent's A-INTEGRATE mode by default (it composes the sub-problem solution INTO a full
+    candidate on a deliberately chosen base program).
+  - **Human steering:** the user may text a direction mid-run — record it VERBATIM at once
+    (`journal/steering.jsonl` via the journal `log_steering` view), let it queue, and at a
+    control-return where your own discovery check did not fire, run ONE steered round for the
+    oldest steer (a steered R1, or the steered R2 over the run's own history), then consume it —
+    see SKILL.md "Human steering".
 - **OUTER-LOOP / FRAMEWORK-AUDIT** (improvement — not in the critical path): judge whether the
   deterministic framework code itself is flawed and, if so, rewrite the mutable **strategy or
   prompt code**.
@@ -76,10 +88,11 @@ operating playbook — before acting. In short:
     `subagents/grounding-engineer.md` to push it onto that direction; if it then evolves, it need
     not be tombstoned. This is tied to a stuck mutation, NOT to a discovery direction, needs no
     Azure grounding, and still sets web search ON.
-  - **Rare (R2 discovery fallback):** running your own Claude multi-agent archive analysis
-    (`subagents/archive-analyst.md`) as **R2** — used only when, for the same question, an Azure DR
-    (R1) already ran and its directions aren't helping or can't be grounded (or a DR call keeps
-    failing). It is NOT a preferred-up-front substitute for R1.
+  - **Steered-only (R2 discovery):** running your own Claude multi-agent archive analysis
+    (`subagents/archive-analyst.md`) as **R2** — ONLY to execute a recorded user steer (the
+    steer_id + quoted user text go in its spawn prompt, and its `kind=archive_analyst` stub is
+    gate-valid only through that steering evidence). Never fire it autonomously; there is no
+    autonomous fallback to R1 — if R1 keeps failing, reshape/rescope the query or wait.
 - **Never manually kill a slow external Azure LLM call.** The bg-poll wall is 3600s
   (foundation, `_azure.py`); cost is recorded only on a TERMINAL status, so a mid-flight kill
   leaks unlogged-but-BILLED spend. Let it ride the wall — decide for yourself, with the knobs
@@ -110,13 +123,19 @@ operating playbook — before acting. In short:
 - **Do not stop until a termination criterion is met. There are EXACTLY THREE, no others:**
   (1) **budget exhausted** [harness-decided, auto-finalized]; (2) **five consecutive
   control-returns each STAGNANT and each with an intervention** (a framework rewrite, a
-  discovery round — R1 Azure deep research or R2 archive-analyst — which is then grounded, OR a
-  deliberate config-lever flip; the automatic per-window meta round does NOT count, and the rare
-  hand-authored program-rescue does NOT count on its own — a real grounding counts only together
-  with the in-interval discovery it grounded) that still could not break the stagnation
-  [harness-decided + auto-finalized over your canonical control-return rows]; (3) **a LITERAL,
+  discovery round — R1 Azure deep research, or a human-steered R2 archive-analyst — which is then
+  grounded, OR a deliberate config-lever flip; the automatic per-window meta round does NOT count,
+  and the rare hand-authored program-rescue does NOT count on its own — a real grounding counts
+  only together with the in-interval discovery it grounded) that still could not break the
+  stagnation [harness-decided + auto-finalized, **VERIFIED FROM CODE ARTIFACTS**: stagnation is
+  foundation-recomputed from windows.jsonl with boot-frozen thresholds, and an intervention counts
+  only with its artifact — a strategy deploy attributed to this run, a usable in-interval
+  discovery stub, or a `config_lever_hash` flip; your control-return rows delimit the intervals
+  but their flags are claims that cannot advance the streak on their own]; (3) **a LITERAL,
   real user stop message typed in the live conversation.** You finalize `stopped_by_user` BY
-  HAND only for (3), and only when you can quote the actual user turn — NEVER from an
+  HAND only for (3), and only when you can quote the actual user turn — the `finalize_run` view
+  now REQUIRES that quote as `evidence.user_quote` (stored as `stop_evidence`) and refuses the
+  two harness statuses unless their recomputed precondition holds; NEVER stop from an
   inferred/remembered/assumed/"it feels done" signal (confabulating a user stop is the single
   worst failure here). If stuck with no real stop and neither harness criterion met, keep
   launching the next cluster.
@@ -176,7 +195,7 @@ Both endpoints' base_url is built by appending `/openai/v1` to the bare resource
 
 ### DR resource deployment
 
-- `o3-deep-research` deployment (Foundry project `dtlics2000-4351`, **westus**), underlying model version `2025-06-26`. Used by `orchestrator/scripts/deep_research.py` (DR prompt) via the dedicated `dr_client`. Override the deployment name in that script if you rename it. **The web-search tool spec `{"type":"web_search_preview"}` is CORRECT for the Responses-API path** (it takes NO connection id — that's the Agents API); per Microsoft docs + verified live calls, do NOT swap it to `{"type":"web_search"}` (reported to regress o3-deep-research). The deployment quota is **30,000,000 TPM / 30,000 RPM** (raised 2026-06-16), ample for a full deep-research job. Run `python tests/smoke/check_dr.py` to probe the endpoint in isolation. DR's job is web-search-based DISCOVERY (find SOTA techniques with citations). You also have a Claude-native **narrow post-R1 fallback** for the DISCOVERY role — spawn `subagents/archive-analyst.md` (a multi-agent read over your own archive + literature) — used only when, for the same question, an R1 DR already ran and its returned directions aren't helping (or a DR call keeps failing); it is NOT a route to prefer up front instead of R1.
+- `o3-deep-research` deployment (Foundry project `dtlics2000-4351`, **westus**), underlying model version `2025-06-26`. Used by `orchestrator/scripts/deep_research.py` (DR prompt) via the dedicated `dr_client`. Override the deployment name in that script if you rename it. **The web-search tool spec `{"type":"web_search_preview"}` is CORRECT for the Responses-API path** (it takes NO connection id — that's the Agents API); per Microsoft docs + verified live calls, do NOT swap it to `{"type":"web_search"}` (reported to regress o3-deep-research). The deployment quota is **30,000,000 TPM / 30,000 RPM** (raised 2026-06-16), ample for a full deep-research job. Run `python tests/smoke/check_dr.py` to probe the endpoint in isolation. DR's job is web-search-based DISCOVERY (find SOTA techniques with citations), on the whole task or a declared sub-task (`subtask` payload). The Claude-native `subagents/archive-analyst.md` (R2) is **STEERING-ONLY** — it runs solely to execute a recorded user steer over the run's own archive/history, never as an autonomous route or an R1 fallback; if an R1 call keeps failing, reshape/rescope the query rather than substituting R2.
 
 ### Reasoning-effort gotcha
 
@@ -195,7 +214,9 @@ python tests/smoke/check_dr.py        # hits the DR resource (o3-deep-research);
 
 Read [`.claude/skills/shinka-orchestrator/SKILL.md`](.claude/skills/shinka-orchestrator/SKILL.md) — the full playbook. In
 short: author a run config (`.claude/skills/shinka-orchestrator/SKILL.md` documents the schema; copy the
-`configs/orchestrator_run.default.json` starter) pointing at the task's `evaluate.py` + `initial.<ext>`, then drive
+`configs/orchestrator_run.default.json` starter) pointing at the task's `evaluate.py` + `initial.<ext>` (or several
+seed programs via `task.init_program_paths` — seed i roots island i, remaining islands filled round-robin;
+`num_islands` must be ≥ the seed count), then drive
 the search (the same command on macOS and Windows):
 
 ```bash
@@ -273,7 +294,8 @@ git push -u origin <branch>        # origin = dtlics/ShinkaEvolve.git
 - Do not manually kill a slow backgrounded Azure mutate/meta/DR call — cost books only on a terminal status, so a kill leaks unlogged billed spend; let it ride the 3600s wall. To stop a `run_window` cluster, write `<results_dir>/.stop` then `--resume` (never `Stop-Process`).
 - Do not identify, check, or kill a `run_window` by bare OS PID or a process-name scan (`Get-Process`/`tasklist`/`pkill -f run_window`) — OS PIDs are reused across worktrees, so a PID check or kill can land on ANOTHER session's run. A run IS its `results_dir`: check liveness by journal progress (`journal/run.json` `updated_at` + `windows.jsonl`), stop it by writing `<results_dir>/.stop`, recover it with `--resume`. `run_window` holds an exclusive OS lock on `<results_dir>/.run.lock` for its lifetime (kernel-released on any death) — one lock per `results_dir` guarding EVERY mode, `--warmup` and `--accept-warmup` included — so a re-launched/second run on a live `results_dir` refuses to start instead of double-writing — a wrong "it's dead" guess is harmless.
 - Do not run two `run_window`s on one `results_dir`, and to keep concurrent worktree sessions independent always launch from the worktree's own `results_dir` with a unique `run_id` — a relative `results_dir` is anchored to the config-file directory (not the launch CWD), so distinct configs ⇒ distinct run dirs ⇒ distinct locks.
-- Do not finalize a run as `stopped_by_user` (or any terminal status) on your own initiative: `budget_exhausted` and `stagnation_intervention_exhausted` are finalized BY THE HARNESS, and `stopped_by_user` is valid ONLY when the user literally typed a stop message in the live conversation. Never infer/remember/assume a user stop; "it feels done" is not a stop.
+- Do not finalize a run as `stopped_by_user` (or any terminal status) on your own initiative: `budget_exhausted` and `stagnation_intervention_exhausted` are finalized BY THE HARNESS (and the `finalize_run` CLI view refuses them unless the recomputed precondition actually holds), and `stopped_by_user` is valid ONLY when the user literally typed a stop message in the live conversation — the view REQUIRES that literal quote as `evidence.user_quote` (stored into run.json as `stop_evidence`). Never infer/remember/assume a user stop; "it feels done" is not a stop.
 - Do not re-introduce any "no-spoil" machinery (a `use_text_feedback` gate, evaluator-text stripping, a boot spoiling self-check). Held-out numbers belong under the evaluator's `private` metrics at task setup, and evaluator text feedback is ALWAYS fed to the inner loop. If a value the evaluator must show would still reveal the trick, STOP and ask the user — do not add a gate.
-- Do not ground a discovery technique that did not come from an **in-interval triaged R1/R2 discovery round**. Grounding into a new island (or combining into the closest program) requires a usable discovery from THIS control-return interval; one from a prior interval does not count, and `spawn_island` refuses to seed an island without it. Every grounding run sets web search ON. (The rare program-rescue — pushing a stuck inner-loop mutation onto a promising direction — is the one grounding NOT tied to a discovery; it still sets web search ON and never counts as an intervention on its own.)
-- Do not treat a tournament/sort over your own brainstormed hypotheses as discovery. The ONLY sanctioned Claude-native discovery is the `archive-analyst` subagent (R2); the ONLY sanctioned Claude-native multi-agent grounding is the `grounding-engineer` subagent. Introspection cannot surface a technique absent from the archive — that needs a real R1/R2 discovery round.
+- Do not ground a discovery technique that did not come from an **in-interval triaged R1/R2 discovery round**. Grounding into a new island (or combining into the closest program) requires a usable discovery from THIS control-return interval; one from a prior interval does not count, and `spawn_island` refuses to seed an island without it — and an `archive_analyst` stub satisfies the gate ONLY with recorded steering evidence (`request.steer_id` → a `user_steer` row). Every grounding run sets web search ON. (The rare program-rescue — pushing a stuck inner-loop mutation onto a promising direction — is the one grounding NOT tied to a discovery; it still sets web search ON and never counts as an intervention on its own.)
+- Do not fire the `archive-analyst` subagent (R2) without a recorded user steer — R2 is steering-only; R1 (`deep_research.py`) is the only autonomous discovery route.
+- Do not treat a tournament/sort over your own brainstormed hypotheses as discovery. The ONLY sanctioned Claude-native discovery is the STEERED `archive-analyst` subagent (R2); the ONLY sanctioned Claude-native multi-agent grounding is the `grounding-engineer` subagent (whose A-INTEGRATE mode is the default executor for sub-task-scoped discoveries). Introspection cannot surface a technique absent from the archive — that needs a real R1 (or steered-R2) discovery round.

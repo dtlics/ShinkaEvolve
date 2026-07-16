@@ -32,7 +32,7 @@ Invoke this skill when the user:
 ## Workflow
 1. Check if all user inputs are provided and ask the user follow-up questions if not inferrable.
 2. Inspect working directory. Detect chosen language + extension. Avoid overwriting existing `evaluate.py` or `initial.<ext>` without consent.
-3. Write `initial.<ext>` with a clear evolve region (`EVOLVE-BLOCK` markers or language-equivalent comments) and stable I/O contract.
+3. Write `initial.<ext>` with a clear evolve region (`EVOLVE-BLOCK` markers or language-equivalent comments) and stable I/O contract. (Optionally MULTIPLE seed programs — see "Multiple seed programs" below — when genuinely distinct algorithmic families compete.)
 4. Write `evaluate.py`:
    - Python `initial.py`: call `run_shinka_eval` with `experiment_fn_name`, `get_experiment_kwargs`, `aggregate_metrics_fn`, `num_runs`, and optional `validate_fn`.
    - Non-Python `initial.<ext>`: run candidate program directly (usually via `subprocess`) and write `metrics.json` + `correct.json`.
@@ -50,7 +50,9 @@ Invoke this skill when the user:
    - Confirm `correct.json` exists with `correct` (bool) and `error` (string) fields.
 7. Hand off to the **shinka-orchestrator** outer loop to run evolution: copy
    `configs/orchestrator_run.default.json`, set `task.eval_program_path` /
-   `task.init_program_path` to this task's `evaluate.py` / `initial.<ext>`, a
+   `task.init_program_path` to this task's `evaluate.py` / `initial.<ext>` (or, for a
+   multi-seed task, `task.init_program_paths` = the ordered seed list — exactly ONE of the
+   two keys may be set), a
    `task.language`, a `budget_usd`, and a precise `task_sys_msg`, then drive
    `python orchestrator/harness/run_window.py --config <run>/run.json --until-decision`.
    The starter ships `task_sys_msg` as the sentinel `__UNSET_AUTHOR_AT_BOOT__` — the
@@ -109,7 +111,36 @@ Rules:
 - `evaluate.py` stays the evaluator entrypoint.
 - Python candidates: prefer `run_shinka_eval` + `experiment_fn_name`.
 - Non-Python candidates: evaluate via `subprocess` and write `metrics.json` + `correct.json`.
-- Always set both `task.language` and a matching `task.init_program_path` in the run config (the live config keys are `task.*` — see the shinka-orchestrator run.json schema).
+- Always set both `task.language` and a matching `task.init_program_path` (or `task.init_program_paths` for multi-seed) in the run config (the live config keys are `task.*` — see the shinka-orchestrator run.json schema).
+
+## Multiple seed programs (optional)
+
+The run config accepts `task.init_program_paths` (an ordered list) instead of the single
+`task.init_program_path` — exactly ONE of the two may be set. At boot, seed i roots island i and
+islands K..N-1 are filled round-robin with copies of seed (i mod K), so all `db_config.num_islands`
+start populated; the harness REFUSES to boot when K > `num_islands`, on duplicate/missing seed
+files, or when both keys are set.
+
+Multi-seed is **opt-in and BOOT-ONLY**: it changes only how the run is seeded (islands start
+from distinct roots instead of copies of one seed) — nothing else about the run behaves
+differently, and the inner loop never sees the difference. Scaffold multiple seeds ONLY when
+the user supplies (or explicitly asks for) more than one starting program AND genuinely
+DISTINCT algorithmic families compete for the task — e.g. a greedy-constructive baseline vs a
+local-search baseline vs an exact-solver-on-subproblems baseline. Do NOT emit trivial parameter
+variants of one algorithm (islands differentiate by direction anyway; near-identical seeds
+waste the diversity capacity). For an EXISTING task, keep its single seed unless the user
+specifies more — upgrading one to multi-seed is just adding the extra `initial_<k>.<ext>`
+files (each passing the evaluator smoke test) and switching the config key to
+`task.init_program_paths`; nothing else about the task changes.
+
+Conventions:
+- Name them `initial_0.<ext>`, `initial_1.<ext>`, … (or a `seeds/` dir), each with the SAME
+  EVOLVE-BLOCK markers and the SAME I/O contract.
+- All seeds share ONE `task.language` and ONE `evaluate.py` contract.
+- **Each seed must pass the evaluator smoke test** (workflow step 6 applies PER SEED) — a seed that
+  fails at boot is recorded for forensics and its island filled from a correct seed, and if ALL
+  fail the harness refuses the boot.
+- Advise `db_config.num_islands >= K` in the handoff (the harness enforces it).
 
 ## Template: `initial.<ext>` (Python example)
 ```py

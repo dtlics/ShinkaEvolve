@@ -275,12 +275,82 @@ def _evaluate_candidate(
     )
 
 
-def _bootstrap_initial(cfg: Dict[str, Any]) -> float:
-    """If the archive is empty, evaluate the seed program and record it as gen 0.
+def _init_paths(cfg: Dict[str, Any], strict: bool = True) -> List[str]:
+    """Normalize task.init_program_path (single, back-compat) / task.init_program_paths
+    (ordered list — seed i seeds island i) to ONE ordered seed list. EXACTLY ONE of the
+    two keys may be set. strict=True (boot guard + every [re]seed path) raises
+    SystemExit('[boot] ...') — fail BEFORE any spend, parity with the sys-msg guard —
+    on: both keys set, neither set / empty list, duplicate paths (normcase+abspath,
+    Windows-safe), a missing seed file, or more seeds than db_config.num_islands (each
+    seed must own an island; raise num_islands or drop seeds). strict=False (digest /
+    accept-warmup fold paths) never raises — best-effort list, possibly []."""
+    task = cfg.get("task", {}) or {}
+    single = task.get("init_program_path")
+    plural = task.get("init_program_paths")
 
-    Returns the embedding cost incurred (0.0 when novelty is off or the archive
+    def _fail(msg: str) -> List[str]:
+        if strict:
+            raise SystemExit(f"[boot] refusing to start: {msg}")
+        return []
+
+    if single and plural:
+        return _fail(
+            "set EXACTLY ONE of task.init_program_path / task.init_program_paths, not both")
+    if plural is not None:
+        if not isinstance(plural, list) or not plural:
+            return _fail("task.init_program_paths must be a non-empty list of seed program paths")
+        paths = [str(p) for p in plural]
+    elif single:
+        paths = [str(single)]
+    else:
+        return _fail(
+            "no seed program: set task.init_program_path (one seed) or "
+            "task.init_program_paths (K seeds, one island each)")
+    if strict:
+        seen = set()
+        for p in paths:
+            key = os.path.normcase(os.path.abspath(p))
+            if key in seen:
+                raise SystemExit(f"[boot] refusing to start: duplicate seed program {p!r}")
+            seen.add(key)
+            if not os.path.exists(p):
+                raise SystemExit(f"[boot] refusing to start: seed program not found: {p!r}")
+        num_islands = int((cfg.get("db_config", {}) or {}).get("num_islands", 2) or 2)
+        if len(paths) > num_islands:
+            raise SystemExit(
+                f"[boot] refusing to start: {len(paths)} seed programs > "
+                f"num_islands={num_islands} — each seed must own an island; raise "
+                f"db_config.num_islands to >= {len(paths)} or drop seeds")
+        exts = {os.path.splitext(p)[1].lower() for p in paths}
+        if len(exts) > 1:
+            sys.stderr.write(
+                f"[boot] WARNING: seed programs mix extensions {sorted(exts)} — all "
+                f"seeds share ONE task.language and ONE evaluator contract\n")
+    return paths
+
+
+def _bootstrap_initial(cfg: Dict[str, Any]) -> float:
+    """If the archive is empty, evaluate the seed program(s) and record them as gen 0.
+
+    SINGLE seed (task.init_program_path, or a one-element task.init_program_paths):
+    the legacy path, byte-identical — the seed lands UNPINNED (no island_idx) and the
+    foundation copy strategy fills islands 1..N-1 with copies.
+    MULTI seed (K>1): evaluate ALL K first (no DB writes), then
+      - EVERY seed failed → SystemExit with NOTHING recorded (the archive stays
+        absent, so a rerun after fixing the seeds re-boots cleanly);
+      - else insert seed i PINNED to island i (archive_record passes island_idx
+        through; the foundation assign_island honors a pre-set pin), recording failed
+        seeds too (correct=false, forensics — the archive itself stays correct-only);
+      - ROUND-ROBIN FILL: every island j in 0..num_islands-1 without a correct root
+        gets a copy of seed correct_idx[j % len(correct_idx)] (== j mod K when all
+        seeds pass), pinned to island j, flagged metadata._seed_copy — so all islands
+        start with a correct gen-0 root. Fill copies reuse the seed's embedding.
+
+    Returns the total embedding cost incurred (0.0 when novelty is off or the archive
     was already bootstrapped) so the caller can fold it into the ledger once the
-    journal exists (bootstrap runs before journal.init_run)."""
+    journal exists (bootstrap runs before journal.init_run). This is the SINGLE
+    seeding function — boot, the all-tombstoned gate below, and the mid-run
+    empty-archive recovery all re-seed ALL K seeds through here."""
     db_path = cfg["db_path"]
     db_config = cfg["db_config"]
     evo = cfg["evo"]
@@ -299,54 +369,118 @@ def _bootstrap_initial(cfg: Dict[str, Any]) -> float:
         )["result"]
         # Gate on LIVE rows, not total. When total>0 but live==0 every row is
         # tombstoned (repair struck out the whole population incl. the seed) — fall through
-        # to RE-SEED from init_program_path so the run recovers instead of crash-looping
-        # (sample_parent would otherwise raise "archive is empty"). Auto-reseed (the seed is
-        # known-correct by construction at boot) with a stderr event so it is visible.
+        # to RE-SEED all K seed program(s) so the run recovers instead of crash-looping
+        # (sample_parent would otherwise raise "archive is empty"). Auto-reseed with a
+        # stderr event so it is visible.
         if int(count.get("live", count.get("total", 0)) or 0) > 0:
             return 0.0
         if int(count.get("total", 0) or 0) > 0:
             import sys as _sys
 
-            print("[bootstrap] every archived row is tombstoned (live=0) — re-seeding from "
-                  "init_program_path to recover the run", file=_sys.stderr)
+            print("[bootstrap] every archived row is tombstoned (live=0) — re-seeding "
+                  "all seed program(s) to recover the run", file=_sys.stderr)
 
     task = cfg["task"]
-    init_path = task["init_program_path"]
+    paths = _init_paths(cfg)
+    K = len(paths)
+    num_islands = int(db_config.get("num_islands", 2) or 2)
+    mock = cfg.get("mock", {}) or {}
+    seed_overrides = ({str(k): v for k, v in (mock.get("seed_overrides") or {}).items()}
+                      if mock.get("enabled") else {})
+
+    # Phase 1 — evaluate (and embed) ALL seeds before any DB write, so an all-fail
+    # multi-seed boot can refuse with the archive still absent.
     gen_dir = os.path.join(cfg["results_dir"], f"{FOLDER_PREFIX}_0")
-    results_dir = os.path.join(gen_dir, "results")
-    os.makedirs(results_dir, exist_ok=True)
-    ev = _evaluate_candidate(cfg, init_path, results_dir, 0, generation=0)
-    seed_code = _read_code(init_path)
-    program_fields: Dict[str, Any] = {
-        "code": seed_code,
-        "language": task.get("language", "python"),
-        "generation": 0,
-        "parent_id": None,
-        "combined_score": ev["combined_score"],
-        "correct": ev["correct"],
-        "public_metrics": ev["public_metrics"],
-        "private_metrics": ev["private_metrics"],
-        "error_traceback": ev.get("error_traceback"),
-        "metadata": {"bootstrap": True},
-    }
-    # Embed the seed so the FIRST mutations have a baseline to compare against.
-    # Without this the novelty gate is a no-op (novelty_n_compared=0) until a few
-    # embedded candidates accrue per island, letting near-duplicate early mutants
-    # through uncounted.
-    embed_cost = 0.0
-    if evo.get("enable_novelty"):
-        seed_embedding, embed_cost = _embed(cfg, seed_code)
-        if seed_embedding is not None:
-            program_fields["embedding"] = seed_embedding
-    archive_record.main(
-        {
-            "db_path": db_path,
-            "db_config": db_config,
-            "embedding_model": embedding_model,
-            "program": program_fields,
+    seeds: List[Dict[str, Any]] = []
+    embed_total = 0.0
+    for i, p in enumerate(paths):
+        results_dir = (os.path.join(gen_dir, "results") if K == 1
+                       else os.path.join(gen_dir, f"seed_{i}", "results"))
+        os.makedirs(results_dir, exist_ok=True)
+        ev = _evaluate_candidate(cfg, p, results_dir, i, generation=0)
+        ov = seed_overrides.get(str(i))
+        if ov:  # offline-test hook: fail/score one seed of K deterministically
+            ev = {**ev, **{k: ov[k] for k in
+                           ("combined_score", "correct", "error_traceback") if k in ov}}
+        code = _read_code(p)
+        # Embed the seed so the FIRST mutations have a baseline to compare against.
+        # Without this the novelty gate is a no-op (novelty_n_compared=0) until a few
+        # embedded candidates accrue per island, letting near-duplicate early mutants
+        # through uncounted.
+        embedding = None
+        if evo.get("enable_novelty"):
+            embedding, _ecost = _embed(cfg, code)
+            embed_total += float(_ecost or 0.0)
+        seeds.append({"path": p, "ev": ev, "code": code, "embedding": embedding})
+
+    def _fields(i: int, s: Dict[str, Any], island_idx: Optional[int] = None,
+                seed_copy_island: Optional[int] = None) -> Dict[str, Any]:
+        md: Dict[str, Any] = {"bootstrap": True}
+        if K > 1:
+            md["seed_index"] = i
+        if seed_copy_island is not None:
+            md["_seed_copy"] = True            # deliberately NOT _is_island_copy —
+            md["_seed_copy_island"] = seed_copy_island  # distinct provenance from the copy strategy
+        f: Dict[str, Any] = {
+            "code": s["code"],
+            "language": task.get("language", "python"),
+            "generation": 0,
+            "parent_id": None,
+            "combined_score": s["ev"]["combined_score"],
+            "correct": s["ev"]["correct"],
+            "public_metrics": s["ev"]["public_metrics"],
+            "private_metrics": s["ev"]["private_metrics"],
+            "error_traceback": s["ev"].get("error_traceback"),
+            "metadata": md,
         }
-    )
-    return float(embed_cost or 0.0)
+        if island_idx is not None:
+            f["island_idx"] = int(island_idx)   # honored by the foundation assign_island
+        if s["embedding"] is not None:
+            f["embedding"] = s["embedding"]
+        return f
+
+    def _record(fields: Dict[str, Any]) -> None:
+        archive_record.main(
+            {
+                "db_path": db_path,
+                "db_config": db_config,
+                "embedding_model": embedding_model,
+                "program": fields,
+            }
+        )
+
+    if K == 1:
+        # Legacy single-seed path: unpinned insert → CopyInitialProgramIslandStrategy
+        # fills islands 1..N-1 exactly as before this function grew multi-seed support.
+        _record(_fields(0, seeds[0]))
+        return float(embed_total or 0.0)
+
+    correct_idx = [i for i, s in enumerate(seeds) if s["ev"].get("correct")]
+    if not correct_idx:
+        import sys as _sys
+
+        for i, s in enumerate(seeds):
+            head = str(s["ev"].get("error_traceback") or s["ev"].get("error") or "")[:300]
+            print(f"[bootstrap] seed {i} ({s['path']}) FAILED evaluation: {head}",
+                  file=_sys.stderr)
+        raise SystemExit(
+            "[boot] all seed programs failed evaluation — nothing was recorded (the "
+            "archive stays absent so a rerun re-boots cleanly); fix the seeds or the "
+            "evaluator and rerun")
+    for i, s in enumerate(seeds):
+        if not s["ev"].get("correct"):
+            import sys as _sys
+
+            print(f"[bootstrap] seed {i} ({s['path']}) failed evaluation — recorded for "
+                  f"forensics; island {i} also gets a round-robin fill copy",
+                  file=_sys.stderr)
+        _record(_fields(i, s, island_idx=i))
+    for j in range(num_islands):
+        if j < K and seeds[j]["ev"].get("correct"):
+            continue  # island j already has a correct seed root
+        src = correct_idx[j % len(correct_idx)]
+        _record(_fields(src, seeds[src], island_idx=j, seed_copy_island=j))
+    return float(embed_total or 0.0)
 
 
 def _parse_arm(arm_id: Optional[str], default_effort: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
@@ -679,8 +813,9 @@ def _run_one_candidate(cfg: Dict[str, Any], generation: int, counters: Dict[str,
             sp = sample_parent.main(_sp_payload)
         except RuntimeError as _exc:
             # The live population is empty (every row tombstoned mid-cluster) — sample_parent
-            # can't pick a parent. Re-seed from init_program_path (fold its embed cost) and retry
-            # once; if it STILL fails the run is genuinely unrecoverable, so re-raise.
+            # can't pick a parent. Re-seed ALL seed program(s) via _bootstrap_initial (fold the
+            # embed cost) and retry once; if it STILL fails the run is genuinely unrecoverable,
+            # so re-raise.
             if "archive is empty" not in str(_exc):
                 raise
             counters["cost"] = counters.get("cost", 0.0) + float(_bootstrap_initial(cfg) or 0.0)
@@ -1441,6 +1576,9 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "recency gate is not wired; refusing to boot.")
     assert callable(getattr(journal, "recent_work_axes", None)), (
         "[setup] journal.recent_work_axes missing — refusing to boot.")
+    assert callable(getattr(journal, "pending_steering", None)), (
+        "[setup] journal.pending_steering missing — the human-steering queue is not "
+        "wired; refusing to boot.")
     import inspect as _inspect
     try:
         _axes_src = _inspect.getsource(journal.recent_work_axes)
@@ -1469,6 +1607,12 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         if _task0.get("require_sys_msg", True):
             raise SystemExit(f"[boot] refusing to start: {_msg}")
         sys.stderr.write(f"[boot] WARNING: {_msg}\n")
+
+    # SEED guard (multi-seed aware): normalize + validate task.init_program_path /
+    # task.init_program_paths BEFORE any spend — same fail-before-spend semantics as
+    # the sys-msg guard above (both-set / neither-set / duplicates / missing files /
+    # more seeds than islands all refuse here, not after evaluations).
+    _init_paths(cfg)
 
     db_path = cfg.setdefault(
         "db_path", os.path.join(cfg["results_dir"], "programs.sqlite")
@@ -1520,6 +1664,11 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     # files, computed from the live scripts/. Stamped into every window so the log
     # pins the exact strategy version (all files) that produced each window.
     strategy_fingerprint = strategy_store.current_fingerprint()
+    # The config LEVER hash — stamped into every window row so the verified
+    # termination check can detect a deliberate config-lever flip between clusters
+    # (a lever flip only takes effect at a process relaunch, so once per process is
+    # exactly right). See _config_lever_hash for the volatile-key exclusions.
+    _lever_hash = _config_lever_hash(cfg)
     # If the strategy fingerprint CHANGED since the last window (a rewrite
     # was deployed), zero prior_low_streak so the new strategy earns a FAIR TRIAL
     # instead of inheriting the old streak and re-tripping stagnation after a single
@@ -1861,6 +2010,9 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
         )
         diag["window_cost"] = counters["cost"]
         diag["budget_hit"] = budget_hit
+        # Code-verified config-flip artifact for the termination check (journal.
+        # _config_flip_between): a lever flip shows as a hash change across windows.
+        diag["config_lever_hash"] = _lever_hash
         # Persist the spawn-once marker into the durable window record so the NEXT window's
         # island_policy call sees "already spawned this episode" and suppresses a repeat spawn.
         diag["last_policy_spawn_generation"] = _spawn_marker
@@ -2007,12 +2159,16 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
     last_diag: Dict[str, Any] = {}
     if until_decision:
         # TERMINATION: before launching another cluster, check the deterministic
-        # stop signal — N consecutive control-returns that were each STAGNANT and had an
-        # orchestrator INTERVENTION (a rewrite OR a DR) yet still couldn't escape stagnation.
-        # Computed from the agent's canonical control_return rows; harness-decided + auto-
-        # finalized (parity with budget_exhausted) so two agents can't disagree. Stagnation
-        # alone never terminates — only stagnation the interventions could not break. (A DR
-        # counts simply as an intervention; there is no separate ">=1 DR" requirement.)
+        # stop signal — N consecutive control-return intervals that were each STAGNANT
+        # and each had an orchestrator INTERVENTION (a rewrite, a discovery round, or a
+        # config-lever flip) yet still couldn't escape stagnation. VERIFIED FROM CODE
+        # ARTIFACTS (journal.termination_streak: foundation-recomputed stagnation over
+        # windows.jsonl + attributed strategy deploys / usable discovery stubs /
+        # config_lever_hash flips) — the agent's control_return rows delimit the
+        # intervals and carry the work score, but their flags are claims; code truth
+        # drives this number. Harness-decided + auto-finalized (parity with
+        # budget_exhausted) so two agents can't disagree. Stagnation alone never
+        # terminates — only stagnation the interventions could not break.
         _term_n = int(cadence.get("termination_streak", 5) or 5)
         _term_streak = journal.termination_streak(cfg["results_dir"])
         if _term_n > 0 and _term_streak >= _term_n:
@@ -2020,10 +2176,7 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
             _last["return_reason"] = "stagnation_intervention_exhausted"
             _last["termination_streak"] = _term_streak
             _last["ok"] = True
-            try:
-                journal.finalize_run(cfg["results_dir"], "stagnation_intervention_exhausted")
-            except Exception:
-                pass
+            _finalize_terminal(cfg["results_dir"], "stagnation_intervention_exhausted", _last)
             return _last
         # The next cluster's size is driven by the LAST control-return's work score
         # (recorded by the agent before this call) + how long work has stayed low.
@@ -2093,20 +2246,26 @@ def main(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 break
         last_diag.setdefault("return_reason", "windows_done")
 
-    # Finalize the run ledger on the budget-exhausted TERMINAL return (so the
-    # status reflects the stop). User-stop / five-in-a-row terminations are the agent's
-    # judgment and call the journal `finalize_run` CLI view itself; a non-terminal
-    # cadence/taper return does NOT finalize.
+    # Finalize the run ledger on the budget-exhausted TERMINAL return (so the status
+    # reflects the stop). budget_exhausted and stagnation_intervention_exhausted are
+    # HARNESS-finalized (here and at the top-of-cluster check above); the agent
+    # finalizes only stopped_by_user, via the journal `finalize_run` CLI view WITH
+    # evidence={"user_quote": <the literal user turn>}. A non-terminal cadence/taper
+    # return does NOT finalize.
     if last_diag.get("return_reason") == "budget_exhausted":
-        try:
-            journal.finalize_run(cfg["results_dir"], "budget_exhausted")
-        except Exception:
-            pass
+        _finalize_terminal(cfg["results_dir"], "budget_exhausted", last_diag)
 
     # Surface the termination streak on every return so the agent sees how close the run is
-    # to the deterministic stop (N consecutive stagnant + intervened control-returns).
+    # to the deterministic stop (N consecutive VERIFIED stagnant+intervened intervals),
+    # plus how many trailing rows diverge from code truth (inspect via the journal
+    # `termination_report` view) and how many user steers are queued (pending_steering —
+    # consume one at this control-return if you would not otherwise fire discovery).
     try:
         last_diag["termination_streak"] = journal.termination_streak(cfg["results_dir"])
+        _term_report = journal.termination_report(cfg["results_dir"])
+        last_diag["termination_divergence"] = sum(
+            1 for iv in _term_report[-5:] if iv.get("diverged"))
+        last_diag["pending_steering"] = len(journal.pending_steering(cfg["results_dir"]))
     except Exception:
         pass
     last_diag["ok"] = True
@@ -2301,6 +2460,76 @@ def _stop_requested(results_dir: str, run_id: Optional[str]) -> bool:
     return False
 
 
+def _config_lever_hash(cfg: Dict[str, Any]) -> str:
+    """Content hash over the run config's LEVER keys — the code-verified "a config
+    lever was flipped between clusters" artifact for the termination check. Drops the
+    volatile / CLI-injected keys (window_state bookkeeping; the --windows/--iters/
+    --trace-steps overrides; stop_dir; the warmup-forced cadence.mode and
+    task.require_sys_msg) so a --resume, a measure window, or warmup plumbing never
+    reads as a lever flip. Every other key (evo.*, db_config.*, cadence knobs,
+    budget_usd, models, task levers) is lever material — including keys added later,
+    with no schema to maintain. 16 hex chars, parity with strategy_store.file_hash."""
+    import hashlib
+
+    canon = {k: v for k, v in cfg.items()
+             if k not in ("window_state", "stop_dir", "trace_steps", "windows", "iters")}
+    cad = dict(canon.get("cadence") or {})
+    cad.pop("mode", None)  # --warmup/--windows force it; not a lever
+    canon["cadence"] = cad
+    tsk = dict(canon.get("task") or {})
+    tsk.pop("require_sys_msg", None)  # --warmup forces it; not a lever
+    canon["task"] = tsk
+    blob = json.dumps(canon, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _finalize_terminal(results_dir: str, status: str, diag: Dict[str, Any]) -> None:
+    """Harness-side terminal finalize — LOUD, never silent (the old bare
+    try/except:pass could leave status="running" while returning a terminal reason).
+    Same-status re-finalize is a benign no-op (finalize_run is idempotent); an
+    EXISTING different terminal status is respected and surfaced via
+    diag["finalized_status"], never overwritten; a real write failure is retried once
+    and then surfaced via diag["finalize_error"] so the agent can run the journal
+    ``finalize_run`` CLI view as the recovery path (the view re-checks the
+    precondition). On success, also auto-draft RUN_SUMMARY.md so a terminated run is
+    never summary-less — the agent still enriches the draft and runs archive_run."""
+    try:
+        current = (journal.read_run(results_dir) or {}).get("status")
+    except Exception:
+        current = None
+    if current in getattr(journal, "TERMINAL_STATUSES", set()) and current != status:
+        sys.stderr.write(
+            f"[terminate] run already finalized as {current!r}; keeping it "
+            f"(wanted {status!r})\n")
+        diag["finalized_status"] = current
+        return
+    last_exc: Optional[Exception] = None
+    for attempt in (1, 2):
+        try:
+            journal.finalize_run(results_dir, status)
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            import traceback
+
+            sys.stderr.write(
+                f"[terminate] finalize_run({status!r}) FAILED (attempt {attempt}/2): "
+                f"{exc}\n{traceback.format_exc()}\n")
+            time.sleep(0.5)
+    if last_exc is not None:
+        diag["finalize_error"] = repr(last_exc)
+        return
+    diag["finalized"] = True
+    diag["finalized_status"] = status
+    try:
+        draft = journal.write_run_summary_draft(results_dir)
+        if draft:
+            diag["summary_draft"] = draft
+    except Exception as exc:
+        sys.stderr.write(f"[terminate] RUN_SUMMARY.md draft failed (non-fatal): {exc}\n")
+
+
 def _absolutize_paths(cfg: Dict[str, Any], config_path: str) -> None:
     """Anchor a relative results_dir / db_path to the CONFIG-FILE directory (not the launch CWD),
     in place, so a relative "results" resolves to <config dir>/results deterministically and two
@@ -2318,7 +2547,20 @@ def _run_meta(cfg: Dict[str, Any]) -> Dict[str, Any]:
     pre-created run.json makes it a clean no-op with no config_digest drift."""
     evo = cfg.get("evo", {}) or {}
     db_config = cfg.get("db_config", {}) or {}
+    cadence = cfg.get("cadence", {}) or {}
     window_size = int(cfg.get("iters") or evo.get("window_size", 10))
+    # Seed forensics (best-effort, never raises — accept_warmup folds with a bare
+    # task:{}): count + short content hashes of the seed program(s).
+    seed_paths = _init_paths(cfg, strict=False)
+    seed_hashes: List[Optional[str]] = []
+    for _p in seed_paths:
+        try:
+            import hashlib as _hashlib
+
+            with open(_p, "rb") as _f:
+                seed_hashes.append(_hashlib.sha256(_f.read()).hexdigest()[:12])
+        except Exception:
+            seed_hashes.append(None)
     return {
         "run_id": cfg.get("run_id"),
         "goal": cfg.get("task", {}).get("task_sys_msg"),
@@ -2330,9 +2572,17 @@ def _run_meta(cfg: Dict[str, Any]) -> Dict[str, Any]:
             "llm_models": evo.get("llm_models"),
             # Record the REAL stagnation knobs actually in force (not just the
             # deprecated `tau` alias) so the journal shows the bar that was used.
+            # The verified-termination floor (journal.foundation_stagnation_flags)
+            # reads THESE boot-frozen copies — a mid-run knob flip moves the cadence
+            # bar but never the termination floor.
             "stagnation_abs_floor": evo.get("stagnation_abs_floor"),
             "stagnation_rel_frac": evo.get("stagnation_rel_frac"),
             "consecutive_required": evo.get("consecutive_required"),
+            # Boot-frozen N for criterion 2 — the finalize CLI view's precondition
+            # re-check reads this, not the live config.
+            "termination_streak": int(cadence.get("termination_streak", 5) or 5),
+            "num_seeds": len(seed_paths) or 1,
+            "seed_sha256": seed_hashes,
         },
     }
 

@@ -17,12 +17,15 @@ overwritten, evicted, or replaced.
 
 The technique seeded here MUST originate from an in-interval discovery round (DR
 round) — EXACTLY ONE OF R1 (Azure deep research, ``deep_research.py``, stub
-``kind="dr"``) OR R2 (archive-analyst subagent, stub ``kind="archive_analyst"``) —
-logged THIS control-return interval. The PRIMARY fail-closed gate at the top
+``kind="dr"``, whole-task or sub-task scoped — the ONLY autonomous route) OR a
+human-STEERED R2 (archive-analyst subagent, stub ``kind="archive_analyst"``, valid
+only with recorded steering evidence: the stub's ``request.steer_id`` must resolve
+to a ``user_steer`` row in journal/steering.jsonl not consumed by a different stub)
+— logged THIS control-return interval. The PRIMARY fail-closed gate at the top
 of ``main`` enforces this: it refuses to seed any island unless
 ``journal.discovery_in_interval(results_dir)`` returns a non-empty list of usable
-in-interval stubs. A brainstormed/tournament-over-own-ideas technique has no stub and
-is refused by construction.
+in-interval stubs (the steering predicate is inside that gate). A brainstormed/
+tournament-over-own-ideas technique has no stub and is refused by construction.
 
 Honors ``db_config.max_islands``: at the cap, the worst island is retired
 NON-DESTRUCTIVELY (de-archived + island_idx nulled, rows preserved) and its index

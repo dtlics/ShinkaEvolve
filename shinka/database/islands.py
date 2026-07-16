@@ -556,7 +556,16 @@ class CombinedIslandManager:
         )
 
     def assign_island(self, program: Any) -> None:
-        """Assign an island to a program using the configured strategy."""
+        """Assign an island to a program using the configured strategy.
+
+        HONOR A PRE-ASSIGNED PIN: a program arriving with ``island_idx`` already set
+        keeps it — the strategies are bypassed entirely. This is the multi-seed boot
+        contract (the orchestrator's bootstrap pins seed i to island i and its
+        round-robin fill copies to their islands); every normal candidate arrives
+        with island_idx=None and takes the strategy path (children inherit the
+        parent's island, the first unpinned program triggers the copy strategy)."""
+        if getattr(program, "island_idx", None) is not None:
+            return
         self.assignment_strategy.assign_island(program)
 
     def perform_migration(self, current_generation: int) -> bool:
@@ -746,13 +755,19 @@ class CombinedIslandManager:
     def get_initial_program(self) -> Optional[Dict]:
         """Get the initial program (generation 0, no parent).
 
+        With MULTIPLE seed programs (multi-seed boot) "the" initial program is
+        ambiguous — resolve with best-of-seeds semantics: prefer a correct seed,
+        then the highest combined_score, then the earliest insert. Equivalent for
+        the single-seed case (the original and its island copies share score and
+        timestamp, so the prior tie order was already arbitrary among them).
+
         Returns:
             Dictionary with program data or None if not found
         """
         self.cursor.execute(
             """SELECT * FROM programs
                WHERE generation = 0 AND parent_id IS NULL
-               ORDER BY timestamp ASC LIMIT 1"""
+               ORDER BY correct DESC, combined_score DESC, timestamp ASC LIMIT 1"""
         )
         row = self.cursor.fetchone()
         return dict(row) if row else None

@@ -1608,7 +1608,14 @@ def test_skill_doc_teaches_run_loop_and_roles():
               "--until-decision", "shared rhythm",
               "ORCHESTRATOR", "FRAMEWORK-AUDIT", "Do NOT read prior",
               "fed verbatim into the fix prompt",
-              "~$10", "mutation / meta / DR / fix"):
+              "~$10", "mutation / meta / DR / fix",
+              # verified termination (criterion 2 computed from code artifacts):
+              "termination_report", "config_lever_hash", "boot-frozen",
+              "stop_evidence", "user_quote",
+              # human steering + the R2 demotion + sub-task DR + multi-seed boot:
+              "steering.jsonl", "pending_steering", "STEERING-ONLY",
+              "Human steering", "steer_id", "sub-task", "A-INTEGRATE",
+              "init_program_paths", "round-robin"):
         assert s in skill_flat, f"SKILL.md missing behavioral teaching: {s!r}"
 
     # ABSENT in PROSE — the killed jargon:
@@ -1618,9 +1625,12 @@ def test_skill_doc_teaches_run_loop_and_roles():
     assert not _re.search(r"WS[1-7]\b", skill_prose_flat), "WSn codename survives in SKILL.md prose"
     assert not _re.search(r"\btau\b", skill_prose_flat), "tau survives in SKILL.md prose"
 
-    # CLAUDE.md: both roles + the do-not-read rule.
+    # CLAUDE.md: both roles + the do-not-read rule + the new contracts.
     assert "FRAMEWORK-AUDIT" in claude_flat and "ORCHESTRATOR" in claude_flat, "CLAUDE.md roles missing"
     assert "run_archive" in claude_flat and "prior run's archive" in claude_flat, "CLAUDE.md do-not-read missing"
+    for s in ("steer", "STEERING-ONLY", "user_quote", "stop_evidence",
+              "init_program_paths", "VERIFIED FROM CODE ARTIFACTS"):
+        assert s in claude_flat, f"CLAUDE.md missing behavioral teaching: {s!r}"
     return None
 
 
@@ -2527,42 +2537,114 @@ def test_novelty_keep_better_contract():
 
 
 def test_termination_streak():
-    """termination_streak counts trailing consecutive control_return rows that are
-    BOTH stagnant AND intervened; a stagnation-break or a no-intervention return resets it."""
+    """termination_streak is VERIFIED FROM CODE ARTIFACTS: interval stagnation is the
+    foundation recompute over windows.jsonl (boot-frozen digest thresholds), and an
+    interval is 'intervened' only with a real artifact — a strategy deploy attributed to
+    THIS run, a usable in-interval discovery stub, or a config_lever_hash flip. The
+    agent's row flags are claims: claim-only rows (the old bypass) recompute to 0."""
+    import json as _json
     import tempfile
+    import time as _time
 
     sys.path.insert(0, str(_ORCH / "harness"))
     import journal
 
-    def _row(stag, interv):
-        return {"type": "control_return", "stagnation_flag": stag, "intervened": interv,
-                "work_score": (1 if interv else 0)}
-
+    # (A) BYPASS CLOSED / back-compat: old-style claim-only rows (no windows, no
+    # artifacts, no window_index) recompute to streak 0 without crashing — including
+    # the explicit intervened=True and the work_grounding-only shapes.
     with tempfile.TemporaryDirectory() as td:
-        for _ in range(3):  # 3 stagnant + intervened in a row
-            journal.append_intervention(td, _row(True, True))
-        assert journal.termination_streak(td) == 3
-        journal.append_intervention(td, _row(True, False))  # no-intervention return → reset
-        assert journal.termination_streak(td) == 0
-        journal.append_intervention(td, _row(True, True))
-        journal.append_intervention(td, _row(True, True))
-        assert journal.termination_streak(td) == 2
-        journal.append_intervention(td, _row(False, True))  # stagnation broke → reset
-        assert journal.termination_streak(td) == 0
-        # fallback: a row WITHOUT an explicit `intervened` derives it from
-        # work_audit/work_discovery (keyed on work_discovery, NOT work_grounding).
-        journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
-                                         "work_discovery": 2})
-        assert journal.termination_streak(td) == 1
-        # a discovery round alone counts as an intervention (no ">=1 DR of 5" special rule)
-
-    # REQUIRED NEGATIVE: grounding ALONE never flips intervened, so a stagnant
-    # control_return whose only work is work_grounding does NOT advance the termination
-    # streak — a combine/grounding cannot pad the streak with no discovery behind it.
-    with tempfile.TemporaryDirectory() as td:
+        for _ in range(3):
+            journal.append_intervention(td, {"type": "control_return",
+                                             "stagnation_flag": True, "intervened": True,
+                                             "work_score": 1})
         journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
                                          "work_grounding": 2})
         assert journal.termination_streak(td) == 0
+        assert isinstance(journal.termination_report(td), list)  # no crash, per-interval detail
+
+    # (B) the full verified path: windows + artifacts drive the streak.
+    with tempfile.TemporaryDirectory() as td, tempfile.TemporaryDirectory() as hist:
+        prior_hist = os.environ.get("SHINKA_ORCH_HISTORY_DIR")
+        os.environ["SHINKA_ORCH_HISTORY_DIR"] = hist
+        try:
+            journal.init_run(td, {"run_id": "t", "config_digest": {
+                "stagnation_abs_floor": 0.001, "stagnation_rel_frac": 0.05,
+                "consecutive_required": 1, "termination_streak": 5}})
+
+            def _win(idx, s_start, s_end, lever="aaaa"):
+                journal.append_window(td, {
+                    "window_index": idx, "best_score_start": s_start,
+                    "best_score_end": s_end, "window_cost": 0.0,
+                    "strategy_fingerprint": "fp0", "config_lever_hash": lever})
+
+            def _ret(idx, ts, stag=True, interv=True, **kw):
+                row = {"type": "control_return", "window_index": idx,
+                       "stagnation_flag": stag, "intervened": interv,
+                       "timestamp": ts, "work_score": 1}
+                row.update(kw)
+                journal.append_intervention(td, row)
+
+            def _deploy_entry(ts, rd):
+                entries = []
+                idx_p = os.path.join(hist, "index.json")
+                if os.path.exists(idx_p):
+                    entries = _json.loads(open(idx_p).read())
+                entries.append({"target": "sample_parent.py", "status": "deployed",
+                                "timestamp": ts, "results_dir": rd})
+                open(idx_p, "w").write(_json.dumps(entries))
+
+            # Real-clock, strictly monotonic timestamps: log each interval's artifact
+            # first, sleep a beat, then stamp the control_return with a fresh now() —
+            # so every artifact lands strictly inside (prev_return, this_return].
+            def _now_after_beat():
+                _time.sleep(0.01)
+                return _time.time()
+
+            # interval 1: flat window + an ATTRIBUTED deploy → verified stagnant+intervened
+            _win(0, 10.0, 10.0)
+            _deploy_entry(_time.time(), td)
+            _ret(0, _now_after_beat())
+            assert journal.termination_streak(td) == 1
+            # interval 2: flat window + a usable dr stub → 2
+            _win(1, 10.0, 10.0)
+            journal.log_call(td, "dr", {"query": "q"}, {"usable": True, "brief": ["x"]},
+                             cost=0.0, summary="1 brief items")
+            _ret(1, _now_after_beat())
+            assert journal.termination_streak(td) == 2
+            # interval 3: flat window + a config-LEVER flip (hash change) → 3
+            _win(2, 10.0, 10.0, lever="bbbb")
+            _ret(2, _now_after_beat())
+            assert journal.termination_streak(td) == 3
+            # interval 4: stagnation BREAK (big delta) despite a deploy → reset to 0
+            _win(3, 10.0, 20.0, lever="bbbb")
+            _deploy_entry(_time.time(), td)
+            _ret(3, _now_after_beat())
+            assert journal.termination_streak(td) == 0
+            # interval 5: flat again but claim-only (no artifact) → NOT counted; diverged
+            _win(4, 20.0, 20.0, lever="bbbb")
+            _ret(4, _now_after_beat(), interv=True)
+            assert journal.termination_streak(td) == 0
+            rep = journal.termination_report(td)
+            assert rep[-1]["claimed"]["intervened"] is True
+            assert rep[-1]["verified"]["intervened"] is False
+            assert rep[-1]["diverged"] is True
+            # interval 6: a grounding self-log is NOT a discovery artifact → still 0
+            _win(5, 20.0, 20.0, lever="bbbb")
+            journal.log_call(td, "grounding", {"q": "g"}, {"applied": True},
+                             cost=0.0, summary="applied")
+            _ret(5, _now_after_beat(), interv=None, work_grounding=2)
+            assert journal.termination_streak(td) == 0
+            # interval 7: duplicate window_index (zero-window interval) cannot pad even
+            # WITH an artifact — an interval with no window rows never verifies stagnant.
+            journal.log_call(td, "dr", {"query": "q2"}, {"usable": True, "brief": ["y"]},
+                             cost=0.0, summary="1 brief items")
+            _ret(5, _now_after_beat())
+            assert journal.termination_streak(td) == 0
+        finally:
+            if prior_hist is None:
+                os.environ.pop("SHINKA_ORCH_HISTORY_DIR", None)
+            else:
+                os.environ["SHINKA_ORCH_HISTORY_DIR"] = prior_hist
     return None
 
 
@@ -2628,15 +2710,50 @@ def test_discovery_in_interval():
         _stub(td, "dr", False, [], "DR REFUSED: no usable direction")  # usable:false
         assert journal.discovery_in_interval(td) == []
 
-    # (e) a usable kind="archive_analyst" stub after the boundary → returned (route parity)
+    # (e) archive_analyst is STEERING-ONLY: an unsteered stub is IGNORED; a stub whose
+    # request.steer_id resolves to a recorded user_steer row is returned; a steer already
+    # consumed by a DIFFERENT stub (or resolved declined) no longer validates (no replay).
     with tempfile.TemporaryDirectory() as td:
         journal.init_run(td, {"run_id": "d"})
         journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
                                          "work_audit": 1, "timestamp": 1000.0})
+        # (e1) no steer_id in the request → excluded (fail closed for this kind)
         _stub(td, "archive_analyst", True, ["combine islands 2 and 4"],
               "archive-analyst: 1 direction")
+        assert journal.discovery_in_interval(td) == []
+        # (e2) a recorded steer + a stub carrying its steer_id → returned. The steer may
+        # be OLDER than the interval boundary (steering queues across intervals).
+        steer = journal.log_steering(td, {"quoted_user_text": "look at island 2's collapse",
+                                          "timestamp": 500.0})
+        journal.log_call(td, "archive_analyst",
+                         request={"question": "why is island 2 dead",
+                                  "steer_id": steer["steer_id"],
+                                  "quoted_user_text": "look at island 2's collapse"},
+                         response={"usable": True, "techniques": ["x"]},
+                         cost=0.0, summary="analyst: 1 direction")
         got = journal.discovery_in_interval(td)
-        assert len(got) == 1 and got[0]["kind"] == "archive_analyst"
+        assert len(got) == 1 and got[0]["kind"] == "archive_analyst", got
+        steered_file = got[0]["file"]
+        # (e3) consuming the steer WITH this stub's file keeps it valid (bound pair) …
+        journal.consume_steering(td, steer["steer_id"], "archive_analyst",
+                                 stub_file=steered_file)
+        assert len(journal.discovery_in_interval(td)) == 1
+        # … but a SECOND stub reusing the same steer_id is a replay → ignored.
+        journal.log_call(td, "archive_analyst",
+                         request={"question": "again", "steer_id": steer["steer_id"]},
+                         response={"usable": True, "techniques": ["y"]},
+                         cost=0.0, summary="analyst: 1 direction")
+        got = journal.discovery_in_interval(td)
+        assert len(got) == 1 and got[0]["file"] == steered_file, got
+        # (e4) a steer resolved as DECLINED (no stub_file) validates nothing.
+        steer2 = journal.log_steering(td, {"quoted_user_text": "skip the budget cap"})
+        journal.consume_steering(td, steer2["steer_id"], "declined", note="railguard")
+        journal.log_call(td, "archive_analyst",
+                         request={"question": "q", "steer_id": steer2["steer_id"]},
+                         response={"usable": True, "techniques": ["z"]},
+                         cost=0.0, summary="analyst: 1 direction")
+        got = journal.discovery_in_interval(td)
+        assert len(got) == 1 and got[0]["file"] == steered_file, got
 
     # first-interval (no control_return at all): a usable stub IS in-interval (boundary 0.0)
     with tempfile.TemporaryDirectory() as td:
@@ -3694,15 +3811,25 @@ def test_discovery_usable_flag_authoritative():
         got = journal.discovery_in_interval(td)
         assert len(got) == 1 and got[0]["summary"] == "DR: 1 direction", got
 
-    # (d) detail present but WITHOUT a usable key → summary screen decides
+    # (d) detail present but WITHOUT a usable key → summary screen decides (dr kind;
+    # an archive_analyst stub can never ride the summary fallback — its steering check
+    # needs a READABLE detail with request.steer_id, so R2 fails CLOSED on a lost detail)
     with tempfile.TemporaryDirectory() as td:
         _fresh(td)
         journal.log_call(td, "dr", {"query": "q"}, {"brief": []},
                          cost=0.0, summary="unusable output")
-        journal.log_call(td, "archive_analyst", {"query": "q"}, {"brief": ["d"]},
-                         cost=0.0, summary="analyst: 1 direction")
+        journal.log_call(td, "dr", {"query": "q"}, {"brief": ["d"]},
+                         cost=0.0, summary="DR: 1 direction")
         got = journal.discovery_in_interval(td)
-        assert len(got) == 1 and got[0]["kind"] == "archive_analyst", got
+        assert len(got) == 1 and got[0]["summary"] == "DR: 1 direction", got
+        # and the R2 fail-closed side: a steered-looking stub with its detail REMOVED
+        # is excluded even with a clean summary.
+        p = journal.log_call(td, "archive_analyst", {"query": "q", "steer_id": "s1"},
+                             {"techniques": ["d"], "usable": True},
+                             cost=0.0, summary="analyst: 1 direction")
+        os.remove(p)
+        got = journal.discovery_in_interval(td)
+        assert len(got) == 1 and got[0]["kind"] == "dr", got
     return None
 
 
@@ -4375,6 +4502,636 @@ def test_anti_inbreeding_exemplars():
     return None
 
 
+def test_steering_roundtrip():
+    """journal/steering.jsonl: log_steering requires a LITERAL non-empty quote; steers
+    queue (pending_steering, oldest first) across intervals until consume_steering; an
+    unknown steer_id / action is refused."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import journal
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            journal.log_steering(td, {"quoted_user_text": "   "})
+            assert False, "empty quote must be refused"
+        except ValueError:
+            pass
+        s1 = journal.log_steering(td, {"quoted_user_text": "try lattice-surgery scheduling",
+                                       "paraphrase": "steer toward LS", "window_index": 3})
+        s2 = journal.log_steering(td, {"quoted_user_text": "why is island 2 dead?"})
+        pend = journal.pending_steering(td)
+        assert [p["steer_id"] for p in pend] == [s1["steer_id"], s2["steer_id"]]  # oldest first
+        assert pend[0]["quoted_user_text"] == "try lattice-surgery scheduling"
+        try:
+            journal.consume_steering(td, "nope", "dr")
+            assert False, "unknown steer_id must be refused"
+        except ValueError:
+            pass
+        try:
+            journal.consume_steering(td, s1["steer_id"], "banana")
+            assert False, "unknown action must be refused"
+        except ValueError:
+            pass
+        journal.consume_steering(td, s1["steer_id"], "dr", note="steered R1 fired")
+        pend = journal.pending_steering(td)
+        assert [p["steer_id"] for p in pend] == [s2["steer_id"]]
+        journal.consume_steering(td, s2["steer_id"], "declined", note="moot")
+        assert journal.pending_steering(td) == []
+        rows = journal.read_steering(td)
+        assert len(rows) == 4  # 2 user_steer + 2 steer_consumed
+    return None
+
+
+def test_dr_subtask_template_and_stub_metadata():
+    """Sub-task DR plumbing is PROMPT-NEUTRAL provenance: the `subtask` payload never
+    changes the DR user message (a DR call is always one self-contained research task —
+    the orchestrator drafts query/program_context AS the sub-problem's own task); it is
+    recorded into the logged kind=dr stub's request blob (with steer_id) on the success
+    AND refused paths, and the success summary is tagged with the sub-task name."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "scripts"))
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import deep_research
+    import journal
+    import shinka.llm.agent.dr_client as drc
+    from shinka.prompts import DR_USER_MSG
+
+    captured = {}
+    orig_client, orig_run = drc.get_dr_async_client, drc.run_dr_call
+    sub = {"name": "router-core", "statement": "route CNOTs on the L-grid frontier",
+           "relation_to_task": "drop-in replacement for route_layer()"}
+    try:
+        drc.get_dr_async_client = lambda: (object(), None)
+
+        async def _ok(*a, **k):
+            captured["user_msg"] = k.get("user_msg")
+            return ('{"techniques": [{"idea": "steiner routing"}]}', 0.0)
+
+        drc.run_dr_call = _ok
+        with tempfile.TemporaryDirectory() as td:
+            out = deep_research.main({"query": "q1", "program_context": "ctx",
+                                      "results_dir": td, "subtask": sub, "steer_id": "s9"})
+            assert out["usable"] is True and out["subtask"] == sub, out
+            # PROMPT-NEUTRALITY PIN: with a subtask the user message is BYTE-IDENTICAL
+            # to the plain template — the sub-task scope lives in the stub, never the prompt.
+            assert captured["user_msg"] == DR_USER_MSG.format(
+                candidate_question="q1", program_context="ctx")
+            ptr = journal.read_calls(td, kind="dr")[-1]
+            assert "[subtask: router-core]" in ptr["summary"], ptr
+            detail = journal.read_call(td, ptr["file"])
+            assert detail["request"]["subtask"] == sub
+            assert detail["request"]["steer_id"] == "s9"
+        # no subtask (or a blank statement) → same template, and no provenance recorded
+        for payload_extra in ({}, {"subtask": None}, {"subtask": {"statement": "  "}}):
+            with tempfile.TemporaryDirectory() as td:
+                deep_research.main({"query": "q2", "program_context": "ctx2",
+                                    "results_dir": td, **payload_extra})
+                assert captured["user_msg"] == DR_USER_MSG.format(
+                    candidate_question="q2", program_context="ctx2")
+                detail = journal.read_call(td, journal.read_calls(td, kind="dr")[-1]["file"])
+                assert detail["request"]["subtask"] is None
+        # refused path also records the sub-task provenance
+        async def _refuse(*a, **k):
+            raise RuntimeError("content_filter: refused")
+
+        drc.run_dr_call = _refuse
+        with tempfile.TemporaryDirectory() as td:
+            out = deep_research.main({"query": "q3", "program_context": "c",
+                                      "results_dir": td, "subtask": sub})
+            assert out["refused"] is True and out["subtask"] == sub, out
+            ptr = journal.read_calls(td, kind="dr")[-1]
+            detail = journal.read_call(td, ptr["file"])
+            assert detail["request"]["subtask"] == sub
+            assert detail["response"]["usable"] is False
+        # mock path: template selection happens before the mock return (no crash)
+        out = deep_research.main({"query": "q4", "mock": True,
+                                  "mock_text": '{"techniques": []}', "subtask": sub})
+        assert out["cost"] == 0.0
+    finally:
+        drc.get_dr_async_client, drc.run_dr_call = orig_client, orig_run
+    return None
+
+
+def test_foundation_stagnation_floor():
+    """foundation_stagnation_flags recomputes stagnation for TERMINATION from
+    windows.jsonl best-score deltas + the BOOT-FROZEN digest thresholds — the mutable
+    detector's own stagnation_flag/low_streak fields are IGNORED (a sabotaged detector
+    cannot disable or force termination); a strategy_fingerprint change resets the
+    low-streak (fair trial); missing digest → frozen defaults."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import journal
+
+    def _w(td, idx, s0, s1, fp="fp0", sabotage=None):
+        row = {"window_index": idx, "best_score_start": s0, "best_score_end": s1,
+               "window_cost": 0.0, "strategy_fingerprint": fp}
+        if sabotage:
+            row.update(sabotage)  # mutable-written fields the floor must ignore
+        journal.append_window(td, row)
+
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "f", "config_digest": {
+            "stagnation_abs_floor": 0.5, "stagnation_rel_frac": 0.0,
+            "consecutive_required": 2}})
+        _w(td, 0, 10.0, 10.1)                                    # low (0.1<=0.5), streak 1
+        _w(td, 1, 10.1, 10.2,                                    # low, streak 2 → True —
+           sabotage={"stagnation_flag": False, "low_streak": 0})  # sabotage ignored
+        _w(td, 2, 10.2, 30.0,                                    # big gain → reset —
+           sabotage={"stagnation_flag": True, "low_streak": 9})   # sabotage ignored
+        _w(td, 3, 30.0, 30.1)                                    # low, streak 1
+        _w(td, 4, 30.1, 30.2)                                    # low, streak 2 → True
+        _w(td, 5, 30.2, 30.3, fp="fp1")                          # NEW fingerprint → fair-trial reset
+        flags = journal.foundation_stagnation_flags(td)
+        assert flags == {0: False, 1: True, 2: False, 3: False, 4: True, 5: False}, flags
+    # missing digest → frozen defaults (1e-3 abs floor, consecutive 2)
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "f2"})
+        _w(td, 0, 1.0, 1.0005)  # delta 5e-4 <= 1e-3 → low
+        _w(td, 1, 1.0005, 1.001)
+        flags = journal.foundation_stagnation_flags(td)
+        assert flags == {0: False, 1: True}, flags
+    return None
+
+
+def test_finalize_run_hardening():
+    """finalize_run: status whitelist; stopped_by_user requires evidence.user_quote
+    (stored as stop_evidence with auto noted_at); same-status re-finalize is an
+    idempotent no-op preserving the first finished_at; a different terminal status is
+    never overwritten. finalize_run_checked (the CLI view): budget_exhausted only within
+    the acceptance slack; stagnation_intervention_exhausted only at a VERIFIED streak."""
+    import tempfile
+    import time as _time
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import journal
+
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "z"})
+        try:
+            journal.finalize_run(td, "it_feels_done")
+            assert False, "unknown status must be refused"
+        except ValueError:
+            pass
+        try:
+            journal.finalize_run(td, "stopped_by_user")
+            assert False, "evidence-less user stop must be refused"
+        except ValueError:
+            pass
+        try:
+            journal.finalize_run(td, "stopped_by_user", evidence={"user_quote": "  "})
+            assert False, "empty quote must be refused"
+        except ValueError:
+            pass
+        journal.finalize_run(td, "stopped_by_user",
+                             evidence={"user_quote": "please stop the run now"})
+        run = journal.read_run(td)
+        assert run["status"] == "stopped_by_user"
+        assert run["stop_evidence"]["user_quote"] == "please stop the run now"
+        assert isinstance(run["stop_evidence"]["noted_at"], float)
+        first_fin = run["finished_at"]
+        _time.sleep(0.01)
+        journal.finalize_run(td, "stopped_by_user",
+                             evidence={"user_quote": "please stop the run now"})
+        assert journal.read_run(td)["finished_at"] == first_fin  # idempotent no-op
+        try:
+            journal.finalize_run(td, "budget_exhausted")
+            assert False, "cross-status overwrite must be refused"
+        except ValueError:
+            pass
+    # checked (CLI-view) preconditions — budget slack, both sides
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "b", "budget_usd": 100.0})
+        try:
+            journal.finalize_run_checked(td, "budget_exhausted")
+            assert False, "half-spent run must be refused"
+        except ValueError:
+            pass
+        journal.add_cost(td, 90.0)  # remaining 10 <= slack max(25, 2)
+        journal.finalize_run_checked(td, "budget_exhausted")
+        assert journal.read_run(td)["status"] == "budget_exhausted"
+    # checked stagnation: refused below the boot-frozen N, allowed at a VERIFIED streak
+    with tempfile.TemporaryDirectory() as td:
+        journal.init_run(td, {"run_id": "s", "config_digest": {
+            "stagnation_abs_floor": 0.001, "stagnation_rel_frac": 0.05,
+            "consecutive_required": 1, "termination_streak": 1}})
+        try:
+            journal.finalize_run_checked(td, "stagnation_intervention_exhausted")
+            assert False, "no verified streak → refused"
+        except ValueError:
+            pass
+        journal.append_window(td, {"window_index": 0, "best_score_start": 1.0,
+                                   "best_score_end": 1.0, "window_cost": 0.0})
+        journal.log_call(td, "dr", {"query": "q"}, {"usable": True, "brief": ["x"]},
+                         cost=0.0, summary="1 brief items")
+        _time.sleep(0.01)
+        journal.append_intervention(td, {"type": "control_return", "window_index": 0,
+                                         "stagnation_flag": True, "timestamp": _time.time(),
+                                         "work_score": 1})
+        assert journal.termination_streak(td) == 1
+        journal.finalize_run_checked(td, "stagnation_intervention_exhausted")
+        assert journal.read_run(td)["status"] == "stagnation_intervention_exhausted"
+    return None
+
+
+def test_config_lever_hash():
+    """_config_lever_hash is INVARIANT under the volatile/CLI-injected keys (a --resume,
+    a measure window, warmup plumbing never read as a lever flip) and SENSITIVE to real
+    levers; journal._config_flip_between detects a hash change across an interval and
+    stays quiet without a baseline."""
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import journal
+    import run_window
+
+    base = {"results_dir": "r", "budget_usd": 50,
+            "task": {"init_program_path": "i.py", "task_sys_msg": "g", "require_sys_msg": True},
+            "db_config": {"num_islands": 4}, "evo": {"window_size": 10, "epsilon": 0.2},
+            "cadence": {"mode": "until_decision", "base_low": 5},
+            "window_state": {"window_index": 3, "prior_low_streak": 1}}
+    h0 = run_window._config_lever_hash(base)
+    volatile = dict(base)
+    volatile.update({"window_state": {"window_index": 99}, "windows": 1, "iters": 5,
+                     "trace_steps": True, "stop_dir": "elsewhere"})
+    volatile["cadence"] = {**base["cadence"], "mode": "bounded"}
+    volatile["task"] = {**base["task"], "require_sys_msg": False}
+    assert run_window._config_lever_hash(volatile) == h0, "volatile keys must not move the hash"
+    lever = dict(base)
+    lever["evo"] = {**base["evo"], "epsilon": 0.6}
+    assert run_window._config_lever_hash(lever) != h0, "an evo lever must move the hash"
+
+    wins = [{"window_index": 0, "config_lever_hash": h0},
+            {"window_index": 1, "config_lever_hash": h0},
+            {"window_index": 2, "config_lever_hash": "ffff"}]
+    assert journal._config_flip_between(wins, 1, 2) is True   # flip inside (1, 2]
+    assert journal._config_flip_between(wins, 0, 1) is False  # same hash
+    assert journal._config_flip_between(wins, None, 2) is False  # no baseline (first interval)
+    assert journal._config_flip_between([{"window_index": 2, "config_lever_hash": "ffff"}],
+                                        1, 2) is False  # no baseline row at/below prev
+    return None
+
+
+def test_deploy_entry_run_attribution():
+    """_strategy_deploy_times counts ONLY index entries stamped with THIS run's
+    results_dir — the history dir is repo-level and shared, so another run's deploys and
+    unattributed (old/smoke) entries never count; a corrupt index degrades to []."""
+    import json as _json
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import journal
+
+    with tempfile.TemporaryDirectory() as hist, tempfile.TemporaryDirectory() as rd_a, \
+            tempfile.TemporaryDirectory() as rd_b:
+        prior = os.environ.get("SHINKA_ORCH_HISTORY_DIR")
+        os.environ["SHINKA_ORCH_HISTORY_DIR"] = hist
+        try:
+            entries = [
+                {"target": "x.py", "status": "deployed", "timestamp": 100.0, "results_dir": rd_a},
+                {"target": "x.py", "status": "rejected", "timestamp": 200.0, "results_dir": rd_a},
+                {"target": "y.py", "status": "deployed", "timestamp": 300.0, "results_dir": rd_b},
+                {"target": "z.py", "status": "deployed", "timestamp": 400.0},  # unattributed
+            ]
+            open(os.path.join(hist, "index.json"), "w").write(_json.dumps(entries))
+            got = journal._strategy_deploy_times(rd_a)
+            assert sorted(got) == [100.0, 200.0], got  # any status counts; only THIS run's
+            assert journal._strategy_deploy_times(rd_b) == [300.0]
+            open(os.path.join(hist, "index.json"), "w").write("{corrupt")
+            assert journal._strategy_deploy_times(rd_a) == []  # degrade, never crash
+        finally:
+            if prior is None:
+                os.environ.pop("SHINKA_ORCH_HISTORY_DIR", None)
+            else:
+                os.environ["SHINKA_ORCH_HISTORY_DIR"] = prior
+    # and the live deploy() stamps results_dir into its index entry
+    import strategy_store as _ss
+    src = open(str(_ORCH / "harness" / "strategy_store.py"), encoding="utf-8").read()
+    assert src.count('"results_dir": str(results_dir) if results_dir else None') >= 2, \
+        "deploy AND deploy_bundle must stamp run attribution"
+    assert _ss  # imported cleanly
+    return None
+
+
+def test_until_decision_verified_termination():
+    """run_window --until-decision terminates on the VERIFIED streak: with a pre-seeded
+    verified interval (flat window + usable dr stub + control_return row) and
+    cadence.termination_streak=1, the next call returns stagnation_intervention_exhausted
+    WITHOUT running a window, auto-finalizes run.json, and auto-drafts RUN_SUMMARY.md;
+    a second call is an idempotent no-op on the same status."""
+    import tempfile
+    import time as _time
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import journal
+    import run_window
+
+    with tempfile.TemporaryDirectory() as td:
+        rd = os.path.join(td, "run")
+        os.makedirs(rd)
+        ip = os.path.join(rd, "i.py")
+        open(ip, "w").write("# EVOLVE-BLOCK-START\nx = 1\n# EVOLVE-BLOCK-END\n")
+        cfg = {
+            "results_dir": rd, "run_id": "vt", "budget_usd": 100.0,
+            "task": {"eval_program_path": "u.py", "init_program_path": ip,
+                     "language": "python", "task_sys_msg": "goal"},
+            "db_config": {"num_islands": 1, "archive_size": 20},
+            "evo": {"window_size": 1, "patch_types": ["diff"], "patch_type_probs": [1.0],
+                    "embedding_model": "text-embedding-3-small", "enable_novelty": False,
+                    "seed": 0, "auto_meta": False},
+            "mock": {"enabled": True, "scores_by_generation": {str(i): 1.0 for i in range(5)}},
+            "cadence": {"mode": "until_decision", "termination_streak": 1},
+            "window_state": {"window_index": 1, "prior_low_streak": 0},
+        }
+        journal.init_run(rd, {"run_id": "vt", "budget_usd": 100.0, "config_digest": {
+            "stagnation_abs_floor": 0.001, "stagnation_rel_frac": 0.05,
+            "consecutive_required": 1, "termination_streak": 1}})
+        journal.append_window(rd, {"window_index": 0, "best_score_start": 1.0,
+                                   "best_score_end": 1.0, "window_cost": 0.0})
+        journal.log_call(rd, "dr", {"query": "q"}, {"usable": True, "brief": ["x"]},
+                         cost=0.0, summary="1 brief items")
+        _time.sleep(0.01)
+        journal.append_intervention(rd, {"type": "control_return", "window_index": 0,
+                                         "stagnation_flag": True, "timestamp": _time.time(),
+                                         "work_score": 1})
+        assert journal.termination_streak(rd) == 1
+        out = run_window.main(cfg)
+        assert out.get("return_reason") == "stagnation_intervention_exhausted", out
+        assert out.get("finalized") is True, out
+        assert journal.read_run(rd)["status"] == "stagnation_intervention_exhausted"
+        draft = os.path.join(rd, "RUN_SUMMARY.md")
+        assert os.path.exists(draft) and out.get("summary_draft") == draft, out
+        out2 = run_window.main(cfg)  # idempotent — same terminal reason, no crash
+        assert out2.get("return_reason") == "stagnation_intervention_exhausted", out2
+        assert journal.read_run(rd)["status"] == "stagnation_intervention_exhausted"
+    return None
+
+
+# --- multi-seed boot ---------------------------------------------------------
+def _ms_cfg(rd, n_seeds, num_islands, seed_overrides=None, legacy_single=False):
+    os.makedirs(rd, exist_ok=True)
+    paths = []
+    for i in range(n_seeds):
+        p = os.path.join(rd, f"seed_{i}.py")
+        open(p, "w").write(f"# EVOLVE-BLOCK-START\nx = {i}\n# EVOLVE-BLOCK-END\n")
+        paths.append(p)
+    task = {"eval_program_path": "u.py", "language": "python", "task_sys_msg": "goal"}
+    if legacy_single:
+        task["init_program_path"] = paths[0]
+    else:
+        task["init_program_paths"] = paths
+    mock = {"enabled": True, "scores_by_generation": {"0": 1.0}}
+    if seed_overrides:
+        mock["seed_overrides"] = seed_overrides
+    return {
+        "results_dir": rd, "run_id": "ms",
+        "db_path": os.path.join(rd, "programs.sqlite"),
+        "task": task,
+        "db_config": {"num_islands": num_islands, "archive_size": 20},
+        "evo": {"window_size": 1, "embedding_model": "text-embedding-3-small",
+                "enable_novelty": False, "auto_meta": False},
+        "mock": mock,
+    }
+
+
+def _ms_rows(db_path):
+    import json as _json
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, island_idx, generation, parent_id, correct, code, metadata FROM programs")]
+    conn.close()
+    for r in rows:
+        r["metadata"] = _json.loads(r["metadata"] or "{}")
+    return rows
+
+
+def test_multi_seed_bootstrap_distributes_and_fills():
+    """K=2 seeds, N=4 islands: seed i roots island i; islands 2/3 get round-robin fill
+    copies (seed 0/1) flagged _seed_copy; no copy-strategy machinery fires
+    (_needs_island_copies/_is_island_copy absent everywhere); seed codes preserved;
+    every row is generation 0 (migration's gen>0 filter therefore excludes them all)."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    with tempfile.TemporaryDirectory() as td:
+        cfg = _ms_cfg(os.path.join(td, "r"), 2, 4)
+        run_window._bootstrap_initial(cfg)
+        rows = _ms_rows(cfg["db_path"])
+        assert len(rows) == 4, rows
+        by_island = {r["island_idx"]: r for r in rows}
+        assert sorted(by_island) == [0, 1, 2, 3]
+        for j in (0, 1):  # the seeds themselves
+            r = by_island[j]
+            assert r["metadata"].get("seed_index") == j and not r["metadata"].get("_seed_copy")
+            assert f"x = {j}" in r["code"] and r["generation"] == 0 and r["parent_id"] is None
+        for j, src in ((2, 0), (3, 1)):  # round-robin fills: island j ← seed j mod K
+            r = by_island[j]
+            assert r["metadata"].get("_seed_copy") is True
+            assert r["metadata"].get("seed_index") == src and f"x = {src}" in r["code"]
+            assert r["generation"] == 0 and r["parent_id"] is None
+        for r in rows:
+            assert "_needs_island_copies" not in r["metadata"]
+            assert "_is_island_copy" not in r["metadata"]
+            assert r["correct"] == 1
+    return None
+
+
+def test_multi_seed_k_equals_n():
+    """K == N: exactly K seed rows, one per island, and NO fill copies."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    with tempfile.TemporaryDirectory() as td:
+        cfg = _ms_cfg(os.path.join(td, "r"), 3, 3)
+        run_window._bootstrap_initial(cfg)
+        rows = _ms_rows(cfg["db_path"])
+        assert len(rows) == 3
+        assert sorted(r["island_idx"] for r in rows) == [0, 1, 2]
+        assert all(not r["metadata"].get("_seed_copy") for r in rows)
+    return None
+
+
+def test_single_seed_backcompat():
+    """K=1 (legacy key OR a one-element init_program_paths) is byte-identical to the old
+    path: the seed lands UNPINNED (copy strategy → island 0 + _is_island_copy copies on
+    the other islands), metadata carries no seed_index/_seed_copy."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    for legacy in (True, False):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = _ms_cfg(os.path.join(td, "r"), 1, 3, legacy_single=legacy)
+            run_window._bootstrap_initial(cfg)
+            rows = _ms_rows(cfg["db_path"])
+            assert len(rows) == 3, rows  # original + copy-strategy fills of islands 1..2
+            originals = [r for r in rows if not r["metadata"].get("_is_island_copy")]
+            copies = [r for r in rows if r["metadata"].get("_is_island_copy")]
+            assert len(originals) == 1 and originals[0]["island_idx"] == 0
+            assert sorted(c["island_idx"] for c in copies) == [1, 2]
+            md = originals[0]["metadata"]
+            assert md.get("bootstrap") is True
+            assert "seed_index" not in md and "_seed_copy" not in md
+    return None
+
+
+def test_multi_seed_all_fail_boot_refusal():
+    """ALL seeds failing evaluation refuses the boot with NOTHING recorded (the archive
+    stays absent so a rerun after fixing the seeds re-boots cleanly)."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    with tempfile.TemporaryDirectory() as td:
+        rd = os.path.join(td, "r")
+        cfg = _ms_cfg(rd, 2, 2, seed_overrides={"0": {"correct": False},
+                                                "1": {"correct": False}})
+        try:
+            run_window._bootstrap_initial(cfg)
+            assert False, "all-fail must refuse the boot"
+        except SystemExit:
+            pass
+        assert not os.path.exists(cfg["db_path"]), "nothing may be recorded on all-fail"
+        # fix the seeds → the SAME config boots cleanly (no live>0 trap, no db surgery)
+        cfg["mock"].pop("seed_overrides")
+        run_window._bootstrap_initial(cfg)
+        assert len(_ms_rows(cfg["db_path"])) == 2
+    return None
+
+
+def test_multi_seed_one_fails_fills_from_correct():
+    """One failing seed of K=2 (N=3): the run proceeds; the failed seed is recorded on
+    its pinned island for forensics (correct=0, out of the archive) and every island
+    still gets a correct root via round-robin fill from the correct seeds."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    with tempfile.TemporaryDirectory() as td:
+        cfg = _ms_cfg(os.path.join(td, "r"), 2, 3,
+                      seed_overrides={"1": {"correct": False,
+                                            "error_traceback": "boom"}})
+        run_window._bootstrap_initial(cfg)
+        rows = _ms_rows(cfg["db_path"])
+        # seeds 0 (correct) + 1 (incorrect, forensics) + fills for islands 1 and 2
+        assert len(rows) == 4, rows
+        island1 = [r for r in rows if r["island_idx"] == 1]
+        assert {r["correct"] for r in island1} == {0, 1}, island1  # failed seed + its fill
+        fills = [r for r in rows if r["metadata"].get("_seed_copy")]
+        assert sorted(f["island_idx"] for f in fills) == [1, 2]
+        assert all(f["metadata"]["seed_index"] == 0 and f["correct"] == 1 for f in fills)
+        # every island has >= 1 correct root
+        for j in (0, 1, 2):
+            assert any(r["island_idx"] == j and r["correct"] == 1 for r in rows), j
+    return None
+
+
+def test_multi_seed_reseed_all_k():
+    """The all-tombstoned recovery re-seeds ALL K seeds (pinned islands), not one."""
+    import json as _json
+    import sqlite3
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    with tempfile.TemporaryDirectory() as td:
+        cfg = _ms_cfg(os.path.join(td, "r"), 2, 2)
+        run_window._bootstrap_initial(cfg)
+        conn = sqlite3.connect(cfg["db_path"])
+        conn.execute("UPDATE programs SET metadata = ?",
+                     (_json.dumps({"repair_tombstoned": True}),))
+        conn.commit()
+        conn.close()
+        run_window._bootstrap_initial(cfg)  # live==0 → re-seed all K
+        rows = _ms_rows(cfg["db_path"])
+        live = [r for r in rows if not r["metadata"].get("repair_tombstoned")]
+        assert len(live) == 2, rows
+        assert sorted(r["island_idx"] for r in live) == [0, 1]
+        assert all(r["metadata"].get("seed_index") == r["island_idx"] for r in live)
+    return None
+
+
+def test_init_paths_validation():
+    """_init_paths (the boot seed guard): both keys / neither / empty / duplicate /
+    missing file / K > num_islands all refuse via SystemExit BEFORE any spend;
+    strict=False never raises (digest/fold paths)."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    with tempfile.TemporaryDirectory() as td:
+        p0 = os.path.join(td, "a.py")
+        p1 = os.path.join(td, "b.py")
+        open(p0, "w").write("x")
+        open(p1, "w").write("y")
+
+        def _cfg(task, n=2):
+            return {"task": task, "db_config": {"num_islands": n}}
+
+        for bad_task, n in (
+            ({"init_program_path": p0, "init_program_paths": [p1]}, 2),  # both keys
+            ({}, 2),                                                      # neither
+            ({"init_program_paths": []}, 2),                              # empty list
+            ({"init_program_paths": [p0, p0]}, 2),                        # duplicate
+            ({"init_program_paths": [p0, os.path.join(td, "no.py")]}, 2),  # missing file
+            ({"init_program_paths": [p0, p1]}, 1),                        # K > num_islands
+        ):
+            try:
+                run_window._init_paths(_cfg(bad_task, n))
+                assert False, f"expected SystemExit for {bad_task!r} n={n}"
+            except SystemExit:
+                pass
+            assert run_window._init_paths(_cfg(bad_task, n), strict=False) in ([], [p0], [p0, p0],
+                                                                               [p0, os.path.join(td, "no.py")],
+                                                                               [p0, p1])  # never raises
+        assert run_window._init_paths(_cfg({"init_program_path": p0})) == [p0]
+        assert run_window._init_paths(_cfg({"init_program_paths": [p0, p1]})) == [p0, p1]
+    return None
+
+
+def test_config_digest_seed_fields():
+    """_run_meta's config_digest carries the seed forensics (num_seeds + per-seed
+    content hashes) and the boot-frozen termination_streak; a bare task (accept-warmup
+    fold) still works via the strict=False path."""
+    import tempfile
+
+    sys.path.insert(0, str(_ORCH / "harness"))
+    import run_window
+
+    with tempfile.TemporaryDirectory() as td:
+        p0 = os.path.join(td, "a.py")
+        p1 = os.path.join(td, "b.py")
+        open(p0, "w").write("seed zero")
+        open(p1, "w").write("seed one")
+        meta = run_window._run_meta({
+            "run_id": "d", "task": {"init_program_paths": [p0, p1], "task_sys_msg": "g",
+                                    "eval_program_path": "e.py"},
+            "db_config": {"num_islands": 2}, "evo": {"window_size": 5},
+            "cadence": {"termination_streak": 7}})
+        dg = meta["config_digest"]
+        assert dg["num_seeds"] == 2 and dg["termination_streak"] == 7
+        assert len(dg["seed_sha256"]) == 2
+        assert all(isinstance(h, str) and len(h) == 12 for h in dg["seed_sha256"])
+        assert dg["seed_sha256"][0] != dg["seed_sha256"][1]
+        # bare task (the accept-warmup fold shape) → best-effort, never raises
+        meta = run_window._run_meta({"task": {}, "evo": {}, "db_config": {}})
+        assert meta["config_digest"]["num_seeds"] == 1
+        assert meta["config_digest"]["seed_sha256"] == []
+    return None
+
+
 if __name__ == "__main__":
     tests = [
         ("compute_reward", test_compute_reward),
@@ -4482,6 +5239,21 @@ if __name__ == "__main__":
         ("evolve_marker_post_apply_validation", test_evolve_marker_post_apply_validation),
         ("error_head_and_lineage_gamma_contracts", test_error_head_and_lineage_gamma_contracts),
         ("anti_inbreeding_exemplars", test_anti_inbreeding_exemplars),
+        ("steering_roundtrip", test_steering_roundtrip),
+        ("dr_subtask_template_and_stub_metadata", test_dr_subtask_template_and_stub_metadata),
+        ("foundation_stagnation_floor", test_foundation_stagnation_floor),
+        ("finalize_run_hardening", test_finalize_run_hardening),
+        ("config_lever_hash", test_config_lever_hash),
+        ("deploy_entry_run_attribution", test_deploy_entry_run_attribution),
+        ("until_decision_verified_termination", test_until_decision_verified_termination),
+        ("multi_seed_bootstrap_distributes_and_fills", test_multi_seed_bootstrap_distributes_and_fills),
+        ("multi_seed_k_equals_n", test_multi_seed_k_equals_n),
+        ("single_seed_backcompat", test_single_seed_backcompat),
+        ("multi_seed_all_fail_boot_refusal", test_multi_seed_all_fail_boot_refusal),
+        ("multi_seed_one_fails_fills_from_correct", test_multi_seed_one_fails_fills_from_correct),
+        ("multi_seed_reseed_all_k", test_multi_seed_reseed_all_k),
+        ("init_paths_validation", test_init_paths_validation),
+        ("config_digest_seed_fields", test_config_digest_seed_fields),
     ]
     ok = True
     for name, fn in tests:

@@ -20,10 +20,13 @@ system-message problem statement (the goal, the hard constraints, the *shape* of
 an abstract runtime-efficiency caution (no specific numbers). Be careful the evaluator does not
 leak the answer — held-out numbers live under its `private` metrics; if a value it must SHOW would
 reveal the trick rather than the real objective, stop and ask the user. When you decide a
-**discovery round** is warranted: hand-author the discovery prompt, triage each returned direction,
+**discovery round** is warranted: hand-author the discovery prompt (whole-task, or scoped to a
+declared SUB-TASK — see "Sub-task discovery"), triage each returned direction,
 ground EACH triaged direction (up to 3), seed/ground islands, fold results in. (Terminology: a
 **discovery round** == a **DR round** == one discovery pass via EXACTLY ONE OF **R1** = Azure deep
-research (`deep_research.py`) OR **R2** = the `subagents/archive-analyst.md` multi-agent read.
+research (`deep_research.py`) — the ONLY route you may fire autonomously — OR **R2** = the
+`subagents/archive-analyst.md` read, which is STEERING-ONLY: it runs solely to execute a recorded
+user steer (see "Human steering"), never on your own initiative.
 Simple naming rule: if a term says "Azure" it means R1 specifically; otherwise "discovery round /
 DR round" is the umbrella over both.)
 
@@ -117,10 +120,13 @@ This is the single source of truth; the rest of this doc expands each step.
    with no brief yet carries NO direction header — its mutation prompt renders the expert/creative
    preamble instead — which is enough because the prompt still carries its modes, inspirations,
    and the task message. Meta is NOT an orchestrator action and does NOT count as an intervention.
-4. **WHEN CONTROL RETURNS you make two checks at the same time:** (a) the **framework-audit check**
-   (rewrite a mutable strategy file if a flaw is found), and (b) the **discovery check** — if the
-   archive looks short on fruitful directions and the stall looks algorithmic, run a discovery round
-   (R1 by default, R2 as the narrow fallback). Only act on a check when it is actually warranted; for
+4. **WHEN CONTROL RETURNS you make two checks and then look at the steering queue:** (a) the
+   **framework-audit check** (rewrite a mutable strategy file if a flaw is found), (b) the
+   **discovery check** — if the archive looks short on fruitful directions and the stall looks
+   algorithmic, run a discovery round (R1 — the only autonomous route — whole-task or sub-task
+   scoped), and (c) the **pending-steering check** — if (b) did NOT fire and the return's
+   `pending_steering` count is non-zero, run ONE steered round for the oldest queued user steer
+   (see "Human steering"). Only act on a check when it is actually warranted; for
    a framework-code change, reason to a deeper level first to be sure the change is sound.
    **Grounding gate: a grounding (or any `spawn_island`) is only valid if a fresh, usable discovery
    from THIS control-return interval exists** — a discovery from a prior interval does not count, and
@@ -170,10 +176,16 @@ work_discovery, work_grounding, work_score, intervened}`:
   grounding itself.
   INCLUSIVE: a deliberate config-LEVER flip counts (log it as `work_audit` ≥ 1); the automatic
   per-window meta round does NOT (it isn't your action); a pure no-op read leaves it false.
+  A STEERED discovery round scores `work_discovery` on the normal scale via its stub — the
+  steering record itself is never work and never flips `intervened`.
 
 Record it AFTER acting, never before — the row must describe what happened, not steer what
-you do. The harness reads `stagnation_flag`+`intervened` across the last rows for the
-termination check (below); a forgotten row simply can't advance termination (fail-safe).
+you do. **`window_index` is REQUIRED and must equal the returned diag's** (the harness aligns
+your row to windows.jsonl by index). Your `stagnation_flag`/`intervened` fields are CLAIMS: the
+harness verifies termination from code artifacts (see "Termination + end of run" for the three
+evidence classes), so a forgotten, wrong, or optimistic row can never advance it — divergence
+surfaces as the return's `termination_divergence` count (inspect via the journal
+`termination_report` view).
 
 ## Launch the inner loop and get woken
 
@@ -279,10 +291,19 @@ Diagnostics shape (printed to stdout + appended to `journal/windows.jsonl`):
   fix_rate, fix_success_rate, needs_fix_rate,
   llm_bandit_weights, llm_bandit_counts,
   island_health:[{id,best,diversity,diversity_kind,cosine_spread,member_count,stagnation_count,count}],
-  stagnation_flag, low_streak, termination_streak, exhausted_retry_slots, exhausted_retry_count,
+  stagnation_flag, low_streak, termination_streak, termination_divergence, pending_steering,
+  config_lever_hash, exhausted_retry_slots, exhausted_retry_count,
   trigger_metric, total_programs, correct_programs,
   window_cost, total_cost, budget_remaining, budget_hit, windows_run, return_reason }
 ```
+
+On a TERMINAL return the diag additionally carries `finalized` / `finalized_status` (or
+`finalize_error` when the in-process finalize failed — recover via the journal `finalize_run`
+CLI view, which re-checks the precondition) and `summary_draft` (the auto-written
+`RUN_SUMMARY.md` path). `termination_streak` is the VERIFIED streak (computed from artifacts,
+not your rows); `termination_divergence` counts recent rows disagreeing with code truth;
+`pending_steering` is the queued-user-steer count (see "Human steering"); `config_lever_hash`
+is the harness-stamped config content hash the lever-flip verification reads.
 
 Read the **progress trajectory** as the best-score gain (`delta`) vs the low-window bar
 (`threshold`); rollback uses the multi-signal `rollback_decision.py`, not a single
@@ -341,10 +362,21 @@ the model. It costs tokens only when authored and is byte-identical (`""`) when 
 evaluator leak-proof here (held-out numbers under `private`; stop-and-ask if a shown value would
 reveal the trick) — the shinka-setup / shinka-convert skills carry that design.
 
-**3. Pick the onset discovery, the initial program, and `num_islands`.** Decide whether to call deep
-research for SOTA at onset (see "Running a discovery round and grounding it"). Use any brief to pick
-the initial program, `num_islands` (the starter ships 4; the engine default if you omit it is 2 —
-set it explicitly; 8 if multiple algorithmic families compete), and to sharpen the goal.
+**3. Pick the onset discovery, the initial program(s), and `num_islands`.** Decide whether to call
+deep research for SOTA at onset (see "Running a discovery round and grounding it"). Use any brief to
+pick the seed program(s), `num_islands` (the starter ships 4; the engine default if you omit it is
+2 — set it explicitly), and to sharpen the goal. **Multi-seed boot (opt-in, BOOT-ONLY):** when
+the user supplies several genuinely DISTINCT starting programs, list them in
+`task.init_program_paths` (exactly ONE of it / the single `task.init_program_path` may be set) —
+seed i roots island i, and islands K..N-1 are filled round-robin with copies of seed (i mod K) so
+all `num_islands` start populated. It changes ONLY how the run is seeded (plus the re-seed
+recovery paths, which restore all K); everything downstream behaves identically, and a
+single-seed task is byte-for-byte today's behavior. The harness validates the seed list BEFORE
+any spend (one config key; no duplicate/missing files; K ≤ `num_islands`; one shared
+`task.language`/evaluator contract) and refuses the boot only when EVERY seed fails evaluation —
+a single failed seed is recorded for forensics and its island filled from a correct seed. Note
+the `max_islands` eviction cap protects island 0 + the global best only — seed islands 1..K-1
+are evictable like any other.
 
 **4. Author `run.json`** (schema in "The run config (you author this)"). Default strategy files as shipped. At boot
 `run_window` green-lights the discovery-gate contract (alongside its assert that `shinka` resolves to
@@ -373,7 +405,8 @@ archive — never against the previous broken attempt's population / bandit / er
 workspace could silently flip the rerun into repair mode and mask the very fix you are checking).
 Warmup runs a small **configured** number of iterations (default 3, set `warmup.iters` in `run.json`
 or pass `--iters`), NOT one — a single iteration can't surface the sampler-spread / bandit-collapse /
-brief-differentiation signals warmup exists to observe.
+brief-differentiation signals warmup exists to observe. (A K-seed task costs K seed evaluations per
+`--warmup` rerun — every warmup re-bootstraps ALL seeds against a fresh archive.)
 
 **Keep it once it's clean.** A failed/abandoned attempt is just rerun (the next `--warmup`
 auto-resets it). Once a warmup looks mechanically sound, `--accept-warmup` KEEPS it: it folds the
@@ -465,7 +498,7 @@ stay compatible.
 | **Memory** | `record_policy.py` (now persists `runtime_sec`/`timed_out` for the runtime caution — read via `include_metadata`) | sampler / novelty / diagnostics / prompt readers | which metadata fields exist |
 | **Island structure** | `island_policy.py` (+ per-island briefs auto-written by meta) | the foundation DB | `island_health` per-island trajectory |
 | **New directions (meta)** | `meta_summarize.py` (automatic per-window) | the harness records its per-island briefs; you don't author them | persistently flat progress after rewrites |
-| **New directions (discovery round / DR)** | `deep_research.py` (R1, web-grounded, the default) or `subagents/archive-analyst.md` (R2, narrow fallback) | you TRIAGE each direction (novel → ground in a new island; similar → combine; useless → ignore), grounding EACH triaged direction up to 3 | flat progress that meta can't lift |
+| **New directions (discovery round / DR)** | `deep_research.py` (R1, web-grounded, whole-task or sub-task scoped — the ONLY autonomous route) or `subagents/archive-analyst.md` (R2, STEERING-ONLY — runs solely on a recorded user steer) | you TRIAGE each direction (novel → ground in a new island; similar → combine; useless → ignore), grounding EACH triaged direction up to 3 | flat progress that meta can't lift; a queued user steer |
 
 ## The automatic meta round (not yours to trigger)
 
@@ -480,8 +513,10 @@ directions + their program assignments are auto-recorded as each island's brief 
 and the SAMPLER reads them so islands diverge in BOTH their prompt direction AND the exemplar code
 shown — not text alone. A brand-new island with no brief yet carries no direction header (its
 prompt gets the expert/creative preamble instead), and that is enough: it still has its modes,
-inspirations, and the task message. You
-don't hand-author briefs. Your meta levers: `evo.meta_model` / `evo.meta_reasoning_effort` (default
+inspirations, and the task message. (With a multi-seed boot the islands start ALREADY
+differentiated — window-0 per-island bests come from distinct seed families — so expect the
+first meta round's directions to key off those distinct families rather than diverging from one
+common seed.) You don't hand-author briefs. Your meta levers: `evo.meta_model` / `evo.meta_reasoning_effort` (default
 `azure-gpt-5.5` medium; to escalate set `meta_model: azure-gpt-5.4-pro` AND `meta_reasoning_effort:
 high` — two knobs, NOT a `model@effort` suffix; pro rejects `low`); `evo.meta_n_recent` (default
 32) / `evo.meta_code_preview_chars`
@@ -572,17 +607,19 @@ A **discovery round** is *discovery* (find SOTA), not *instantiation* (write the
 is your decision at a control-return, on the same tapering rhythm as the framework-audit
 check. Discovery is valid via EXACTLY ONE OF two routes (and nothing else):
 
-- **R1 — Azure deep research (`deep_research.py`): the near-always default.** Web-grounded,
-  web-cited, external — it surfaces techniques absent from your archive that the search
-  cannot invent.
-- **R2 — the `subagents/archive-analyst.md` multi-agent read: a NARROW fallback.** Permitted
-  only when, for the SAME question: an R1 DR already ran, you have strong confidence a good
-  answer exists, yet all the R1 directions aren't helping. It is NOT a "prefer up front"
-  route — introspection over your own archive cannot surface a technique that is not already
-  in it; that needs R1.
+- **R1 — Azure deep research (`deep_research.py`): the ONLY route you may fire autonomously.**
+  Web-grounded, web-cited, external — it surfaces techniques absent from your archive that the
+  search cannot invent. Fireable on the WHOLE task or on a declared SUB-TASK (below).
+- **R2 — the `subagents/archive-analyst.md` read: STEERING-ONLY.** You may NEVER spawn it on
+  your own initiative — it runs solely to execute a RECORDED user steer (the user texted a
+  direction; you transcribed it verbatim into `journal/steering.jsonl` — see "Human steering"),
+  and its discovery stub is gate-valid ONLY with that steering evidence (`request.steer_id`
+  resolving to the `user_steer` row, unconsumed by any other stub). Introspection over your own
+  archive cannot surface a technique that is not already in it — for autonomous discovery that
+  needs R1.
 
 **An ad-hoc tournament / sort over your OWN hypotheses is NOT discovery** (it surfaces no
-new knowledge) — only R1 or R2 produce a triageable direction.
+new knowledge) — only R1 or a steered R2 produce a triageable direction.
 
 **Why default to external, and why trust it.** The discovery/triage
 step has an observed inclination to **deny ideas** — refusing to even try grounding, dismissing
@@ -627,20 +664,47 @@ verbatim, STOP and reshape it. A refused/failed DR call returns `refused:true` +
 (logged with its query intact, no crash) — a `content_filter` refusal almost always means
 a reproduce-paper framing, so RESHAPE the query; never re-fire the same shape.
 
+**Sub-task discovery (scoped DR).** DR is fireable not only on the whole task but on a
+SUB-PROBLEM of it. YOU decide which sub-problems are worth a round; the signals that one is:
+- a recurring **bottleneck subroutine** visible across the elite set (the same routine dominating
+  runtime/score in program after program);
+- a **well-separable core** with its own literature (a routing/decoding/scheduling/synthesis
+  kernel the field studies in isolation);
+- an evaluator-visible **sub-metric lagging** while the others saturate;
+- whole-task DRs repeatedly returning **too-generic directions** — a scoped question gets
+  specific answers.
+
+**Draft the prompt as if the sub-problem WERE the task.** The DR model never needs to know
+whether it is researching your main task or a sub-task — every DR call is ONE self-contained
+research task. Write the `query` + `program_context` entirely in the sub-problem's own terms
+(its objective, its admissible space, what its current solution does); fold main-task context
+into `program_context` ONLY when it genuinely helps that specific question (e.g. a constraint
+of the outer task that shapes which sub-solutions are admissible) — not by default. A scoped
+question drafted this way gets the field's own literature for that kernel, which is the whole
+point of scoping.
+
+**Declare the scope as PROVENANCE on the payload — it is stub metadata, never prompt
+plumbing:** `"subtask": {"name": "<short handle>", "statement": "<what the sub-problem is — its
+admissible space>", "relation_to_task": "<the integration interface: what a sub-solution must
+accept/produce and which invariants of the full program survive>"}`. With a non-empty
+`statement` the logged `kind=dr` stub carries `request.subtask` — what triage and the grounding
+executor read, and what routes the grounding to `grounding-engineer` A-INTEGRATE (below); the
+`relation_to_task` is written for the GROUNDING step, not for DR. The DR prompt itself is
+identical with or without it. The pre-flight self-check applies unchanged (general SOTA for the
+sub-task, never reproduce-a-paper).
+
 **If a DR call fails** it returns `refused:true` + a `reason` (a `content_filter` refusal almost
 always means a reproduce-paper framing — reshape per the pre-flight above; never re-fire the same
 shape), or a server-side terminal `failed` whose `reason`/`error_code` the journal carries — read
 it (e.g. a missing/blocked `web_search_preview` tool, or a wrong deployment name / model-version)
 and fix the cause; don't loop-retry. The deployment quota (30,000,000 TPM / 30,000 RPM) is ample
-for a full job. If R1 ever keeps failing, fall back to the R2 Claude-native pass — spawn
-`subagents/archive-analyst.md` (a multi-agent read over your own archive + literature). R2 is the
-**narrow fallback** (same question, an R1 already ran, you are confident a good answer exists, yet
-the R1 directions aren't helping or can't be grounded) — NOT a "prefer up front" route. R2 MUST leave its own discovery stub: a `kind=archive_analyst` pointer logged via
-`journal.py log_call` (cost 0.0, Claude-native — never `append_intervention` it, that would
-double-count), with `usable:false` when it surfaced nothing. Triage R2 output exactly like a DR
-brief (below). A discovery round counts the same for the termination streak whichever route ran.
-(`archive-analyst` is a DISCOVERY route — it reads the archive and the literature to surface a
-missing direction; it is NOT a framework-code-audit tool and never edits code or the archive.)
+for a full job. **There is NO autonomous fallback route when R1 keeps failing** — R2 is
+steering-only, not an R1 substitute. Reshape/rescope the query (a sub-task scope often clears a
+filter that the whole-task framing tripped), fix the transport cause, or carry the question to
+the next control-return; only a queued user steer can open the R2 route (see "Human steering" —
+its stub emission and gate rules live there and in `subagents/archive-analyst.md`). Whichever
+route a discovery ran by, its output is triaged identically (below) and counts identically for
+the termination streak.
 
 **Triage discovery output by the THREE PATHS — per idea, one by one, identically whether the
 ideas came from an R1 (Azure DR) brief OR an R2 (archive-analyst) analysis. Only R1/R2 ideas are
@@ -662,6 +726,13 @@ EACH, and GROUND each triaged direction, up to a MAX of 3 per round. Lean toward
   NEVER a kill — it is this path. Scores `work_grounding=1`.
 - **path (iii) USELESS** → ignore it (use this sparingly). Don't dilute the search.
 
+**Triaging SUB-TASK directions.** A sub-task-scoped stub's directions solve a SUB-problem, but the
+triage target is still the FULL-task program space — decide the path by what the INTEGRATED full
+candidate would be: the sub-task technique replaces the program's structural core → path (i)
+NOVEL; it upgrades an existing program's subroutine (the common case) → path (ii) SIMILAR with
+`parent_id` = the integration base. Never kill a sub-task direction because "the rest of the
+program already exists" — that is exactly path (ii).
+
 The adversarial verification step (yours, or a subagent's) is **LENIENT — its job is
 provenance-authentication + path-assignment, NOT rejecting directions.** It must (1) authenticate
 that each idea came from an in-interval R1/R2 stub (a self-invented hypothesis fails this and is
@@ -673,10 +744,41 @@ directions go to grounding anyway.
 **PRECONDITION (HARD GATE, both executors):** grounding may act ONLY on a technique from an
 in-interval triaged R1/R2 discovery stub. Before authoring a grounding prompt, confirm a usable
 `kind∈{dr,archive_analyst}` stub exists for the CURRENT control-return interval (strictly newer
-than the prior control-return); a stale stub does NOT satisfy it. `spawn_island.py` enforces
+than the prior control-return); a stale stub does NOT satisfy it, and an `archive_analyst` stub
+satisfies it ONLY when tied to recorded steering evidence (`request.steer_id` → an unconsumed
+`user_steer` row — the gate checks this; `dr` stubs need none). `spawn_island.py` enforces
 this in code: it refuses to seed an island when no in-interval stub exists, and
 `subagents/grounding-engineer.md` REFUSES if the spawn prompt carries no in-interval R1/R2
 provenance reference.
+
+**Executor routing — BY SCOPE.** A WHOLE-task direction that translates directly into a
+full-rewrite/combine prompt → the Azure `mutate.py` grounding call (the recipe below). A
+**SUB-TASK-scoped discovery (the stub carries `request.subtask`) → `subagents/grounding-engineer.md`
+mode A-INTEGRATE by DEFAULT** — integrating a sub-problem solution into a full candidate is
+compositional (rebuild the touched subroutine around the researched technique, preserve every
+interface and invariant outside it) and beyond a single Azure full-rewrite call; hand it the
+sub-task triple + the DR directions/citations + the base program(s) chosen below + the stub
+reference. Azure remains allowed for a sub-task direction only when the integration is
+trivially local (one obvious subroutine, one obvious base). Web search is ON for BOTH executors,
+and the parity steps below are identical for both.
+
+**Choosing the integration base (YOUR archive read at triage — do not pick blindly).** Which
+program hosts the sub-solution decides which island receives it (`parent_id` = the base ⇒ the
+integrated child lands in the base's island as a lineage child), so choose deliberately:
+- Read the archive first: `island_health` + each island's meta brief tell you which FAMILY each
+  island is exploring; `archive_query` `top_n` / per-island bests show the candidate hosts.
+- The default base is the **strongest host, not blindly the global best**: the program whose
+  scaffold around the touched subroutine is strongest, on the island whose family most
+  prominently CONTAINS the sub-problem (its programs lean on that subroutine) or most stands to
+  gain from it. A weak host wastes the technique; the global best is only the right base when
+  the sub-problem is load-bearing there too.
+- One sub-task direction MAY be integrated into different bases on different islands as
+  SEPARATE groundings (each with its own `archive_record`) — this competes against grounding
+  other directions under the same ≤3-groundings-per-round cap, so spend the slots where the
+  archive evidence is strongest.
+- Put the base's id AND your one-line rationale in the grounding-engineer spawn prompt; if its
+  report flags the base as a poor host (interface mismatch), re-base and respawn rather than
+  force-fitting.
 
 **Grounding is HAND-AUTHORED — it does NOT go through the diff/full/cross mutation sampler.** YOU
 author the prompt directly and feed it to EITHER Azure `mutate.py` OR the
@@ -745,6 +847,61 @@ evaluates correct, archive it normally and it need not be tombstoned. This rescu
 discovery (discovery has its own two grounding paths above), so it needs NO discovery stub and NO
 Azure grounding call — you just do it yourself. It still sets web search ON, and it does NOT count as
 an intervention on its own.
+
+## Human steering (mid-run user directions)
+
+The user can text a direction into the live session at any time mid-run ("try lattice-surgery
+style scheduling", "island 2 looks dead, look at why", "there's a 2019 paper on X — chase it").
+Steering is a first-class, journaled input — never a verbal aside you hold in your head.
+
+**Record it IMMEDIATELY, verbatim.** The moment a steering message arrives (even mid-cluster),
+log it via the journal `log_steering` view:
+`{"results_dir": "<run dir>", "view": "log_steering", "entry": {"quoted_user_text": "<the user's
+LITERAL message>", "paraphrase": "<your one-line reading>", "window_index": <current, if known>}}`
+— the returned `steer_id` identifies it from then on. `quoted_user_text` must be the user's OWN
+words (the same anti-confabulation bar as `stopped_by_user`'s evidence; the CLI refuses an empty
+quote). Steers QUEUE across clusters — `pending_steering` on every control-return diag counts the
+unconsumed ones — so a mid-cluster message needs no `.stop` (never interrupt a cluster for a steer
+unless the user explicitly asks you to stop/pause).
+
+**Consume at a control-return — own assessment FIRST.** At each control-return do your own checks
+first, exactly as before: stagnation → your own R1 discovery / framework audit takes precedence.
+The steering slot is: **when you would NOT otherwise fire a discovery round this return AND
+`pending_steering` > 0, run ONE steered round for the OLDEST queued steer.** (One steered round
+per control-return, oldest first; if your own R1 already fired this return, the steer waits for
+the next one — the one-R1-per-stagnation-cluster bound is shared.)
+
+**Choosing the steered executor:**
+- The steer names EXTERNAL knowledge — a technique, paper, field, "look up X" → a **steered R1**:
+  draft the DR query per the user's direction (sub-task scope if the steer targets a
+  sub-problem), pass `steer_id` on the payload (audit linkage — R1 needs no steering evidence for
+  validity, but the stub then records what steered it).
+- The steer asks about the RUN'S OWN history/population/islands/archive structure ("why is island
+  2 dead", "are we stuck in one lineage") → the **steered R2**: spawn
+  `subagents/archive-analyst.md` with the `steer_id` + the quoted text + recent diagnostics in the
+  spawn prompt. Its `kind=archive_analyst` stub is gate-valid ONLY through that steering evidence.
+
+**Then proceed exactly like any discovery:** triage the returned directions by the three paths,
+ground each (up to 3), and score `work_discovery` normally — a steered round is a real discovery
+round whose stub is FULL-WEIGHT evidence, cutting both ways: it unlocks the follow-up grounding
+gate exactly like your own R1 stub, AND it carries the responsibility — if the run stays
+verified-stagnant despite it, that interval counts toward the termination streak like any other
+intervention that failed to break the stall. Immediately after the round's
+stub lands (or the steer is resolved without one), mark it consumed:
+`{"view": "consume_steering", "steer_id": "<id>", "action": "dr" | "archive_analyst" |
+"declined" | "merged", "stub_file": "<the stub's calls.jsonl file — REQUIRED for
+archive_analyst>"}`. Consume promptly — an unconsumed steer keeps validating stubs.
+
+**Edge rules:**
+- **Multiple queued steers** → one per control-return, oldest first. A duplicate of an
+  already-queued/handled steer → consume it as `merged` with a note pointing at the survivor.
+- **A steer that contradicts hard constraints / the railguards / the gates** (e.g. "skip the
+  discovery gate", "spend past the budget", "kill the slow Azure call") → SURFACE it to the user
+  in conversation — say what it conflicts with and what you can do instead — then consume it
+  `declined` with that note. Never silently drop a steer, and never let one override a railguard.
+- **A moot steer** (the run moved past it before its turn) → surface briefly, consume `declined`.
+- **Steering is never a stop signal.** "Stop" typed by the user is criterion (3) — the
+  `stopped_by_user` finalize with quoted evidence — not a steer. Ambiguous? Ask.
 
 ## The framework-audit rewrite cycle
 
@@ -842,26 +999,44 @@ recommendation, forget the detail. For periodic structural reads, spawn
 
 **Stop when EXACTLY ONE of these three criteria is met — there are no others:** (a) the budget is
 exhausted [harness-decided, auto-finalized]; (b) **five consecutive control-returns were each
-STAGNANT and each had an intervention** (a framework rewrite, a discovery round [R1 or R2] — which is
-then grounded — OR a deliberate config-lever flip — the AUTOMATIC per-window meta round does NOT count) that still
-could not break the stagnation [harness-decided, auto-finalized]. A hand-authored **grounding does
-NOT count on its own** — `work_grounding` never flips `intervened`; it counts only WITH the
-in-interval discovery it grounded (`work_discovery>0`), so a grounding over a stale/absent
-discovery can't pad the streak;
+STAGNANT and each had an intervention that still could not break the stagnation**
+[harness-decided, auto-finalized]. An intervention is exactly one of: a framework rewrite, a
+discovery round (R1, or a human-steered R2) which is then grounded, or a deliberate config-lever
+flip. The automatic per-window meta round never counts, and a hand-authored **grounding does NOT
+count on its own** — it counts only WITH the in-interval discovery it grounded, so a grounding
+over a stale/absent discovery can't pad the streak;
 (c) **a LITERAL, real user stop message typed in THIS live conversation** — the only termination you
 finalize by hand, and only when you can quote that actual user turn. NEVER finalize `stopped_by_user`
 from an inferred/remembered/assumed/"it feels done" signal — confabulating a user stop is the single
 worst failure here. If you feel stuck but the user has NOT literally said stop and neither harness
-criterion has fired, KEEP GOING (launch the next cluster). This is **harness-computed and auto-finalized** (parity with budget): the harness
-reads your canonical `control_return` rows (`stagnation_flag`+`intervened`) via
-`journal.termination_streak`, and when the streak reaches `cadence.termination_streak`
-(default 5) the next `--until-decision` call returns
+criterion has fired, KEEP GOING (launch the next cluster).
+
+Criterion (b) is **harness-computed, VERIFIED FROM CODE ARTIFACTS, and auto-finalized** (parity
+with budget): your `control_return` rows only DELIMIT the intervals and carry the work score —
+`journal.termination_streak` derives the truth itself, per interval:
+- **verified stagnant** = the FOUNDATION recompute over windows.jsonl best-score deltas
+  (`journal.foundation_stagnation_flags`) with the BOOT-FROZEN thresholds captured into run.json's
+  `config_digest` — so a mid-run stagnation-knob flip moves the cadence bar but never the
+  termination floor, and a rewritten `stagnation_detector.py` can neither disable nor force
+  termination. An interval with no alignable window rows never counts.
+- **verified intervened** = at least one of the three artifact classes in the interval: a
+  strategy deploy ATTRIBUTED TO THIS RUN in `strategy_history/index.json` (any status — a
+  rejected rewrite is still "intervened but failed"); a USABLE in-interval discovery stub
+  (`kind=dr` unconditional; `kind=archive_analyst` only with steering evidence — STEERED
+  rounds included and equal: a user-steered discovery that fails to break the stall advances
+  the streak like your own); or a
+  `config_lever_hash` change across the interval's windows (the harness stamps the hash into
+  every window row). A claimed `intervened:true` with NO artifact does not count; meta rounds
+  and groundings have no artifact class and never count.
+When the verified streak reaches `cadence.termination_streak` (default 5; boot-frozen into
+`config_digest`) the next `--until-decision` call returns
 `return_reason="stagnation_intervention_exhausted"` and finalizes — so two agents can't
 disagree on the count. Stagnation ALONE never terminates (only stagnation your interventions
-couldn't break); a stagnation-break OR a no-intervention return resets the streak. There is
-no longer a "≥1 discovery of 5" requirement — a discovery round simply counts as an intervention
-(via `work_discovery>0`). The automatic per-window meta round does NOT count as an intervention,
-and a grounding alone (without its discovery) does NOT either. A pre-assumed/reference score in
+couldn't break); a verified stagnation-break OR an artifact-less interval resets the streak. There
+is no "≥1 discovery of 5" requirement — a discovery round simply counts as an intervention. Your
+rows' `stagnation_flag`/`intervened` remain useful CLAIMS: when they diverge from code truth the
+return carries `termination_divergence` and the journal `termination_report` view shows the
+per-interval claimed-vs-verified-vs-evidence detail. A pre-assumed/reference score in
 the docs does NOT end the run early.
 
 **Per-run NOTES.md.** `orchestrator/NOTES.md` is a transient SINGLE-RUN scratchpad, not a
@@ -877,12 +1052,24 @@ across the run, did each control-return ask for a roughly constant amount of wor
 clusters grow too fast (errors piling up before you attended to them) or too slow (you woke with
 nothing to do)? Think of it as error accumulation — fast early, slower later — and a good taper keeps
 the action-rate roughly even. If it was uneven, note that the next run should adjust the taper knobs
-(`cadence.*`) for this task. Seed it from `journal.build_run_summary(results_dir)`,
-flip the run's status with the `finalize_run` journal view — but `budget_exhausted` and
-`stagnation_intervention_exhausted` are finalized by the HARNESS (never call `finalize_run` for
-those), and you finalize `stopped_by_user` BY HAND only when you can quote the literal user turn
-that said stop; the ending document's "Termination reason" must quote that turn (or name the
-harness criterion), never just "user said stop". Then **archive** the run's history/logs/artifacts
+(`cadence.*`) for this task. On a harness auto-finalize the run's `RUN_SUMMARY.md` draft is ALREADY
+written (the terminal return carries `summary_draft`) — ENRICH it, don't rebuild; otherwise seed it
+from `journal.build_run_summary(results_dir)`.
+
+The `finalize_run` journal view ENFORCES the termination contract in code:
+- only the three terminal statuses exist — anything else is refused, and a run already finalized
+  with a different terminal status is never overwritten;
+- the two HARNESS statuses are refused unless the recomputed precondition actually holds
+  (`budget_exhausted`: remaining budget within the acceptance slack of the cap;
+  `stagnation_intervention_exhausted`: verified streak ≥ the boot-frozen N) — this
+  refusal-with-recheck is also your RECOVERY path if a terminal return ever carries
+  `finalize_error`;
+- `stopped_by_user` REQUIRES `evidence: {"user_quote": "<the literal user turn>"}` — stored into
+  run.json as `stop_evidence` (auto-stamped `noted_at`) — so an evidence-less stop cannot be
+  stamped at all. The ending document's "Termination reason" must quote that turn (or name the
+  harness criterion), never just "user said stop".
+
+Then **archive** the run's history/logs/artifacts
 with the `archive_run` view into `orchestrator/run_archive/<run_id>__<finished_at>/`. **Do
 NOT read prior runs' archives while running a new job** — they exist only for the user's
 later reference.
@@ -890,15 +1077,25 @@ later reference.
 ## The run journal (your long-term memory, read at any granularity)
 
 `scripts`/grep or `harness/journal.py`:
-- `journal/run.json` — run summary (status, windows, best, total_cost) — crash-durable.
-- `journal/windows.jsonl` — per-window diagnostics (the trajectory).
-- `journal/interventions.jsonl` — every rewrite/decision + your work score + outcome.
+- `journal/run.json` — run summary (status, windows, best, total_cost; `stop_evidence` on a
+  user stop) — crash-durable.
+- `journal/windows.jsonl` — per-window diagnostics (the trajectory; each row carries the
+  harness-stamped `config_lever_hash` the lever-flip verification reads).
+- `journal/interventions.jsonl` — every rewrite/decision + your work score + outcome. Your
+  `control_return` rows' `stagnation_flag`/`intervened` are CLAIMS verified against artifacts
+  (the `termination_report` view shows claimed-vs-verified per interval).
+- `journal/steering.jsonl` — the human-steering ledger: `user_steer` rows (verbatim
+  `quoted_user_text` + `steer_id`) and `steer_consumed` rows. CLI views: `log_steering`,
+  `pending_steering`, `consume_steering`, `steering`. A `kind=archive_analyst` discovery stub is
+  gate-valid ONLY via a `request.steer_id` resolving here.
 - `journal/calls.jsonl` — compact POINTER index of every external LLM call (`kind` ∈
   `meta / dr / archive_analyst / grounding`): `{kind, timestamp, file, cost, summary}`. Full
-  prompt + raw output live in `journal/calls/<kind>_<ts>_<rand>.json`. A standalone grounding
+  prompt + raw output live in `journal/calls/<kind>_<ts>_<rand>.json` (a `kind=dr` detail's
+  `request.subtask` carries the sub-task scope when one was declared). A standalone grounding
   `mutate.py` call self-logs `kind=grounding` when you pass `results_dir` +
   `purpose:"grounding"`. The discovery kinds the recency gate
-  recognizes are `{dr, archive_analyst}` (each is a **discovery stub**, carrying `usable`);
+  recognizes are `{dr, archive_analyst}` (each is a **discovery stub**, carrying `usable`;
+  `archive_analyst` additionally needs steering evidence);
   `journal.discovery_in_interval(results_dir)` returns the in-interval usable ones (the single
   source of truth for the recency rule — if empty, grounding is refused), and
   `journal.recent_work_axes` exposes the three work axes (`work_audit`/`work_discovery`/
@@ -950,7 +1147,7 @@ JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
 | `construct_mutation_prompt.py` | build the mutation/fix prompt | **Yes** | No |
 | `mutate.py` | call Azure (bg+poll), parse, apply, retry | Body no, prompt yes | **Yes (Azure)** |
 | `meta_summarize.py` | the automatic per-window meta round (per-island directions) | prompt yes | **Yes (Azure)** |
-| `deep_research.py` | R1 discovery — deep-research model (web-grounded directions); writes the `kind=dr` discovery stub with a `usable` bool | No (paid service) | **Yes (Azure DR)** |
+| `deep_research.py` | R1 discovery — deep-research model (web-grounded directions), whole-task or SUB-TASK scoped (optional `subtask:{name,statement,relation_to_task}` payload — stub PROVENANCE only, prompt-neutral; optional `steer_id` audit linkage); writes the `kind=dr` discovery stub with a `usable` bool + the sub-task provenance in `request.subtask` | No (paid service) | **Yes (Azure DR)** |
 | `_azure.py` | shared Azure background-poll transport | No (foundation) | — |
 
 **Background-poll resilience (transport, FOUNDATION).** Every Azure bg call (`mutate`/`meta`/DR)
@@ -976,6 +1173,10 @@ then `--resume` — never `Stop-Process`/`Get-Process` a run by PID; see "Run id
 ```json
 { "results_dir": "<run dir>", "run_id": "<id>", "budget_usd": 50,
   "task": {"eval_program_path": "...evaluate.py", "init_program_path": "...initial.py",
+           // OR "init_program_paths": ["...initial_0.py", "...initial_1.py"] — multi-seed boot:
+           // seed i roots island i; islands K..N-1 filled round-robin with seed (i mod K) copies.
+           // EXACTLY ONE of the two keys may be set; num_islands must be >= K; all seeds share
+           // one language + one evaluator contract. K=1 (either form) is the legacy path.
            "task_sys_msg": "<precise goal>", "require_sys_msg": true,
            "objective_brief": "<optional 'what we optimize + hard constraints + the building blocks a valid candidate may use' gloss, or null>",
            "language": "python", "eval_time": "00:35:00"},
@@ -1057,7 +1258,7 @@ wake/termination cadence mid-run (cadence_policy.py is FOUNDATION).
 | `num_top_k_inspirations` / `num_archive_inspirations` | 2 / 2 shipped (db_config; engine default 1/1) | how many exemplar programs a mutation prompt carries: score-ranked top-k slots + next-ranked elite slots (or, once a structured brief exists, the sampled direction's assigned programs split the same way). 2+2 sits in the evidenced 3–5 sweet spot (SimpleTES Table 18); each exemplar is FULL code + metrics + text feedback. Exemplars DEMOTE the parent's 1-hop kin (its parent/children — near-copies carry little new info); kin backfill when the pool is thin | mutations look context-starved (children repeat mistakes visible in unshown archive members) → raise; per-call input cost spiking on a big-program task (≳500 lines) → drop toward 1/1 |
 | `parent_selection_strategy` / `lineage_gamma` | `lineage_weighted` shipped (db_config; engine default `weighted`) / 0.8 (evo) | which parent-selection math `sample_parent` runs: `lineage_weighted` (default) = the weighted sigmoid fed the RPUCG-lite lineage value U_i = max(s_i, γ·max_child U_j) so a fertile-but-mediocre ancestor becomes a re-branch point (byte-identical to `weighted` on a childless pool, e.g. warmup); `weighted` = the parity-faithful upstream port (own-score only); `power_law` = rank-based P(i) ∝ (i+1)^-`exploitation_alpha` (scale-free) | parent picks ~uniform while the top lineages are clearly better (score compression: MAD→0 flattens the sigmoid) → `power_law` with `exploitation_alpha` 1.5–2; hot-lineage over-concentration in the islands-health sensors → back to `weighted`; raise `lineage_gamma` for deeper lineage credit |
 | `migration_rate` / `migration_interval` | 0 / 10 (db_config) | island elite migration; **0 = OFF by default**. Execution IS wired (every archive add runs deferred migration), so flipping it on is a live config change — NOT a code rewrite. Migration iterates the ACTIVE island_idx set, so a dynamically SPAWNED island participates | turn it on at BOOT (run.json `db_config`) OR mid-run (edit `db_config` at a control-return; the next relaunched cluster reads it — schema-safe) → `migration_rate` ≈ 0.05 |
-| `termination_streak` | 5 (cadence) | consecutive stagnant+intervened control-returns that auto-terminate the run | raise to give a stuck search more intervention attempts before stopping |
+| `termination_streak` | 5 (cadence) | consecutive VERIFIED stagnant+intervened control-return intervals that auto-terminate the run (computed from artifacts — foundation stagnation floor + attributed deploys / usable discovery stubs / lever-hash flips — never from your row's flags; boot-frozen into `config_digest`) | raise to give a stuck search more intervention attempts before stopping |
 | `meta_failures_first_frac` | 0.5 | how much of the meta context is recent failures vs top performers | failure-dominated window where the failure_note comes back vague → 0.75 |
 | `extra_guidance` | none | free text appended to the next window's mutation system prompt | nudge the search without a code rewrite |
 
@@ -1144,10 +1345,19 @@ not a code rewrite; the next relaunched cluster reads it.
   into an existing island is ordinary `archive_record` insertion with `parent_id`=closest — no
   `spawn_island`, not separately gated; the `work_discovery`/`work_grounding` split keeps it from
   padding the termination streak.)
+- **Never fire `archive-analyst` (R2) without a recorded user steer.** R2 is steering-only: it
+  needs a `user_steer` row in `journal/steering.jsonl` and its stub must carry that
+  `request.steer_id` — the gate ignores an unsteered stub, and the subagent itself refuses a
+  spawn prompt with no steer. R1 is the only autonomous discovery route.
 - **Never treat a tournament / sort over your OWN hypotheses as discovery.** The only sanctioned
-  Claude-native discovery is `subagents/archive-analyst.md` (R2); the only sanctioned multi-agent
-  grounding is `subagents/grounding-engineer.md`. A bracket over self-invented ideas surfaces no
-  new knowledge and produces no discovery stub.
+  Claude-native discovery is the STEERED `subagents/archive-analyst.md` (R2); the only sanctioned
+  multi-agent grounding is `subagents/grounding-engineer.md`. A bracket over self-invented ideas
+  surfaces no new knowledge and produces no discovery stub.
+- **Never call `finalize_run` outside the contract.** Only the three terminal statuses exist; the
+  two harness statuses are CLI-refused unless the recomputed precondition holds, and
+  `stopped_by_user` requires `evidence.user_quote` (the literal user turn). Never pad the
+  termination streak with claims — the streak is verified from artifacts, so a claim without a
+  deploy/stub/lever-flip artifact simply does not count.
 - Never manually kill a slow in-flight Azure bg call (mutate/meta/DR) before the 3600s wall — cost
   books only on a terminal status, so a kill leaks unlogged-but-billed spend (the
   `run_window`/`--resume` recovery is different and allowed). On a refused verified pivot, switch to
@@ -1157,8 +1367,8 @@ not a code rewrite; the next relaunched cluster reads it.
   (`archive-analyst`) and a hand-authored grounding (`grounding-engineer` / a hand-authored
   `patch_sys`/`patch_msg`) when the Azure model refuses a verified pivot.
 - Never make two rewrites in one control-return. Never call the paid Azure deep research (R1) twice
-  per stagnation cluster (a single R2 archive-analyst pass per cluster is the separate bound).
-  Never let subagent output linger in your context.
+  per stagnation cluster (and at most ONE steered round per control-return — the steered R1 shares
+  the same bound). Never let subagent output linger in your context.
 - Never read a prior run's archive while running a new job.
 - Never stop while a termination criterion is unmet.
 
@@ -1166,10 +1376,14 @@ not a code rewrite; the next relaunched cluster reads it.
 
 Do less — but "do less" applies to **interventions** (framework rewrites, config flips), NOT to
 **discovery**. Your value is the rare code change the inner loop's hand-coded policies cannot
-make, and the DISCOVERY round — R1 (Azure deep research, the default) or R2
-(`subagents/archive-analyst.md`, the narrow fallback) — that brings in knowledge the search can't
-invent. Discovery is exactly R1 or R2; never an ad-hoc tournament over your own hypotheses
-(introspection cannot surface a technique absent from the archive — that needs R1). Once a
+make, and the DISCOVERY round — R1 (Azure deep research, whole-task or sub-task scoped, the only
+autonomous route) or a human-steered R2 (`subagents/archive-analyst.md`) — that brings in
+knowledge the search can't
+invent. Discovery is exactly R1 or a steered R2; never an ad-hoc tournament over your own
+hypotheses (introspection cannot surface a technique absent from the archive — that needs R1).
+Once a
 discovery round returns triaged directions, INCLINE TO TRUST it and ground each (up to 3): a
 skipped framework rewrite is one less chance to break something, but a skipped grounding of a real
-discovered technique is the documented failure this gate exists to prevent.
+discovered technique is the documented failure this gate exists to prevent. And a queued user
+steer is never noise — consume it at the first control-return where your own discovery check
+didn't fire.

@@ -45,6 +45,14 @@ Output a JSON object with this exact shape:
 Return 2 to 5 techniques. No prose outside the JSON object.
 """
 
+# NOTE on sub-task-scoped DR: there is deliberately NO separate sub-task template.
+# A DR call is always framed as ONE self-contained research task — when the
+# orchestrator researches a SUB-PROBLEM (a subroutine / separable core of the larger
+# task), it drafts `candidate_question` + `program_context` AS that sub-problem's own
+# task; the DR model does not need to know a larger task exists, and main-task context
+# goes into `program_context` only when it actually helps that specific question. The
+# `subtask` payload on deep_research.py is stub PROVENANCE (recorded into the logged
+# call's request blob for triage + grounding routing), never prompt plumbing.
 DR_USER_MSG = """\
 Research question:
 {candidate_question}

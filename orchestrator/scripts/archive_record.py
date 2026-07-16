@@ -24,6 +24,12 @@ INPUT (stdin JSON):
        "public_metrics": {..}, "private_metrics": {..},
        "error_traceback": str | null,
        "code_diff": str | null,
+       "island_idx": int | null,    # OPTIONAL pin — when set it is HONORED verbatim
+                                    #   (assign_island bypasses the strategies). Used by
+                                    #   the multi-seed bootstrap (seed i → island i and
+                                    #   its round-robin fill copies); leave null for
+                                    #   every normal candidate so children inherit the
+                                    #   parent's island via the strategy path.
        "embedding": [float], "archive_inspiration_ids": [str],
        "top_k_inspiration_ids": [str], "metadata": {..}, ...
     },

@@ -20,6 +20,12 @@ so it can be read with grep/Read (no unpickling, no query layer):
   journal/novelty.jsonl       (per-candidate novelty-comparison records — one row per
                               evaluated correct candidate whose novelty gate ran; ids+numbers
                               only, the audit trail behind novelty_acceptance_rate). Folds no cost.
+  journal/steering.jsonl      human-steering ledger: one `user_steer` row per LITERAL user
+                              direction the orchestrator transcribes from the live chat, and
+                              one `steer_consumed` row when a steer is acted on (a steered
+                              DR / archive-analyst round, or surfaced-and-declined). The
+                              steering evidence that makes a kind="archive_analyst" discovery
+                              stub gate-valid (R2 is steering-only). Folds no cost.
 
 `strategy_history/` (separate) holds the per-strategy-version snapshots. Together
 they let the orchestrator zoom from "how's the run overall" → "what did window 37
@@ -510,13 +516,125 @@ def budget_remaining(results_dir: str, budget_usd: Optional[float]) -> Optional[
     return float(budget_usd) - total_cost(results_dir)
 
 
-def finalize_run(results_dir: str, status: str, summary: Optional[Dict[str, Any]] = None) -> None:
+# The ONLY statuses a run may terminate with — the three sanctioned criteria.
+# budget_exhausted + stagnation_intervention_exhausted are HARNESS-owned (run_window
+# finalizes them in-process after verifying the condition itself; the CLI view
+# additionally re-checks the precondition before accepting either, keeping a recovery
+# path when the in-process finalize failed). stopped_by_user is agent-finalized but
+# requires recorded evidence (the literal user turn) — see below.
+TERMINAL_STATUSES = {"budget_exhausted", "stagnation_intervention_exhausted", "stopped_by_user"}
+
+# CLI-view slack for budget_exhausted: the predictive admission railguard stops
+# ADMITTING candidates when prior_total + in-flight estimate would cross the cap, so a
+# legitimately capped run can come to rest up to ~parallel_slots × per-slot-cost short
+# of budget_usd (per-call cap ~$10). The CLI accepts budget_exhausted only within this
+# slack of the cap, so an agent cannot stamp it on a half-spent run.
+_FINALIZE_BUDGET_SLACK_USD = 25.0
+
+
+def finalize_run(
+    results_dir: str,
+    status: str,
+    summary: Optional[Dict[str, Any]] = None,
+    evidence: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Write the terminal status. HARDENED (verify-in-code termination):
+
+    - ``status`` must be one of TERMINAL_STATUSES — anything else raises ValueError.
+    - A run already finalized with a DIFFERENT terminal status is never overwritten
+      (ValueError); re-finalizing the SAME status is an idempotent no-op that
+      preserves the first ``finished_at`` (relaunching an exhausted run re-hits the
+      harness check and re-finalizes benignly).
+    - ``stopped_by_user`` requires ``evidence={"user_quote": <the LITERAL user turn>}``
+      (non-empty) for EVERY caller; it is stored as run.json ``stop_evidence`` with an
+      auto-stamped ``noted_at``. Chat is outside code-observable state, so the quote is
+      an auditability bar, not proof — but an evidence-less stop can no longer be
+      stamped at all.
+    """
+    if status not in TERMINAL_STATUSES:
+        raise ValueError(
+            f"finalize_run: status {status!r} is not a sanctioned terminal status "
+            f"(allowed: {sorted(TERMINAL_STATUSES)})"
+        )
     run = read_run(results_dir) or {}
+    current = run.get("status")
+    if current in TERMINAL_STATUSES:
+        if current == status:
+            return  # idempotent re-finalize; keep the first finished_at
+        raise ValueError(
+            f"finalize_run: run already finalized as {current!r}; refusing to "
+            f"overwrite with {status!r}"
+        )
+    if status == "stopped_by_user":
+        quote = str((evidence or {}).get("user_quote", "") or "").strip()
+        if not quote:
+            raise ValueError(
+                "finalize_run: stopped_by_user requires evidence={'user_quote': "
+                "<the literal user stop message>} — never finalize a user stop "
+                "without quoting the actual user turn"
+            )
+        ev = dict(evidence or {})
+        ev.setdefault("noted_at", time.time())
+        run["stop_evidence"] = ev
     run["status"] = status
     run["finished_at"] = time.time()
     if summary:
         run["summary"] = summary
     _write_json_atomic(_run_path(results_dir), run)
+
+
+def finalize_run_checked(
+    results_dir: str,
+    status: str,
+    summary: Optional[Dict[str, Any]] = None,
+    evidence: Optional[Dict[str, Any]] = None,
+) -> None:
+    """The CLI-view finalize: RE-CHECKS the harness-owned preconditions from journal
+    state before delegating to finalize_run. This is the agent's recovery path when the
+    in-process finalize failed (`finalize_error` on a terminal return) — and the guard
+    that an agent cannot stamp a harness status the run has not actually earned:
+
+    - ``budget_exhausted``: requires a budget set AND remaining budget within the
+      acceptance slack of the cap (max($25, 2% of budget) — covers the predictive
+      admission stop, which can rest a legitimately capped run slightly short).
+    - ``stagnation_intervention_exhausted``: requires the VERIFIED termination streak
+      >= the boot-frozen N (run.json config_digest.termination_streak, default 5).
+    - ``stopped_by_user``: evidence enforcement lives in finalize_run itself.
+
+    The in-process harness calls (run_window's _finalize_terminal) use finalize_run
+    directly — they just verified the condition themselves."""
+    if status == "budget_exhausted":
+        run = read_run(results_dir) or {}
+        bud = run.get("budget_usd")
+        if bud is None:
+            raise ValueError("finalize_run refused: budget_exhausted needs a budget_usd set")
+        rem = budget_remaining(results_dir, float(bud))
+        slack = max(_FINALIZE_BUDGET_SLACK_USD, 0.02 * float(bud))
+        if rem is None or rem > slack:
+            raise ValueError(
+                f"finalize_run refused: budget remaining {rem} exceeds the acceptance "
+                f"slack {slack} — the run is not budget-exhausted")
+    elif status == "stagnation_intervention_exhausted":
+        run = read_run(results_dir) or {}
+        need = int((run.get("config_digest") or {}).get("termination_streak") or 5)
+        got = termination_streak(results_dir)
+        if got < need:
+            raise ValueError(
+                f"finalize_run refused: verified termination_streak {got} < {need}")
+    finalize_run(results_dir, status, summary, evidence)
+
+
+def write_run_summary_draft(results_dir: str) -> Optional[str]:
+    """Write ``<results_dir>/RUN_SUMMARY.md`` from build_run_summary IF ABSENT and
+    return its path (None when one already exists). Called by the harness right after
+    an auto-finalize so a terminated run is never summary-less; the orchestrator still
+    ENRICHES the draft (postmortem, future fixes) and runs archive_run itself."""
+    path = os.path.join(results_dir, "RUN_SUMMARY.md")
+    if os.path.exists(path):
+        return None
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(build_run_summary(results_dir))
+    return path
 
 
 # --- readers (multi-granularity) -------------------------------------------
@@ -618,46 +736,397 @@ def work_low_streak(results_dir: str, low_threshold: float = 1.0) -> int:
     return streak
 
 
-def termination_streak(results_dir: str) -> int:
-    """Count trailing consecutive 'control_return' rows that are BOTH stagnant AND had an
-    orchestrator intervention. The counted interventions are EXACTLY these three: a
-    framework rewrite, a DISCOVERY ROUND (R1 Azure DR or R2 archive-analyst) — which is then
-    GROUNDED — OR a deliberate config-lever flip. The automatic per-window meta round does NOT
-    count. A hand-authored GROUNDING is NOT a standalone counted intervention: a grounding never
-    runs without the in-interval discovery that produced its technique (the spawn_island PRIMARY
-    gate + grounding-engineer refusal enforce this), so it RIDES that DR and counts only via it
-    (work_discovery>0), never on its own. This is the deterministic termination signal:
-    N-in-a-row means the search cannot escape stagnation DESPITE intervening at every return. A
-    stagnation-break (stagnation_flag False) or a no-intervention return resets the streak.
-    Computed from interventions.jsonl — the agent writes one canonical control_return row per
-    control-return; the harness reads it.
+# --- human steering (journal/steering.jsonl) --------------------------------
+# The user may text a direction into the live session mid-run. The orchestrator
+# transcribes it VERBATIM the moment it arrives (same anti-confabulation bar as
+# stopped_by_user's stop_evidence), queues it across clusters, and consumes it at a
+# control-return. A recorded steer is what authorizes a kind="archive_analyst"
+# discovery stub (R2 is STEERING-ONLY — never autonomous); kind="dr" stubs need none.
 
-    Each row: {type:"control_return", stagnation_flag: bool, intervened: bool,
-    work_audit, work_discovery, work_grounding, work_score, ...}. ``intervened`` is the agent's
-    explicit flag (work_audit>0 OR work_discovery>0 — work_grounding ALONE never flips it, so a
-    grounding that grounds NO in-interval discovery cannot pad the streak); rows missing it fall
-    back to that derivation so the signal is robust to either shape."""
+_STEER_ACTIONS = {"dr", "archive_analyst", "declined", "merged"}
+
+
+def _steering_path(results_dir: str) -> str:
+    return os.path.join(journal_dir(results_dir), "steering.jsonl")
+
+
+def log_steering(results_dir: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Record ONE user-steering direction as a ``user_steer`` row. ``entry`` must
+    carry a non-empty ``quoted_user_text`` — the LITERAL user message (never a
+    paraphrase alone; put your reading in ``paraphrase``). ``steer_id``/``timestamp``
+    are auto-stamped when absent. Returns the completed row (incl. steer_id)."""
+    quote = str(entry.get("quoted_user_text", "") or "").strip()
+    if not quote:
+        raise ValueError(
+            "log_steering: quoted_user_text is required and must be the LITERAL "
+            "user message (record the user's own words, not a summary)"
+        )
+    row = {
+        "type": "user_steer",
+        "steer_id": str(entry.get("steer_id") or uuid.uuid4().hex[:8]),
+        "timestamp": float(entry.get("timestamp") or time.time()),
+        "quoted_user_text": quote,
+        "paraphrase": entry.get("paraphrase"),
+        "window_index": entry.get("window_index"),
+    }
+    _ensure(results_dir)
+    _append_jsonl(_steering_path(results_dir), row)
+    return row
+
+
+def read_steering(results_dir: str) -> List[Dict[str, Any]]:
+    return _read_jsonl(_steering_path(results_dir))
+
+
+def pending_steering(results_dir: str) -> List[Dict[str, Any]]:
+    """The queued (recorded but not yet consumed) user steers, oldest first.
+    Deliberately NOT interval-bound: a steer recorded mid-cluster (or several
+    control-returns ago) stays pending until a ``steer_consumed`` row lands."""
+    rows = read_steering(results_dir)
+    consumed = {r.get("steer_id") for r in rows if r.get("type") == "steer_consumed"}
+    return [r for r in rows
+            if r.get("type") == "user_steer" and r.get("steer_id") not in consumed]
+
+
+def consume_steering(
+    results_dir: str,
+    steer_id: str,
+    action: str,
+    stub_file: Optional[str] = None,
+    note: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Mark a recorded steer as acted on. ``action``: "dr" (steered external DR) /
+    "archive_analyst" (steered R2 round — pass the stub's calls.jsonl ``file`` as
+    ``stub_file`` so the gate can bind steer↔stub) / "declined" (surfaced to the user,
+    not actionable) / "merged" (duplicate of another steer). Refuses an unknown
+    steer_id or action."""
+    if action not in _STEER_ACTIONS:
+        raise ValueError(f"consume_steering: unknown action {action!r} (allowed: {sorted(_STEER_ACTIONS)})")
+    known = {r.get("steer_id") for r in read_steering(results_dir) if r.get("type") == "user_steer"}
+    if steer_id not in known:
+        raise ValueError(f"consume_steering: no user_steer row with steer_id {steer_id!r}")
+    row = {
+        "type": "steer_consumed",
+        "steer_id": steer_id,
+        "timestamp": time.time(),
+        "action": action,
+        "stub_file": stub_file,
+        "note": note,
+    }
+    _append_jsonl(_steering_path(results_dir), row)
+    return row
+
+
+def _steer_validates_stub(
+    results_dir: str,
+    stub: Dict[str, Any],
+    steering_rows: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """Does recorded steering evidence authorize this kind="archive_analyst" stub?
+    FAIL CLOSED for this kind (the steer↔stub linkage is the point of the R2
+    demotion): requires (i) a readable detail blob whose ``request.steer_id`` is a
+    non-empty string; (ii) a ``user_steer`` row with that id, recorded at or before
+    the stub's timestamp (a steer may be from a PRIOR interval — steering queues);
+    (iii) the steer not already consumed by a DIFFERENT stub — if any
+    ``steer_consumed`` row exists for the id, one of them must carry THIS stub's
+    ``file`` (blocks replaying one steer across rounds, and blocks a stub claiming a
+    steer that was resolved as declined/merged)."""
+    file = stub.get("file")
+    if not file:
+        return False
+    detail = read_call(results_dir, file)
+    req = detail.get("request") if isinstance(detail, dict) else None
+    sid = (req or {}).get("steer_id")
+    if not isinstance(sid, str) or not sid.strip():
+        return False
+    sid = sid.strip()
+    rows = read_steering(results_dir) if steering_rows is None else steering_rows
+    stub_ts = stub.get("timestamp")
+    steer_ok = any(
+        r.get("type") == "user_steer" and r.get("steer_id") == sid
+        and isinstance(r.get("timestamp"), (int, float))
+        and (isinstance(stub_ts, (int, float)) and float(r["timestamp"]) <= float(stub_ts))
+        for r in rows
+    )
+    if not steer_ok:
+        return False
+    consumes = [r for r in rows if r.get("type") == "steer_consumed" and r.get("steer_id") == sid]
+    if consumes and not any(c.get("stub_file") == file for c in consumes):
+        return False
+    return True
+
+
+# --- verified termination (criterion 2, computed from code artifacts) --------
+# Frozen foundation copies of the stagnation-detector defaults, used only when
+# run.json's boot-time config_digest lacks the thresholds. Keep in sync with
+# orchestrator/scripts/stagnation_detector.py (_DEFAULT_ABS_FLOOR/_DEFAULT_REL_FRAC)
+# — duplicated deliberately: termination must NOT import the mutable detector.
+_TERM_ABS_FLOOR_DEFAULT = 1e-3
+_TERM_REL_FRAC_DEFAULT = 0.05
+_TERM_CONSECUTIVE_DEFAULT = 2
+
+_termination_divergence_warned = False
+
+
+def foundation_stagnation_flags(results_dir: str) -> Dict[int, bool]:
+    """FOUNDATION-side stagnation recompute for TERMINATION ONLY: per window_index,
+    was the run stagnant at that window — derived from windows.jsonl
+    ``best_score_start``/``best_score_end`` (written by immutable diagnostics) and the
+    BOOT-FROZEN thresholds in run.json ``config_digest``. Never reads the mutable
+    detector's ``delta``/``stagnation_flag``/``low_streak`` fields and never imports
+    stagnation_detector.py, so a rewritten/sabotaged detector (or a mid-run threshold
+    flip) can neither disable nor force termination. Cadence/return-control keeps
+    using the mutable detector — this floor is only for criterion 2.
+
+    Mirrors the detector's bar (low when Δ <= max(abs_floor, rel_frac·max(s_start,0)))
+    and run_window's FAIR-TRIAL reset (a strategy_fingerprint change between windows
+    zeroes the low-streak — keep in sync with run_window.py's prior_low_streak reset).
+    Unparseable scores ⇒ non-low + reset (fail toward keep-running)."""
+    run = read_run(results_dir) or {}
+    digest = run.get("config_digest") or {}
+    try:
+        abs_floor = float(digest.get("stagnation_abs_floor"))
+    except (TypeError, ValueError):
+        abs_floor = _TERM_ABS_FLOOR_DEFAULT
+    try:
+        rel_frac = float(digest.get("stagnation_rel_frac"))
+    except (TypeError, ValueError):
+        rel_frac = _TERM_REL_FRAC_DEFAULT
+    try:
+        consecutive = int(digest.get("consecutive_required"))
+    except (TypeError, ValueError):
+        consecutive = _TERM_CONSECUTIVE_DEFAULT
+    flags: Dict[int, bool] = {}
+    low_streak = 0
+    prev_fp = None
+    for w in read_windows(results_dir):
+        try:
+            wi = int(w.get("window_index"))
+        except (TypeError, ValueError):
+            continue  # an unindexed row cannot participate in termination
+        fp = w.get("strategy_fingerprint")
+        if prev_fp is not None and fp is not None and fp != prev_fp:
+            low_streak = 0  # fair trial for a freshly deployed strategy
+        if fp is not None:
+            prev_fp = fp
+        try:
+            s_start = float(w.get("best_score_start"))
+            s_end = float(w.get("best_score_end"))
+        except (TypeError, ValueError):
+            low_streak = 0
+            flags[wi] = False
+            continue
+        low = (s_end - s_start) <= max(abs_floor, rel_frac * max(s_start, 0.0))
+        low_streak = low_streak + 1 if low else 0
+        flags[wi] = low_streak >= consecutive
+    return flags
+
+
+def _strategy_deploy_times(results_dir: str) -> List[float]:
+    """Timestamps of strategy_history index entries ATTRIBUTED TO THIS RUN (the
+    code-verified 'framework rewrite happened' artifact). The index lives at
+    strategy_store.history_dir() — repo-level and SHARED across worktrees/runs — so
+    only entries whose stamped ``results_dir`` matches this run count; unattributed
+    entries (old/smoke deploys) never count. Any import/read failure (incl. a corrupt
+    index) degrades to [] — termination under-counts and the run continues, never
+    crashes."""
+    try:
+        import sys as _sys
+
+        if os.path.dirname(__file__) not in _sys.path:
+            _sys.path.insert(0, os.path.dirname(__file__))
+        import strategy_store as _ss  # harness sibling
+
+        entries = _ss.read_index()
+    except Exception:
+        return []
+    try:
+        want = os.path.normcase(os.path.abspath(results_dir))
+    except Exception:
+        return []
+    out: List[float] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        rd = e.get("results_dir")
+        if not rd:
+            continue
+        try:
+            if os.path.normcase(os.path.abspath(str(rd))) != want:
+                continue
+        except Exception:
+            continue
+        ts = e.get("timestamp")
+        if isinstance(ts, (int, float)):
+            out.append(float(ts))
+    return out
+
+
+def _config_flip_between(
+    windows: List[Dict[str, Any]], prev_wi: Optional[int], wi: Optional[int]
+) -> bool:
+    """Code-verified config-lever flip: the harness stamps ``config_lever_hash``
+    (a content hash over the non-volatile config keys) into every window row; a flip
+    in the interval means some in-interval window's hash differs from the baseline
+    (the last window at index <= prev_wi). No baseline (first interval) or missing
+    hashes (old journals) ⇒ no flip evidence."""
+    if prev_wi is None or wi is None:
+        return False
+    baseline: Optional[tuple] = None
+    for w in windows:
+        try:
+            w_i = int(w.get("window_index"))
+        except (TypeError, ValueError):
+            continue
+        h = w.get("config_lever_hash")
+        if h and w_i <= prev_wi and (baseline is None or w_i >= baseline[0]):
+            baseline = (w_i, h)
+    if baseline is None:
+        return False
+    for w in windows:
+        try:
+            w_i = int(w.get("window_index"))
+        except (TypeError, ValueError):
+            continue
+        if prev_wi < w_i <= wi:
+            h = w.get("config_lever_hash")
+            if h and h != baseline[1]:
+                return True
+    return False
+
+
+def _termination_intervals(results_dir: str) -> List[Dict[str, Any]]:
+    """Per-control-return interval detail for the VERIFIED termination streak.
+
+    Intervals are delimited by consecutive type=="control_return" rows in
+    interventions.jsonl (the rows keep their role as the agent's cadence marker and
+    work-score carrier — but their stagnation_flag/intervened fields are now CLAIMS;
+    code truth is derived from artifacts). Windows are matched by INDEX
+    (prev.window_index < w.window_index <= row.window_index — windows.jsonl rows
+    carry no timestamps); artifacts (discovery stubs, strategy deploys) by TIMESTAMP
+    (prev.timestamp < ts <= row.timestamp — the agent writes its row AFTER acting).
+
+    verified.stagnant  = the foundation-recomputed flag of the LAST window in the
+                         interval, and the interval must contain >=1 window row (an
+                         empty/duplicate interval never counts — no streak padding).
+    verified.intervened = OR of the three code-verified artifact classes:
+                          a strategy deploy attributed to this run, a usable
+                          in-interval discovery stub (dr unconditional;
+                          archive_analyst only with steering evidence), or a
+                          config_lever_hash flip. Meta rounds and groundings are
+                          naturally excluded (wrong kind / no artifact class).
+    Rows missing window_index/timestamp verify as non-stagnant/non-intervened —
+    fail toward keep-running (budget still bounds the run)."""
     rows = [r for r in read_interventions(results_dir) if r.get("type") == "control_return"]
+    if not rows:
+        return []
+    windows = read_windows(results_dir)
+    f_flags = foundation_stagnation_flags(results_dir)
+    deploy_times = _strategy_deploy_times(results_dir)
+    steering_rows = read_steering(results_dir)
+    out: List[Dict[str, Any]] = []
+    prev_ts = 0.0
+    prev_wi: Optional[int] = None
+    for r in rows:
+        ts = r.get("timestamp")
+        ts = float(ts) if isinstance(ts, (int, float)) else None
+        try:
+            wi: Optional[int] = int(r.get("window_index"))
+        except (TypeError, ValueError):
+            wi = None
+        in_windows: List[int] = []
+        if wi is not None:
+            for w in windows:
+                try:
+                    w_i = int(w.get("window_index"))
+                except (TypeError, ValueError):
+                    continue
+                if (prev_wi is None or w_i > prev_wi) and w_i <= wi:
+                    in_windows.append(w_i)
+        v_stag = bool(in_windows) and bool(f_flags.get(max(in_windows), False))
+        if ts is not None:
+            n_deploys = sum(1 for d in deploy_times if prev_ts < d <= ts)
+            stubs = discovery_stubs_between(results_dir, prev_ts, ts, steering_rows=steering_rows)
+        else:
+            n_deploys, stubs = 0, []
+        flip = _config_flip_between(windows, prev_wi, wi)
+        v_int = bool(n_deploys) or bool(stubs) or flip
+        claimed_int = r.get("intervened")
+        if claimed_int is None:
+            claimed_int = (float(r.get("work_audit", 0) or 0) > 0
+                           or float(r.get("work_discovery", 0) or 0) > 0)
+        c_stag, c_int = bool(r.get("stagnation_flag")), bool(claimed_int)
+        out.append({
+            "window_index": wi,
+            "timestamp": ts,
+            "claimed": {"stagnation_flag": c_stag, "intervened": c_int},
+            "verified": {"stagnant": v_stag, "intervened": v_int},
+            "evidence": {"deploys": n_deploys, "discovery_stubs": len(stubs),
+                         "config_flip": bool(flip), "windows": len(in_windows)},
+            "diverged": (c_stag != v_stag) or (c_int != v_int),
+        })
+        if ts is not None:
+            prev_ts = ts
+        if wi is not None:
+            prev_wi = wi
+    return out
+
+
+def termination_report(results_dir: str) -> List[Dict[str, Any]]:
+    """The per-interval claimed-vs-verified termination detail (CLI view
+    ``termination_report``) — read this when your control_return rows and the
+    verified streak disagree."""
+    return _termination_intervals(results_dir)
+
+
+def termination_streak(results_dir: str) -> int:
+    """Count trailing consecutive control-return intervals that are BOTH stagnant AND
+    intervened — VERIFIED FROM CODE ARTIFACTS, not from the agent's row fields.
+
+    Stagnation truth: the foundation recompute over windows.jsonl best-score deltas
+    with boot-frozen thresholds (see foundation_stagnation_flags). Intervention truth:
+    a strategy deploy attributed to this run, a usable in-interval discovery stub
+    (kind="dr" unconditional; kind="archive_analyst" only with recorded steering
+    evidence — R2 is steering-only), or a config_lever_hash flip. The automatic meta
+    round has no artifact class and never counts; a grounding alone (kind="grounding")
+    is not a discovery-stub kind and never counts — it rides the discovery that
+    produced its technique. The agent's control_return row remains the interval
+    delimiter and work-score carrier, but its stagnation_flag/intervened fields are
+    CLAIMS: divergence is surfaced (termination_report + one stderr warning per
+    process) while code truth silently drives this number. N-in-a-row means the
+    search could not escape verified stagnation despite a verified intervention at
+    every return."""
+    global _termination_divergence_warned
+    intervals = _termination_intervals(results_dir)
     streak = 0
-    for r in reversed(rows):
-        intervened = r.get("intervened")
-        if intervened is None:  # robust fallback if the agent omitted the explicit flag
-            # Key on work_discovery (NOT work_grounding) — grounding alone is real spend
-            # but is not the intervention that breaks stagnation.
-            work_discovery = r.get("work_discovery", 0)
-            intervened = float(r.get("work_audit", 0) or 0) > 0 or float(work_discovery or 0) > 0
-        if bool(r.get("stagnation_flag")) and bool(intervened):
+    scanned: List[Dict[str, Any]] = []
+    for iv in reversed(intervals):
+        scanned.append(iv)
+        if iv["verified"]["stagnant"] and iv["verified"]["intervened"]:
             streak += 1
         else:
             break
+    diverged = [iv for iv in scanned if iv.get("diverged")]
+    if diverged and not _termination_divergence_warned:
+        _termination_divergence_warned = True
+        import sys as _sys
+
+        idxs = [iv.get("window_index") for iv in diverged]
+        print(
+            f"[journal] termination: {len(diverged)} trailing control_return row(s) "
+            f"(window_index {idxs}) diverge from code-verified truth — the verified "
+            f"streak drives termination; inspect with the 'termination_report' view",
+            file=_sys.stderr,
+        )
     return streak
 
 
 def read_calls(results_dir: str, kind: Optional[str] = None) -> List[Dict[str, Any]]:
     """The compact external-call pointer index (no big prompts). Optionally
-    filter by kind ('meta' / 'dr' / 'archive_analyst'). The two DISCOVERY-stub kinds the
-    recency gate recognizes are {dr, archive_analyst} (R1 Azure deep research and R2 the
-    archive-analyst subagent); 'meta' is the automatic per-window round (not a discovery
+    filter by kind ('meta' / 'dr' / 'archive_analyst' / 'grounding'). The two DISCOVERY-stub
+    kinds the recency gate recognizes are {dr, archive_analyst} (R1 Azure deep research — the
+    only AUTONOMOUS route — and the human-STEERED R2 archive-analyst subagent, valid only with
+    recorded steering evidence); 'meta' is the automatic per-window round (not a discovery
     stub). Open a specific call's full detail with ``read_call(results_dir, row['file'])``."""
     rows = _read_jsonl(os.path.join(journal_dir(results_dir), "calls.jsonl"))
     return [r for r in rows if (kind is None or r.get("kind") == kind)]
@@ -690,33 +1159,42 @@ def _control_return_boundary(results_dir: str) -> float:
     return boundary
 
 
-def discovery_in_interval(results_dir: str) -> List[Dict[str, Any]]:
-    """The discovery recency gate — THE single source of truth for "is there a fresh, usable
-    discovery this control-return interval?". Read-only.
+def discovery_stubs_between(
+    results_dir: str,
+    lo_ts: float,
+    hi_ts: Optional[float] = None,
+    steering_rows: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    """The SHARED discovery-stub predicate — the one place that decides whether a
+    calls.jsonl pointer is a valid discovery stub. Used by discovery_in_interval (the
+    grounding gate: lo = last control_return boundary, hi = None) and by the verified
+    termination intervals (lo/hi = consecutive control_return timestamps).
 
-    A *discovery round* (== "DR round") is a discovery pass via EXACTLY ONE OF R1 (Azure
-    deep research, kind="dr") OR R2 (the archive-analyst subagent, kind="archive_analyst").
-    This returns the in-interval, USABLE discovery stubs of those two kinds; the caller
-    (the PRIMARY spawn_island.py gate; the grounding-engineer subagent likewise refuses
-    without it) fails CLOSED on an empty list — no in-interval discovery ⇒ grounding refused.
-
-    In-interval iff ``stub.timestamp > boundary`` (STRICTLY greater), where boundary =
-    the most-recent control_return row timestamp (0.0 ⇒ first interval). USABLE iff the
-    stub denotes >=1 returned direction: when the full detail file is readable and carries
-    an explicit ``response.usable``, THAT flag alone decides (False disqualifies, True
-    counts — even when the free-text pointer summary happens to mention a refusal in
-    passing, e.g. "found X after Azure refused the pivot"); the pointer-``summary``
-    substring screen ('refus'/'no usable'/'unusable') is only the FALLBACK for a stub
-    whose detail is missing/unreadable or has no usable key. A stub with neither signal
-    is treated as usable, so a legitimate stub is never silently dropped. A stale stub
-    (timestamp <= boundary) never satisfies the gate."""
-    boundary = _control_return_boundary(results_dir)
+    A stub qualifies iff ALL of:
+      - kind ∈ {"dr", "archive_analyst"} ('meta' is the automatic per-window round;
+        'grounding' is a mutate.py self-log — neither is a discovery stub);
+      - ``lo_ts < timestamp`` (STRICTLY greater) and, when hi_ts is given,
+        ``timestamp <= hi_ts``;
+      - USABLE: when the full detail file is readable and carries an explicit
+        ``response.usable``, THAT flag alone decides (False disqualifies, True counts
+        — even when the free-text pointer summary happens to mention a refusal in
+        passing); the pointer-``summary`` substring screen ('refus'/'no usable'/
+        'unusable') is only the FALLBACK for a stub whose detail is missing/unreadable
+        or has no usable key; a stub with neither signal is treated as usable (fail
+        OPEN — a legitimate stub is never silently dropped);
+      - kind="archive_analyst" ONLY: recorded steering evidence must authorize it
+        (R2 is STEERING-ONLY) — see _steer_validates_stub; this leg FAILS CLOSED
+        (missing detail / no request.steer_id / no matching user_steer row / steer
+        already consumed by a different stub ⇒ disqualified)."""
     stubs = read_calls(results_dir, kind="dr") + read_calls(results_dir, kind="archive_analyst")
+    rows = steering_rows
     out: List[Dict[str, Any]] = []
     for s in stubs:
         ts = s.get("timestamp")
-        if not isinstance(ts, (int, float)) or float(ts) <= boundary:
+        if not isinstance(ts, (int, float)) or float(ts) <= lo_ts:
             continue  # stale (or undated) → not in this interval
+        if hi_ts is not None and float(ts) > hi_ts:
+            continue
         # The explicit response.usable flag in the full detail blob is AUTHORITATIVE —
         # R1/R2 write it deliberately, while the pointer summary is free text (a usable
         # stub may legitimately MENTION a refusal). Consult the detail first; fall back
@@ -729,16 +1207,36 @@ def discovery_in_interval(results_dir: str) -> List[Dict[str, Any]]:
             if isinstance(resp, dict) and "usable" in resp:
                 usable = bool(resp.get("usable"))
         if usable is None:
-            # Fallback pointer-level refusal screen (detail missing/unreadable or no
-            # usable key): a summary that reads as a refusal disqualifies; otherwise
-            # treat as usable (fail OPEN on a legitimate stub, not closed).
             summary = str(s.get("summary") or "").strip().lower()
             usable = not (summary and ("refus" in summary or "no usable" in summary
                                        or "unusable" in summary))
         if not usable:
             continue
+        if s.get("kind") == "archive_analyst":
+            if rows is None:
+                rows = read_steering(results_dir)
+            if not _steer_validates_stub(results_dir, s, rows):
+                continue
         out.append(s)
     return out
+
+
+def discovery_in_interval(results_dir: str) -> List[Dict[str, Any]]:
+    """The discovery recency gate — THE single source of truth for "is there a fresh, usable
+    discovery this control-return interval?". Read-only.
+
+    A *discovery round* (== "DR round") is a discovery pass via EXACTLY ONE OF R1 (Azure
+    deep research, kind="dr" — the ONLY autonomous route, whole-task or sub-task scoped)
+    OR a human-STEERED R2 (the archive-analyst subagent, kind="archive_analyst" — valid
+    only with recorded, unreplayed steering evidence; see discovery_stubs_between).
+    This returns the in-interval, USABLE discovery stubs; the caller (the PRIMARY
+    spawn_island.py gate; the grounding-engineer subagent likewise refuses without it)
+    fails CLOSED on an empty list — no in-interval discovery ⇒ grounding refused.
+
+    In-interval iff ``stub.timestamp > boundary`` (STRICTLY greater), where boundary =
+    the most-recent control_return row timestamp (0.0 ⇒ first interval). The usable /
+    steering predicates live in discovery_stubs_between — the ONE shared place."""
+    return discovery_stubs_between(results_dir, _control_return_boundary(results_dir))
 
 
 def read_island(results_dir: str, island_id: int) -> List[Dict[str, Any]]:
@@ -904,10 +1402,28 @@ if __name__ == "__main__":
                 payload.get("summary"),
             )
             return {"logged": True, "file": path}
+        if view == "steering":
+            return {"result": read_steering(rd)}
+        if view == "pending_steering":
+            return {"result": pending_steering(rd)}
+        if view == "log_steering":
+            row = log_steering(rd, payload["entry"])
+            return {"logged": True, "steer_id": row["steer_id"]}
+        if view == "consume_steering":
+            row = consume_steering(
+                rd, payload["steer_id"], payload["action"],
+                payload.get("stub_file"), payload.get("note"),
+            )
+            return {"consumed": True, "steer_id": row["steer_id"], "action": row["action"]}
+        if view == "termination_report":
+            return {"result": termination_report(rd)}
         if view == "build_run_summary":
             return {"result": build_run_summary(rd)}
         if view == "finalize_run":
-            finalize_run(rd, payload["status"], payload.get("summary"))
+            # Precondition re-check + whitelist + evidence enforcement live in
+            # finalize_run_checked / finalize_run (importable, tested directly).
+            finalize_run_checked(rd, payload["status"], payload.get("summary"),
+                                 payload.get("evidence"))
             return {"finalized": True, "status": payload["status"]}
         if view == "archive_run":
             dest = archive_run(rd, payload.get("dest_root", "orchestrator/run_archive"),

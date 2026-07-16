@@ -24,6 +24,18 @@ INPUT (stdin JSON):
   {
     "query": str,                    # the research question
     "program_context": str,          # current best program / what's been tried
+    "subtask": {                     # OPTIONAL — PROVENANCE that this round researches a
+      "name": str,                   #   SUB-PROBLEM of the task. Recorded into the logged
+      "statement": str,              #   stub's request blob (triage + grounding routing —
+      "relation_to_task": str        #   a subtask-carrying stub routes to the
+    } | null,                        #   grounding-engineer's A-INTEGRATE mode by default).
+                                     # It NEVER changes the prompt: a DR call is always ONE
+                                     # self-contained research task — draft query +
+                                     # program_context AS the sub-problem's own task, adding
+                                     # main-task context only when it helps that question.
+    "steer_id": str | null,          # OPTIONAL audit linkage to a journal/steering.jsonl
+                                     # user_steer row (a human-steered R1); logged into the
+                                     # stub's request blob, never required for R1 validity
     "model": "o3-deep-research",
     "reasoning_effort": "medium",
     "max_tool_calls": 20,
@@ -121,6 +133,21 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     query = payload.get("query", "")
     program_context = payload.get("program_context", "")
     model = payload.get("model", "o3-deep-research")
+    # Optional SUB-TASK provenance: PROMPT-NEUTRAL by design — the DR model never needs
+    # to know whether it is researching the whole task or a sub-problem (a DR call is
+    # always one self-contained research task; the orchestrator drafts query +
+    # program_context AS that task, folding main-task context in only when helpful).
+    # A non-empty subtask.statement is recorded into the stub's request blob, where
+    # triage and the grounding executor (grounding-engineer A-INTEGRATE) read it.
+    subtask = payload.get("subtask") if isinstance(payload.get("subtask"), dict) else None
+    if subtask is not None and not str(subtask.get("statement", "") or "").strip():
+        subtask = None
+    steer_id = payload.get("steer_id")  # audit-only linkage (a human-steered R1)
+    _request_blob = {
+        "query": query, "program_context": program_context, "model": model,
+        "reasoning_effort": payload.get("reasoning_effort", "medium"),
+        "subtask": subtask, "steer_id": steer_id,
+    }
 
     system_msg = DR_SYS_MSG
     user_msg = DR_USER_MSG.format(
@@ -188,8 +215,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
             _billed += search_surcharge
         _common.log_external_call(
             payload.get("results_dir"), "dr",
-            {"query": query, "program_context": program_context, "model": model,
-             "reasoning_effort": payload.get("reasoning_effort", "medium")},
+            _request_blob,
             {"refused": True, "reason": reason, "error": str(exc),
              "error_code": getattr(exc, "error_code", None),
              # The grounding gate reads the LOGGED stub, so `usable` must live there (not just the return).
@@ -198,6 +224,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
         )
         return {"brief": [], "raw_text": "", "cost": _billed, "model": model,
                 "refused": True, "degraded": True, "reason": reason,
+                "subtask": subtask,
                 # A refused/failed R1 discovery stub is never usable by the grounding gate.
                 "usable": False,
                 "error_code": getattr(exc, "error_code", None)}
@@ -207,22 +234,25 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # journal and fold cost into the ledger when results_dir is set, so the query
     # is durably recorded instead of living only in an ephemeral runner script
     # that the next call could overwrite.
+    _summary = f"{len(brief)} brief items"
+    if subtask is not None:
+        _summary += f" [subtask: {subtask.get('name', 'unnamed sub-task')}]"
     _common.log_external_call(
         payload.get("results_dir"), "dr",
-        {"query": query, "program_context": program_context, "model": model,
-         "reasoning_effort": payload.get("reasoning_effort", "medium")},
+        _request_blob,
         {"brief": brief, "raw_text": text, "token_cost": float(token_cost),
          "search_surcharge": search_surcharge,
          # `usable` lives in the LOGGED stub so journal.discovery_in_interval can
          # screen an empty-brief DR (usable=False) — not only on the return envelope.
          "usable": bool(brief)},
         cost=cost,
-        summary=f"{len(brief)} brief items",
+        summary=_summary,
     )
     return {
         "brief": brief, "raw_text": text,
         "cost": cost, "token_cost": float(token_cost),
         "search_surcharge": search_surcharge, "model": model,
+        "subtask": subtask,
         # This kind="dr" call row is the R1 discovery stub the grounding gate
         # reads (journal.discovery_in_interval); usable iff >=1 direction was returned.
         "usable": bool(brief),

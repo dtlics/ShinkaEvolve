@@ -10,11 +10,21 @@ API-call speed against Azure. The orchestrator (you, via Claude Code) drives the
 search one *cluster* at a time — each cluster is one `run_window --until-decision`
 launch that runs one or more *windows*, and each window runs a few inner-loop goes
 plus one automatic meta round. You read the diagnostics each time a cluster returns
-control, and — when there is a need for intervention, such as the logs showing
-evolution flaws or the search stagnating — you can initiate a Deep Research run to
-bring in external knowledge about the SOTA of the task or a subtask, or rewrite the
-underlying **strategy code** (the mutable policy files in `orchestrator/scripts/`)
-via a design → change → validate → deploy → measure → rollback protocol. See
+control, and intervene only when they warrant it:
+
+- **Deep Research** — bring in external SOTA knowledge about the task or a subtask
+  (the DR prompt is always one self-contained research task; a declared subtask is
+  stub provenance that routes the follow-up grounding).
+- **Strategy rewrite** — rewrite the mutable policy files in `orchestrator/scripts/`
+  via a design → change → validate → deploy → measure → rollback protocol.
+- **Human steering** — the human can type a direction into the live session mid-run;
+  it is journaled verbatim (`journal/steering.jsonl`) and consumed as a steered
+  discovery round at a later control-return.
+
+Run termination is **verified in code**: the stagnation+intervention streak is
+recomputed from journal artifacts (windows, attributed strategy deploys, discovery
+stubs, config-lever hashes), and terminal statuses are gated by `finalize_run` (a
+user stop requires the quoted user turn as evidence). See
 [`.claude/skills/shinka-orchestrator/SKILL.md`](.claude/skills/shinka-orchestrator/SKILL.md).
 
 ## What's here
@@ -40,7 +50,9 @@ orchestrator/         the outer-loop framework code
   tests/             parity / improvements / smoke (offline, no API)
 shinka/              slimmed framework source (Azure-only) — imported in-place, no install
 configs/             orchestrator_run.default.json (run-config starter) + azure_default.yaml
-tasks/               user tasks (evaluate.py + initial.<ext>)
+tasks/               user tasks (evaluate.py + one initial.<ext> seed, or several
+                     initial_<k>.<ext> seeds via task.init_program_paths — each roots
+                     its own island at boot)
 examples/circle_packing/  reference task used by the smoke test
 tests/smoke/check_azure.py   manual probe: main Azure deployments (paid, a few cents)
 tests/smoke/check_dr.py      manual probe: deep-research resource (paid, ~$1)

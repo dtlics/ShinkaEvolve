@@ -236,6 +236,12 @@ def deploy(
             "J": None,
             "status": "deployed",
             "timestamp": _now(),
+            # Run attribution: the index is repo-level and SHARED across worktrees/
+            # concurrent runs, so the verified-termination reader
+            # (journal._strategy_deploy_times) counts a deploy only when this stamp
+            # matches its run. A deploy without results_dir is unattributable and
+            # never counts as that run's intervention.
+            "results_dir": str(results_dir) if results_dir else None,
         }
     )
     return {"prior_hash": prior_hash, "new_hash": new_hash, "state_snap_id": state_snap_id,
@@ -628,6 +634,9 @@ def deploy_bundle(
             "J": None,
             "status": "deployed",
             "timestamp": _now(),
+            # Run attribution — see deploy(): required for the verified-termination
+            # reader to count this bundle as ITS run's intervention.
+            "results_dir": str(results_dir) if results_dir else None,
         }
     )
     return {"prior_hashes": prior_hashes, "new_hashes": new_hashes,

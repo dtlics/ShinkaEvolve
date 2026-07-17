@@ -49,21 +49,28 @@ protocol by ../gross_code_gauging/ (calibrate.py --compare machinery).
   CERTIFIED := lam2 >= LAM2_MIN (2.0; env SPECTRAL_LAM2_MIN)
   rho        = congestion: max #(minimum-cycle-basis cycles) through an edge
                (their secondary criterion; gentle tiebreak only)
+  E_theirs(lam2) = the GeneCS compiler's measured lambda_2-vs-E frontier
+               (GENECS_FRONTIER anchors, piecewise linear, capped at 24
+               above the acceptance threshold — overshoot earns nothing,
+               matching their first-passage semantics)
 
   crash / garbage return               -> -1000   (correct=False)
   invalid spec                         ->  -100   (+ named reason)
-  valid, NOT certified                 ->  -8 - 5*(LAM2_MIN - lam2) - 0.05*E
-                                           (smooth gradient toward the
-                                            certificate; always <= -8, so
-                                            any plausibly-sized certified
-                                            graph outranks every
-                                            uncertified one)
-  valid, CERTIFIED                     ->  (24 - E) - 0.02*max(0, rho - 2)
-                                                    - 0.01*max(0, maxdeg - 4)
-       24 = what THEIR algorithm achieves at these criteria (measured:
-       100 restarts, every seed). Certified E=24 scores ~0 — matching their
-       compiler; every edge below that is +1 and BEATS the published
-       pipeline at its own game. E<=23 certified is the win condition.
+  valid, lam2 below the G0 level       ->  -4 - 6*(0.438 - lam2) - 0.05*E
+       (their add-only pipeline has no output below its own start graph,
+        so there is no frontier credit down there — only a gradient up)
+  valid, lam2 >= G0 level              ->  E_theirs(lam2) - E  - tiebreaks
+                                           (- 0.02*max(0, rho-2)
+                                            - 0.01*max(0, maxdeg-4))
+       FRONTIER SCORE: positive = beats their compiler at its own beta
+       knob (fewer edges for the same certified expansion level); their
+       measured outputs tie at ~0; a CERTIFIED graph below 24 edges is
+       automatically >= +1 per edge saved. MEASURED HEADROOM: plain local
+       annealing already finds certified E=21 (+3) and lambda_2=2.28 at
+       E=23 — their frontier is beatable by +0.34..+0.80 everywhere — so
+       the real discovery target is the TRUE minimum certified E (the
+       Fiedler bound lambda_2 <= vertex-connectivity <= min-degree only
+       forces E >= 12; where in [12, 21] the boundary lies is open).
 
 Anti-gaming: the candidate returns only the edge list; the Laplacian, the
 eigensolve, the congestion and the scoring all live here, and the eval is
@@ -93,9 +100,32 @@ LAM2_EPS    = 1e-9      # certification tolerance: graphs whose true lambda_2
                         # flip on eigensolver rounding
 E_BASE      = 24        # GeneCS Algorithm 1 at these criteria (measured; also
                         # matches their published 24-qubit gross Full-Opt)
-PEN_LAM2    = 5.0       # uncertified-branch gradient per unit of lambda_2 gap
-TIE_CONG    = 0.02      # certified-branch congestion tiebreak
-TIE_DEG     = 0.01      # certified-branch degree tiebreak
+# THEIR compiler's measured lambda_2-vs-E frontier (best over seeds, Alg-1 /
+# 100 restarts; from ../gross_code_gauging/genecs.py --fit-published + scans):
+# the anchor of the race score — a candidate is scored by how many edges
+# THEIR compiler needs to reach the candidate's certified expansion level.
+GENECS_FRONTIER = ((0.4384, 18),   # G0, the 18-edge path-matching motif
+                   (0.7007, 19), (1.105, 20), (1.202, 21),
+                   (1.438, 22), (1.722, 23), (LAM2_MIN, 24))
+TIE_CONG    = 0.02      # congestion tiebreak
+TIE_DEG     = 0.01      # degree tiebreak
+
+
+def frontier_edges(lam2):
+    """E_theirs(lambda_2): edges the GeneCS compiler needs (piecewise-linear
+    in lambda_2 through the measured anchors; capped at E_BASE above the
+    acceptance threshold — overshooting expansion earns nothing, exactly
+    like their first-passage acceptance). Defined only for lambda_2 >= the
+    G0 level 0.4384 — below that THEIR pipeline has no output at all (it is
+    add-only from G0), so there is no frontier to beat."""
+    pts = GENECS_FRONTIER
+    if lam2 >= pts[-1][0]:
+        return float(pts[-1][1])
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if lam2 <= x1:
+            t = (lam2 - x0) / (x1 - x0)
+            return float(y0 + t * (y1 - y0))
+    return float(pts[0][1])
 MAX_EDGES   = 60
 MAX_DUMMIES = 24
 MAX_DEGREE  = 12        # GeneCS's stated degree bound
@@ -291,48 +321,62 @@ def aggregate_fn(results: list) -> dict:
     checks_raw = E + 1                       # (12+d) A_v + (E-(12+d)+1) cycles
     qpc = 2 * E + 1                          # their qubits+checks objective
 
-    if certified:
-        score = float((E_BASE - E)
-                      - TIE_CONG * max(0, rho - 2)
-                      - TIE_DEG * max(0, maxdeg - 4))
+    tiebreak = TIE_CONG * max(0, rho - 2) + TIE_DEG * max(0, maxdeg - 4)
+    if lam2 >= GENECS_FRONTIER[0][0]:
+        # FRONTIER SCORE: how many edges THEIR compiler needs to reach this
+        # candidate's expansion level, minus what the candidate spent.
+        # Positive = beats the GeneCS compiler at its own beta knob; 0 = ties
+        # its measured outputs; certified E <= 23 is automatically >= +1.
+        f_e = frontier_edges(lam2)
+        score = float(f_e - E - tiebreak)
+        status = "CERTIFIED" if certified else "uncertified"
         verdict = (
-            f"CERTIFIED at E={E} edges (lambda_2={lam2:.3f} >= {LAM2_MIN} — "
-            f"certified Cheeger >= {lam2 / 2:.2f}); score={score:+.2f}. In GeneCS "
+            f"{status} at E={E} edges, lambda_2={lam2:.3f} (certified Cheeger "
+            f">= {lam2 / 2:.2f}; acceptance is lambda_2 >= {LAM2_MIN}); "
+            f"score={score:+.2f} = (their compiler needs {f_e:.1f} edges for "
+            f"this expansion level) - (your {E}) - tiebreaks. In GeneCS "
             f"accounting: {E} qubits + {checks_raw} checks = {qpc} (their "
-            f"published gross result: 24 + 25 = 49; their algorithm at these "
-            f"criteria: E={E_BASE} on every measured seed). "
-            f"{len(dummies)} dummies, congestion rho={rho}, max degree {maxdeg}. "
-            + (f"BEATS the GeneCS compiler by {E_BASE - E} edge(s) — verify "
-               f"end-to-end by scoring this graph in ../gross_code_gauging/. "
-               if E < E_BASE else
-               f"Matches their compiler; the win condition is a certified "
-               f"E <= {E_BASE - 1}. ")
-            + f"To shrink: try removing an edge whose loss keeps lambda_2 >= "
-            f"{LAM2_MIN} (their add-only first-passage search never checks "
-            f"this), swapping edges across the weakest spectral cut "
-            f"{weak_side} ({crossing} crossing now), replacing several port "
-            f"edges with a well-placed dummy hub (free in this accounting), "
-            f"or doubling a strategic edge."
+            f"published gross result: 24 + 25 = 49). {len(dummies)} dummies, "
+            f"congestion rho={rho}, max degree {maxdeg}. "
+            + (f"BEATS the certified GeneCS compiler output by {E_BASE - E} "
+               f"edge(s) — cross-score this graph end-to-end in "
+               f"../gross_code_gauging/. "
+               if certified and E < E_BASE else
+               (f"Certified and matching their compiler; push E below "
+                f"{E_BASE} (local annealing is KNOWN to reach certified "
+                f"E=21 — beat that, then find the true minimum; the Fiedler "
+                f"bound only forces E >= 12). "
+                if certified else
+                f"Not yet certified — the score still pays for beating their "
+                f"frontier at THIS expansion level; certification (lambda_2 "
+                f">= {LAM2_MIN}) unlocks the E<=23 jackpot ladder. "))
+            + f"Moves their add-only first-passage search cannot make: remove "
+            f"an edge whose loss keeps lambda_2 high (they never re-check), "
+            f"swap edges across the weakest spectral cut {weak_side} "
+            f"({crossing} crossing now), drop matching edges, place a dummy "
+            f"hub (free in this accounting), double a strategic edge."
         )
     else:
-        score = float(-8.0 - PEN_LAM2 * (LAM2_MIN - lam2) - 0.05 * E)
+        # Below the G0 level their pipeline has no output at all — no
+        # frontier to beat down here, only a gradient back up.
+        score = float(-4.0 - 6.0 * (GENECS_FRONTIER[0][0] - lam2)
+                      - 0.05 * E - tiebreak)
         verdict = (
-            f"NOT CERTIFIED: lambda_2={lam2:.3f} < {LAM2_MIN} (certified "
-            f"Cheeger only {lam2 / 2:.2f}; the acceptance is GeneCS's own "
-            f"fitted gross-code criterion); score={score:.2f}. E={E} edges, "
-            f"{len(dummies)} dummies, congestion rho={rho}, max degree "
-            f"{maxdeg}. The weakest spectral cut is {weak_side} with only "
-            f"{crossing} crossing edge(s) — add or re-route edges across THAT "
-            f"cut to raise lambda_2 fastest. (Note: the hand-crafted WY/IBM "
-            f"seed itself sits here at lambda_2=0.925 — its real distance 12 "
-            f"is IP-proven but the spectral certificate cannot see it; this "
-            f"task races the CERTIFICATE objective on purpose.)"
+            f"BELOW THE G0 EXPANSION LEVEL: lambda_2={lam2:.3f} < "
+            f"{GENECS_FRONTIER[0][0]:.3f} (the 18-edge path-matching motif "
+            f"itself) — the GeneCS pipeline has no output this weak, so there "
+            f"is no frontier credit here; score={score:.2f}. E={E} edges, "
+            f"congestion rho={rho}, max degree {maxdeg}. The weakest spectral "
+            f"cut is {weak_side} with only {crossing} crossing edge(s) — add "
+            f"or re-route edges across THAT cut to raise lambda_2 fastest."
         )
 
     public = {
         "combined_score": round(score, 3), "valid": 1,
         "certified": int(certified), "lam2": round(lam2, 4),
         "cheeger_cert": round(lam2 / 2, 4),
+        "frontier_edges_theirs": (round(frontier_edges(lam2), 2)
+                                  if lam2 >= GENECS_FRONTIER[0][0] else None),
         "edges": E, "dummies": len(dummies),
         "checks_raw": checks_raw, "qubits_plus_checks": qpc,
         "congestion": rho, "max_degree": maxdeg,
@@ -340,7 +384,8 @@ def aggregate_fn(results: list) -> dict:
     }
     private = {
         "lam2_min": LAM2_MIN, "e_base": E_BASE,
-        "pen_lam2": PEN_LAM2, "tie_cong": TIE_CONG, "tie_deg": TIE_DEG,
+        "genecs_frontier": [list(p) for p in GENECS_FRONTIER],
+        "tie_cong": TIE_CONG, "tie_deg": TIE_DEG,
     }
     return {"combined_score": score, "correct": True, "public": public,
             "private": private, "extra_data": {}, "text_feedback": verdict}

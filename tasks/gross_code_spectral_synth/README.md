@@ -65,19 +65,41 @@ evaluator reports the weakest Fiedler cut and its crossing count every
 eval — edges across it buy the most λ₂; their compiler needs 24 edges to
 get there), then *shrink* below 24 with the moves above.
 
-## Score
+## Score — the frontier race
+
+`E_theirs(λ₂)` = edges **their compiler needs** to reach a given expansion
+level (measured anchors, best over seeds: (0.438, 18=G0), (0.70, 19),
+(1.105, 20), (1.202, 21), (1.438, 22), (1.722, 23), (2.0, 24); piecewise
+linear; capped at 24 above the acceptance threshold — overshoot earns
+nothing, matching their first-passage semantics).
 
 ```
-certified   (λ₂ ≥ 2.0):  (24 − E) − 0.02·max(0, ρ − 2) − 0.01·max(0, Δmax − 4)
-uncertified (λ₂ < 2.0):  −8 − 5·(2.0 − λ₂) − 0.05·E
+λ₂ ≥ 0.438 (their G0 level):  E_theirs(λ₂) − E − 0.02·max(0,ρ−2) − 0.01·max(0,Δmax−4)
+λ₂ < 0.438:                   −4 − 6·(0.438 − λ₂) − 0.05·E   (no frontier credit
+                              below their own start graph)
 invalid spec: −100;  crash: −1000
 ```
 
+Positive = beats their compiler at its own β knob; their measured outputs
+tie at ~0; a **certified** (λ₂ ≥ 2) graph earns +1 per edge below 24.
+Measured smoke: WY seed −2.48, their E=24 output −0.02, an annealed
+certified E=23 graph +0.95, a 12-ring −5.62.
+
+**Measured headroom (the reward is dense and the jackpot reachable):**
+plain simulated annealing over edge swaps already finds a **certified
+E=21** graph (λ₂ = 2.000 exactly; score +3) and λ₂ = 2.28 at E=23 — the
+Alg-1 frontier is beatable by +0.34–0.80 at every size. Beating their
+compiler is therefore the *easy* part; the discovery target is the **true
+minimum certified E**: the Fiedler bound (λ₂ ≤ vertex connectivity ≤ min
+degree) only forces E ≥ 12, and where in [12, 21] the boundary lies is an
+open combinatorial question. (E.g. no 12-vertex 3-regular graph can reach
+λ₂ ≥ 2 — provable by an adjacency-trace argument — so E = 18 all-cubic is
+out; mixed-degree graphs below 21 are the frontier.)
+
 Deterministic, < 1 s per candidate (12–36-vertex eigensolve + Horton cycle
 basis) — this task is built for very high candidate throughput; the race is
-about search moves, not evaluation cost. `SPECTRAL_LAM2_MIN` moves the bar
-(e.g. 0.925 = the level the hand-crafted gadget certifies, for a secondary
-race at the WY operating point).
+about search moves, not evaluation cost. `SPECTRAL_LAM2_MIN` moves the
+certification bar.
 
 Any certified winner should be cross-scored on the real protocol by
 `../gross_code_gauging/` (its `calibrate.py --compare` machinery) — the

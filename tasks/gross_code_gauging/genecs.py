@@ -270,6 +270,76 @@ def genecs_spec(beta=0.46, seed=0, restarts=200, rounds=12, **kw):
     return {"edges": [list(e) for e in edges], "rounds": rounds}, info
 
 
+def fit_published(betas=None, restarts=100, seeds=(1, 2, 3), max_degree=8):
+    """Reverse-engineer the GeneCS paper's UNPUBLISHED config from its
+    PUBLISHED gross-code outcome (their Sec. 7, Full-Opt single logical-X:
+    24 ancilla qubits, 25 checks, degrees 7/8; 100 random restarts stated).
+
+    Identifiability: in mono-layer gauging accounting the generic check count
+    is 12 A_v + (E-11) cycle checks = E+1, so (24 qubits, 25 checks) pins
+    E = 24 EXACTLY — no thickening layers fit (a second layer would double
+    the qubit count), i.e. their gross Full-Opt is mono-layer and their
+    check accounting keeps the RAW cycle basis (no BB-redundancy reduction:
+    a code-aware count would give fewer). The scan below asks which beta
+    makes Algorithm 1 land at E=24 and whether the deformed-code degree
+    profile matches their reported 7/8 — that beta is the paper's effective
+    certified-expansion level on this instance. What remains UNIDENTIFIABLE
+    from their text: the scheduler/decoder/protocol behind their LER figures
+    (no absolute numbers published; see calibrate.py --ablate for the
+    bracket showing rankings are scheduler-robust while absolute LER moves
+    ~1.5x with schedule depth).
+    """
+    import os
+    import sys
+    import importlib.util as _iu
+    _task_dir = os.path.dirname(os.path.abspath(__file__))
+    _repo_root = os.path.dirname(os.path.dirname(_task_dir))
+    for _p in (_repo_root, _task_dir):
+        if _p not in sys.path:
+            sys.path.insert(0, _p)          # evaluate.py needs `shinka`
+    _spec = _iu.spec_from_file_location(
+        "gauge_eval_for_fit", os.path.join(_task_dir, "evaluate.py"))
+    ev = _iu.module_from_spec(_spec); _spec.loader.exec_module(ev)
+    if betas is None:
+        betas = [round(0.50 + 0.05 * i, 2) for i in range(11)]   # 0.50 .. 1.00
+    print(f"target: 24 qubits / 25 generic checks (=> E=24), degrees 7/8; "
+          f"restarts={restarts} (their stated number), max_degree={max_degree}")
+    hdr = (f"{'beta':>5} {'seed':>4} {'E':>3} {'lam2':>6} {'qubits':>6} "
+           f"{'checks(gen/red)':>15} {'wmax':>4} {'qdeg':>4} {'match':>6}")
+    print(hdr); print("-" * len(hdr))
+    hits = {}
+    for beta in betas:
+        for seed in seeds:
+            try:
+                edges, info = genecs_graph(beta=beta, seed=seed,
+                                           restarts=restarts,
+                                           max_degree=max_degree)
+            except RuntimeError:
+                print(f"{beta:>5} {seed:>4}   —  did not reach lambda_2 >= "
+                      f"{2 * beta:.2f} within tau layers")
+                continue
+            g = ev.build_gauged([tuple(e) for e in edges], [])
+            E = len(edges)
+            wmax = max(g["wz_max"], g["wx_max"])
+            match = (E == 24 and 7 <= wmax <= 8 and 7 <= g["qdeg_max"] <= 8)
+            if match:
+                hits.setdefault(beta, 0)
+                hits[beta] += 1
+            print(f"{beta:>5} {seed:>4} {E:>3} {info['lambda2']:>6.3f} {E:>6} "
+                  f"{12 + E - 11:>7}/{12 + g['n_bp']:<7} {wmax:>4} "
+                  f"{g['qdeg_max']:>4} {'YES' if match else '':>6}")
+    if hits:
+        best = sorted(hits, key=lambda b: -hits[b])
+        print(f"\n=> configs reproducing the published (24, 25, degrees 7/8): "
+              f"beta in {best} (effective certified Cheeger ~ beta; "
+              f"lambda_2 threshold ~ {2 * best[0]:.2f})")
+    else:
+        print("\n=> no scanned beta reproduces (24, 25, 7/8) — their gross "
+              "Full-Opt config lies outside this mono-layer Alg-1 grid "
+              "(check the congestion-balance termination hypothesis)")
+    return hits
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="GeneCS-style gadget synthesis")
     ap.add_argument("--beta", type=float, default=0.46,
@@ -280,12 +350,19 @@ if __name__ == "__main__":
     ap.add_argument("--max-degree", type=int, default=8)
     ap.add_argument("--rounds", type=int, default=12)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--fit-published", action="store_true",
+                    help="scan beta configs and report which reproduces the "
+                         "GeneCS paper's published gross-code outcome "
+                         "(24 qubits / 25 checks / degrees 7-8)")
     args = ap.parse_args()
-    spec, info = genecs_spec(beta=args.beta, seed=args.seed,
-                             restarts=args.restarts, rounds=args.rounds,
-                             tau=args.tau, max_degree=args.max_degree,
-                             verbose=args.verbose)
-    print(f"GeneCS gadget (beta={args.beta}): {info}")
-    print(f"edges = {spec['edges']}")
-    print(f"rounds = {spec['rounds']}")
-    print(f"Q = {info['edges']} edge qubits + 12 A_v + (cycle checks; evaluator derives)")
+    if args.fit_published:
+        fit_published(restarts=args.restarts, max_degree=args.max_degree)
+    else:
+        spec, info = genecs_spec(beta=args.beta, seed=args.seed,
+                                 restarts=args.restarts, rounds=args.rounds,
+                                 tau=args.tau, max_degree=args.max_degree,
+                                 verbose=args.verbose)
+        print(f"GeneCS gadget (beta={args.beta}): {info}")
+        print(f"edges = {spec['edges']}")
+        print(f"rounds = {spec['rounds']}")
+        print(f"Q = {info['edges']} edge qubits + 12 A_v + (cycle checks; evaluator derives)")

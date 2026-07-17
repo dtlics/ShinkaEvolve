@@ -213,17 +213,31 @@ restarts keep the smallest graph) so its output can be scored by **this**
 evaluator with the same schedule, protocol, decoder and noise. Measured β →
 size frontier: β=0.35 → Q=35, **β=0.46 → Q=37** (the spectral level the
 paper's own 22-edge gadget certifies), β=0.65 → Q=41 (= the reference size).
-For the record, the GeneCS paper's own *certified* gross-code result
-(Full-Opt, with thickening) is 24 qubits + 25 checks = **49 elements** —
-larger than WY's 41; its >85% headline reductions are vs. generic pipelines
-(Gauge 239/240, CKBB 348/342). GeneCS contains **no scheduling or protocol
-treatment** and gates on a *spectral certificate*; this task measures and
-prices instead — and the certificate turns out loose in **both** directions:
-the β=0.46 graph certifies only Cheeger·d ≈ 5.6 yet measures dressed
-distance 10, while the β=0.35 graph certifies 4.2 and actually hides a
-**weight-9 dressed X-logical** (the attack finds it on every seed). Under
-v4.1 pricing both are feasible (a weight-9 tail prices at ~10⁻¹¹ at the
-gate point) — the weight-9 operator simply goes on β=0.35's record.
+
+**Reverse-engineering their unpublished config** (`genecs.py
+--fit-published`): in mono-layer gauging accounting, generic check count =
+E+1, so their published gross Full-Opt outcome (24 ancilla qubits, 25
+checks, degrees 7/8) pins **E = 24 exactly** — no thickening fits (a second
+layer would double the qubit count). The scan finds E=24 reproduced by
+**β ∈ [0.9, 1.0]** on every seed, with λ₂ landing at exactly **2.000** at
+β=0.9–0.95 — i.e. their effective gross-code acceptance is **λ₂ ≥ 2
+(certified Cheeger ≥ 1, the full WY theory bar, mono-layer)**, with raw
+cycle-basis check accounting (a BB-code-aware count gives 21 checks for the
+same graph, Q = 45 elements in this task's accounting — larger than WY's
+41). Their >85% headline reductions are vs. generic pipelines (Gauge
+239/240, CKBB 348/342). Still unidentifiable from their text: scheduler,
+decoder, protocol (no absolute LER numbers published); `calibrate.py
+--ablate` brackets that — rankings are scheduler-robust, absolute LER moves
+~1.5× with schedule depth.
+
+GeneCS contains **no scheduling or protocol treatment** and gates on a
+*spectral certificate*; this task measures and prices instead — and the
+certificate turns out loose in **both** directions: the β=0.46 graph
+certifies only Cheeger·d ≈ 5.6 yet measures dressed distance 10, while the
+β=0.35 graph certifies 4.2 and actually hides a **weight-9 dressed
+X-logical** (the attack finds it on every seed). Under v4.1 pricing both
+are feasible (a weight-9 tail prices at ~10⁻¹¹ at the gate point) — the
+weight-9 operator simply goes on β=0.35's record.
 
 ## Calibration & comparison (run owner)
 
@@ -320,9 +334,8 @@ python orchestrator/harness/run_window.py --config <run>/run.json --until-decisi
 | File | Role |
 |---|---|
 | [initial.py](initial.py) | Fixed problem data + graph/preview tools + EVOLVE-BLOCK (matching + greedy seed, Q=45). |
-| [initial_genecs.py](initial_genecs.py) | Second boot seed: same fixed tools, EVOLVE-BLOCK rooted at the GeneCS β=0.46 graph (Q=37). Use both via `task.init_program_paths` so one island explores the spectral lineage. |
 | [evaluate.py](evaluate.py) | Deformed-code builder, König scheduler, protocol circuits, fault-set probes + tail pricing, BP+OSD-0/sinter multi-p sampling, scorer. |
-| [genecs.py](genecs.py) | GeneCS-style (arXiv:2605.21746 Alg. 1) spectral baseline synthesizer. |
+| [genecs.py](genecs.py) | GeneCS-style (arXiv:2605.21746 Alg. 1) reimplementation: baseline synthesizer + `--fit-published` (reverse-engineer their unpublished β from the published gross-code outcome). |
 | [calibrate.py](calibrate.py) | Re-measures `LER_REFS` + reference probes; `--compare` scores the benchmark set; `--ablate` runs the scheduler-sensitivity study (König vs. greedy first-fit). |
 | [test_coloring.py](test_coloring.py) | Property tests: coloring, preview consistency, determinism, probe/pricing regression, scope rule. |
 

@@ -39,7 +39,7 @@ window cap; the budget is hard-capped in code via `budget_usd`. Per-task
 * [cnot_grid_synth/](cnot_grid_synth/) — CNOT-equivalent linear-function synthesis on a 2D L×L grid (Clifford circuits, n-weighted average-case CX-depth-per-qubit saved vs a snake-KMS baseline). Active user task.
 * [bb_syndrome_sched/](bb_syndrome_sched/) — syndrome-extraction circuit scheduling for a BB (bivariate-bicycle) code (AlphaSyndrome-style), scored by an error-budget evaluator.
 * [pbb_code_discovery/](pbb_code_discovery/) — discovery of non-CSS perturbed bivariate-bicycle (PBB) codes (Campaign-5 port of arXiv:2606.02418), scored by trust-adjusted FOM = k·d²/n.
-* [gross_code_gauging/](gross_code_gauging/) — gauging-measurement edge search on the [[144,12,12]] gross code (Williamson & Yoder, arXiv:2410.02213): minimize the ancilla qubits (graph edges) that keep the deformed-code distance at 12.
+* [gross_code_gauging/](gross_code_gauging/) — end-to-end gauging-gadget design on the [[144,12,12]] gross code (Williamson & Yoder, arXiv:2410.02213): smallest gadget whose measured protocol LER stays non-inferior to the paper reference AND whose estimated protocol fault distance keeps the circuit-level ceiling (d̂ ≥ 10, adversarially probed); includes a GeneCS-style (arXiv:2605.21746) spectral baseline for apple-to-apple comparison.
 
 ## Reference example
 

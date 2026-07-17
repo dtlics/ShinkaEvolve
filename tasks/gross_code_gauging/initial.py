@@ -13,11 +13,18 @@ circuit under circuit-level depolarizing noise at a THREE-POINT NOISE CURVE
 (p = 0.7x, 1x, 1.4x the benchmark rate), decodes with BP+OSD, and MEASURES
 the protocol's error at each point: the probability that the reported
 measurement outcome is wrong or that any of the other 11 logical qubits is
-corrupted. The reliability gate sits at the center point; the score bonus
-averages the margin over the whole curve, and the fitted scaling exponent
-d_eff (how steeply your error falls as p drops) is reported -- a design that
-merely squeaks by at one noise rate but scales flatly earns less than one
-with genuine distance-like protection.
+corrupted. IN ADDITION it estimates the PROTOCOL FAULT DISTANCE d_hat =
+min(R, lightest dressed logical of the deformed code found by a BP+OSD
+attack on either CSS side, lightest circuit-level fault set found by a stim
+search on the actual protocol circuits). d_hat exists because Monte Carlo at
+the benchmark noise rates CANNOT see a low-weight fault tail: a small design
+can beat the whole measured curve on level while failing catastrophically at
+the operating point below it (an 11-edge spanning tree once 'won' this task
+exactly that way -- its weight-7..8 dressed logicals and R=5 timelike cap
+were invisible to sampling). Feasibility demands BOTH measured reliability
+AND d_hat >= 10, the gross code's own circuit-level ceiling (Bravyi et al.
+Nature 2024: every depth-7 schedule caps at d_circ <= 10, so 10 is full
+protection here; 12 is unreachable through any gadget).
 
 WHAT YOU RETURN (the whole design space of the paper, not just edges):
   propose_gadget() -> {"edges": [(u, v), ...], "rounds": R}
@@ -35,17 +42,24 @@ WHAT YOU RETURN (the whole design space of the paper, not just edges):
   * every EDGE = one new data qubit (init |0>). Parallel edges allowed
     (the paper's double-gross example is a multigraph); no self-loops.
   * "rounds" R in [1, 24] = deformed-code syndrome rounds. The measurement
-    outcome is protected in TIME only by the R repeats of the A_v checks
-    (fault distance min(R, spatial)); more rounds also expose all 12 logical
-    qubits to more noise. The optimum is genuinely nontrivial: for a related
-    gross-code measurement, Cross et al. (arXiv:2407.18393) found R=7 < d=12
-    optimal at p=0.001.
+    outcome is protected in TIME only by the R repeats of the A_v checks --
+    a chain of R measurement flips on one A_v is undetectable and flips the
+    outcome (Cross et al. arXiv:2407.18393 Lemma 9: measurement fault
+    distance = min(R, ...)), so d_hat <= R ALWAYS: R < 10 can never be
+    feasible. Every round above ~10 only adds noise exposure on all 12
+    logical qubits, so the useful range is narrow and R=10..12 is the
+    natural region.
 
 VALIDITY (evaluator-enforced; violations score -100 with a named reason):
   * all 12 support vertices + every used dummy in ONE connected component
     (Theorem 1: connectivity is what makes the measurement measure X_alpha);
   * labels in range, no self-loops, <= 60 edges, <= 24 dummies, R in [1,24];
-  * the deformed code must have k=11 (checked; automatic when connected).
+  * the deformed code must have k=11 (checked; automatic when connected);
+  * LDPC hardware caps: max deformed check weight <= 9 and max qubit degree
+    <= 9 (the paper reference's profile is 7/7). These block the star-graph
+    family: a heavy check is a hook-error channel (one ancilla fault spreads
+    to ~weight/2 qubits) that no probe or affordable simulation can see.
+    preview_gadget() predicts both numbers locally before you spend an eval.
 
 WHAT THE EVALUATOR DERIVES FOR YOU (deterministic, same for every candidate):
   A_v Gauss-law checks; original Z-checks routed through your graph by exact
@@ -55,44 +69,49 @@ WHAT THE EVALUATOR DERIVES FOR YOU (deterministic, same for every candidate):
   schedule; the protocol circuit, detectors and byproduct corrections.
 
 SCORE (higher is better; Q = edge_qubits + A_v checks + B_p checks):
-  reliable   (gate-point margin >= 0):
-      score = (41 - Q) + min(2, 0.5*margin(p_lo) + 0.5*margin(p_gate))
-  unreliable (gate-point margin < 0):  score = -8 + gate_margin   (>= -30)
+  margin(p) = log10(reference_error(p) / your_error(p)) -- TRUE headroom vs
+      the calibrated paper-reference gadget at the same noise rate.
+  FEASIBLE := margin(p_gate) >= -0.30 AND margin(p_lo) >= -0.45   (measured
+      curve non-inferior to the reference, worst case over the scored points)
+      AND d_hat >= 10                                             (protected)
+  feasible:    score = (41 - Q) + 3 * min(2, max(0, min(margin_lo, margin_gate)))
+  infeasible:  score = -8 + min(0, margin_gate+0.30) + min(0, margin_lo+0.45)
+                          - 1.5 * (10 - d_hat)    [clamped to >= -30]
   invalid spec: -100;  crash: -1000.
-  margin(p) = log10(2 x reference_error(p) / your_error(p)) -- headroom vs
-  the calibrated paper-reference gadget at the same noise rate. The bonus is
-  LOW-p-WEIGHTED (low + gate points), NOT a symmetric average: over the
-  log-symmetric grid a plain mean cancels your slope, so it would reward only
-  the curve's LEVEL. Weighting low makes a FLAT curve (error barely dropping
-  as p falls, while the paper's does) score strictly lower than a STEEP one at
-  the same gate error -- real distance-like protection earns the bonus. The
-  reference design (the paper's 22-edge graph, Q=41, R=12) scores ~0..+2.
-  Saving an element while staying reliable is +1 per element. The bonus is
-  capped at +2, so reliability can never buy unlimited structure -- but
-  falling below the gate costs everything, so the frontier is: SMALLEST
-  RELIABLE GADGET. Both halves are measured, not proxied.
+  The reference design (the paper's 22-edge graph, Q=41, R=12) scores ~0.
+  Saving an element while staying FEASIBLE is +1 per element. The LER bonus
+  is WORST-CASE over the low+gate points and only pays for TRUE dominance
+  (matching the reference earns 0; 0.33 decades better everywhere = +1
+  element; capped at +6), so end-to-end error is what tie-breaks designs at
+  the same size -- but protection (d_hat) can never be traded away for it.
+  The frontier is: SMALLEST gadget with FULL (ceiling-level) protection and
+  a non-inferior measured curve. Everything is measured or attacked on the
+  real protocol -- nothing is a static graph proxy.
 
-LEVERS THAT ACTUALLY MOVE THE MEASURED ERROR (all reported in feedback):
-  * expansion where it matters: a logical pinches on a sparse cut of the
-    graph; reinforce THAT cut (conductance/Fiedler are only heuristics);
+LEVERS THAT ACTUALLY MOVE THE SCORE (all reported in feedback):
+  * expansion where it matters: d_hat is attacked, not proxied -- when the
+    attack finds a light dressed logical, the feedback names its support
+    (which base qubits + which gadget edges). Reinforce THAT cut; Fiedler /
+    sparsest_cut tools below are only local heuristics for screening;
   * check weight & degree -> schedule depth -> idle noise: depth per phase
     IS the deformed Tanner graph's max degree (exact minimum edge coloring),
     so heavy routed Z-checks, long flux cycles and high-degree vertices
     deepen every round for everyone. Dummy vertices can shorten routings and
-    chop long cycles (the paper's whole reason for thickening);
-  * rounds R: timelike protection of the outcome vs total noise exposure;
-  * SCALING: the curve bonus and d_eff reward designs whose error falls
-    steeply at lower p (real distance-like protection), not just designs
-    tuned to the benchmark rate;
+    chop long cycles (the paper's whole reason for thickening) -- and the
+    LDPC caps (weight/degree <= 9) are hard validity;
+  * rounds R: d_hat <= R (R < 10 is auto-infeasible); above ~10 each round
+    only adds exposure -- so tune within the narrow useful band;
   * raw size: every edge/check is an element of Q AND another noise location.
 
 THE SEED below is the known-good flat design: the 18 matching edges (the
 paper's weight-1-deformation motif -- NOT forced, but a strong starting
 skeleton) + 6 sparsest-cut-greedy expansion edges, R=12, no dummies
-(Q=45, reliably ~4 elements above the reference; the paper's own 4
-expansion edges reach Q=41). Directions the seed does NOT explore: pruning
-expansion edges, replacing matching edges entirely, dummy-vertex structure
-(stars/layers/cellulation), asymmetric R, parallel edges.
+(Q=45, feasible with d_hat=12, ~4 elements above the reference; the paper's
+own 4 expansion edges reach Q=41, and a GeneCS-style spectral synthesis
+reaches Q=37 at d_hat=10 -- so at least 8 elements of the seed are provably
+removable). Directions the seed does NOT explore: pruning/replacing matching
+edges, dummy-vertex structure (stars/layers/cellulation), R tuning within
+the >= 10 band, parallel edges.
 
 TOOLS PROVIDED (fixed, callable from the EVOLVE-BLOCK):
   graph_adjacency(edges)      {vertex: set(neighbors)}
@@ -342,7 +361,7 @@ def preview_gadget(edges, rounds=12):
     return {
         "elements": Q, "edge_qubits": E, "av_checks": n_av, "bp_checks": n_bp,
         "dummies": len(verts) - 12, "rounds": int(rounds),
-        "score_if_reliable": 41 - Q,
+        "score_if_feasible": 41 - Q,
         "wz_max_est": max([6 + w for w in route_w] + [max((len(c) for c in basis), default=0)]),
         "route_w_max": max(route_w, default=0),
         "cycle_w_max": max((len(c) for c in basis), default=0),
@@ -357,12 +376,14 @@ def propose_gadget():
     """Return the gauging gadget spec: {"edges": [(u,v), ...], "rounds": R}.
 
     SEED: the 18 matching edges (weight-1 deformation motif) + sparsest-cut
-    greedy expansion edges, no dummies, R=12. This is a reliably-measuring
-    flat graph at Q=45 (score ~ -4 + margin bonus); the reference design
-    reaches Q=41 with only 4 expansion edges, and NOTHING says 41 (or a flat,
-    dummy-free, R=12 graph) is optimal. Use preview_gadget() to screen
-    structural ideas cheaply, and the evaluator's measured-error feedback to
-    decide what the reliability can afford to lose.
+    greedy expansion edges, no dummies, R=12. This is a feasible flat graph
+    at Q=45 (score ~ -4 + bonus; d_hat=12); the reference design reaches
+    Q=41 with only 4 expansion edges, a GeneCS-style synthesis reaches Q=37
+    at d_hat=10, and NOTHING says a flat, dummy-free, R=12 graph is optimal.
+    Use preview_gadget() to screen structure cheaply; the evaluator's
+    feedback tells you where the dressed-logical attack bites when you cut
+    too deep (it names the operator's support). Feasibility is BOTH measured
+    reliability AND d_hat >= 10 -- never trade protection for size.
     """
     NUM_EXTRA = 6
     edges = list(MATCHING_EDGES)

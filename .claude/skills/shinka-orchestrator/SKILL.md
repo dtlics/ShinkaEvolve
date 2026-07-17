@@ -676,7 +676,10 @@ highest-yield read is PER-ISLAND: an island is a structural FAMILY (one lineage,
 gene flow by default), so its programs share a skeleton — put an island's best few programs
 side by side (`island_health` + its meta brief name the family; `archive_query`
 `top_n`/`by_generation` fetch the code) and the SHARED subroutines stand out in a way no single
-program shows. A shared subroutine is worth its own DR round when it is:
+program shows. (When that read would drag several programs' code into your context, delegate it
+to `subagents/archive-scout.md` — a read-only context firewall that returns the candidates in
+≤300 words; it is NOT a discovery route and emits no stub.) A shared subroutine is worth its own
+DR round when it is:
 - a recurring **bottleneck** — the same kernel dominating score/runtime across one or more
   islands' elites;
 - a **well-separable core** with its own literature (a routing/decoding/scheduling/synthesis
@@ -777,7 +780,8 @@ and the parity steps below are identical for both.
 program hosts the sub-solution decides which island receives it (`parent_id` = the base ⇒ the
 integrated child lands in the base's island as a lineage child), so choose deliberately:
 - Read the archive first: `island_health` + each island's meta brief tell you which FAMILY each
-  island is exploring; `archive_query` `top_n` / per-island bests show the candidate hosts.
+  island is exploring; `archive_query` `top_n` / per-island bests show the candidate hosts (or
+  reuse the archive-scout report that surfaced the sub-task — it doubles as the host shortlist).
 - The default base is the **strongest host, not blindly the global best**: the program whose
   scaffold around the touched subroutine is strongest, on the island whose family most
   prominently CONTAINS the sub-problem (its programs lean on that subroutine) or most stands to
@@ -1005,8 +1009,9 @@ into the fix prompt; open a failing slot's record for the failure kind.
 Escalate to `subagents/debug-agent.md` only when the SAME failure signature recurs across two
 DIFFERENT parents in a window (each having exhausted its in-loop repair budget, matching
 the subagent's own precondition); write its report to `strategy_history/debug_<w>.md`, act on its one
-recommendation, forget the detail. For periodic structural reads, spawn
-`subagents/archive-analyst.md`.
+recommendation, forget the detail. For a heavy archive read (the per-island sub-task scan, a
+base-host shortlist), spawn the read-only `subagents/archive-scout.md` — the archive-analyst is
+steering-only and is never the tool for your own reads.
 
 ## Termination + end of run
 
@@ -1135,6 +1140,17 @@ prompt. **Logging is automatic — don't hand-roll it.** When you call `meta_sum
 NOT also `append_intervention` with the same cost (double-count). `append_intervention` is
 for your rewrites/decisions + the work score, never an LLM call's cost.
 
+**The journal, not your conversation, is the run's memory.** Long runs compact your context — by
+design that must not matter: every operational fact (scores, stubs, steers, interventions,
+spend, status) lives in a journal stream, and the compact views rebuild your working state in a
+few reads. After a compaction (or whenever your memory of the run feels thin), RE-ORIENT before
+acting: `run.json` (status / budget / best) → the last few `windows.jsonl` rows → the
+`interventions.jsonl` tail (your last control_return) → `pending_steering`. And never act on a
+remembered-but-unjournaled fact: a user stop, a steer, or a decision with no journal row did NOT
+happen — the 2026-06-14 run confabulated a user stop from exactly such a "memory" and threw away
+a healthy run (the finalize gate now blocks that one in code, but the discipline generalizes:
+journal first, memory never).
+
 ## The subroutines
 
 JSON on stdin → JSON on stdout (also importable `main(payload)->dict`).
@@ -1173,6 +1189,22 @@ hung request so a wedged socket on one status GET can't ride the whole wall. The
 "queued too long" abort — a genuinely-stuck job simply bounds at the wall, then degrades cleanly
 (mutate → `applied:false`; DR → a degraded brief whose billed cost is captured). Don't rewrite the
 transport in a strategy rewrite.
+
+## The subagents (your context firewalls)
+
+Each subagent exists to keep something OUT of your context: it does the heavy reading or
+authoring, and hands back only a bounded report. The shared protocol is identical for all four —
+spawn with a self-contained prompt, receive the report, ACT on it, save it to
+`strategy_history/<agent>_<window>.md`, and DROP the detail (the file is the durable copy —
+never let subagent output linger in your context). All four spend Claude tokens (off-ledger,
+$0 in the run ledger); none makes an Azure call.
+
+| Subagent | Spawn when | Returns (cap) | Never |
+|---|---|---|---|
+| `archive-scout` | a heavy archive read — the per-island sub-task scan, or a base-host shortlist — would drag several programs' code into your context | candidate sub-tasks / host shortlist with evidence (≤300 words) | emits a stub or counts as discovery — its report is YOUR reading; the R1 it informs produces the stub |
+| `archive-analyst` (R2) | ONLY on a recorded user steer aimed at the run's own history (see "Human steering") | steer-scoped structural read + triaged recommendation (<500 words) + its `kind=archive_analyst` stub | runs autonomously; edits anything |
+| `grounding-engineer` | grounding a technique Azure refused (A), a sub-task integration (A-INTEGRATE — the default for `subtask` stubs), or the rare mutation rescue (B) | scratch program path + verification report (<400 words) | archives/spawns itself; touches `initial.py`; grounds without in-interval provenance (A/A-INTEGRATE) |
+| `debug-agent` | the same failure signature recurs across two DIFFERENT parents in a window | root-cause read + ONE recommendation (<400 words) | edits code |
 **And never manually kill a slow in-flight Azure bg call** (TaskStop / bash-kill) to end it sooner —
 cost books only on a TERMINAL status, so a kill leaks unlogged-but-billed spend; let it ride to the
 3600s wall, deciding for yourself with the knobs you own (reasoning effort, `@medium` vs `@high`,

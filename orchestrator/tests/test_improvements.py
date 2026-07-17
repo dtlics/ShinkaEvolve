@@ -1615,7 +1615,10 @@ def test_skill_doc_teaches_run_loop_and_roles():
               # human steering + the R2 demotion + sub-task DR + multi-seed boot:
               "steering.jsonl", "pending_steering", "STEERING-ONLY",
               "Human steering", "steer_id", "sub-task", "A-INTEGRATE",
-              "init_program_paths", "round-robin"):
+              "init_program_paths", "round-robin",
+              # context hygiene: the scout firewall + journal-as-memory re-orientation
+              "archive-scout", "context firewall", "not your conversation",
+              "journal first, memory never"):
         assert s in skill_flat, f"SKILL.md missing behavioral teaching: {s!r}"
 
     # ABSENT in PROSE — the killed jargon:
@@ -1629,7 +1632,7 @@ def test_skill_doc_teaches_run_loop_and_roles():
     assert "FRAMEWORK-AUDIT" in claude_flat and "ORCHESTRATOR" in claude_flat, "CLAUDE.md roles missing"
     assert "run_archive" in claude_flat and "prior run's archive" in claude_flat, "CLAUDE.md do-not-read missing"
     for s in ("steer", "STEERING-ONLY", "user_quote", "stop_evidence",
-              "init_program_paths", "VERIFIED FROM CODE ARTIFACTS"):
+              "init_program_paths", "VERIFIED FROM CODE ARTIFACTS", "archive-scout"):
         assert s in claude_flat, f"CLAUDE.md missing behavioral teaching: {s!r}"
     return None
 

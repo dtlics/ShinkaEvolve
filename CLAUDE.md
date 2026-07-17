@@ -21,10 +21,11 @@ before the first / after the last). You are not in the path of every mutation.
     steer, never on your own initiative). A technique you merely brainstormed is NOT discovery.
     Fire R1 on the WHOLE task or on a declared SUB-TASK — sub-tasks are FOUND in the archive by
     reading islands as structural families (same-island programs share a skeleton, so their
-    shared, load-bearing subroutines surface there), never brainstormed; either way the DR
-    prompt is ONE self-contained research task drafted in its own terms, with main-task context
-    added only when it helps — the `subtask` payload on `deep_research.py` is stub PROVENANCE,
-    never prompt plumbing.
+    shared, load-bearing subroutines surface there; delegate a heavy read to the read-only
+    `archive-scout` subagent — a context firewall, never a discovery route), never brainstormed;
+    either way the DR prompt is ONE self-contained research task drafted in its own terms, with
+    main-task context added only when it helps — the `subtask` payload on `deep_research.py` is
+    stub PROVENANCE, never prompt plumbing.
   - **Triage — trust and ground, never kill an idea by reading its name:** novel → its own
     island (`spawn_island.py`); similar-to-existing → combine into the closest program
     (`archive_record` `parent_id`=closest, no new island, the existing program kept — never a

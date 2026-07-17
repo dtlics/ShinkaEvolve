@@ -1,37 +1,73 @@
-# `gross_code_gauging` — end-to-end gauging-gadget design on the gross code (v2)
+# `gross_code_gauging` — end-to-end gauging-gadget design on the gross code (v4.1)
 
 ShinkaEvolve task: design the complete **gauging-measurement gadget** for the
 weight-12 logical X̄_α of the **[[144,12,12]] gross code** — the construction of
 **Williamson & Yoder, "Low-overhead fault-tolerant quantum computation by gauging
 logical operators"** ([arXiv:2410.02213](https://arxiv.org/abs/2410.02213),
 *Nature Physics* **22**, 598, 2026) — evaluated **end-to-end at circuit level**:
-the score is the measured error of the actual measurement protocol plus the
-ancilla overhead, not a distance proxy.
+feasibility is purely the measured LER of the actual measurement protocol
+staying within **1.1×** of the hand-crafted 41-element reference, made honest
+by **pricing** the probe-found fault tails Monte Carlo cannot see (not by
+gating on a distance target); the score is the ancilla saving plus a
+worst-case LER-dominance bonus. Spanning trees/forests (cycle rank 0 — no
+flux checks, no gauge structure; the known-trivial corner run gcg1 found)
+are **out of scope by construction**, so the goal is the **LER-vs-size
+Pareto between the Q ≈ 25 scope floor and Q = 41 (the hand-crafted
+reference)** — the genuinely open middle region.
 
-## Why v2 (what was wrong with v1)
+## Why v4 (how run gcg1 beat the v2/v3 evaluator)
 
-v1 evolved only *extra edges among the 12 fixed support vertices*, hard-gated on
-a **BP+OSD estimate of the deformed-code distance**, and scored pure qubit count.
-Three verified problems:
+v2/v3 replaced v1's gameable distance gate with a **pure end-to-end LER gate**
+(margin vs. the calibrated paper-reference curve at three noise points, plus a
+low-p-weighted "steepness" bonus and a d_eff diagnostic). Run `gcg1` ($30,
+40 windows) found the hole in two windows and spent the rest of the budget
+refining it: the champion was the **provably minimal 11-edge spanning tree**
+(Q = 23, R = 5), which **passed the reliability gate with +0.57 decades of
+margin and showed d_eff ≈ 10**. The ending document then *proved* Q = 23
+optimal and declared victory.
 
-1. **The gate was an upper bound the paper never trusted.** The paper used BP+OSD
-   only as a fast filter on random-edge trials and then *proved* d\*=12 with
-   integer programming (App. B). v1 made the filter itself the gate, and its own
-   docs admit the resulting reward-hack pressure (a drafted seed over-reported
-   12 when the true distance was ≤10).
-2. **Even exact distance is the wrong figure of merit for a measurement gadget.**
-   The gross code's own depth-7 schedule has circuit-level distance ≤ 10 < d = 12
-   (Bravyi et al., Nature 2024, Table 1); schedule choice alone moves circuit-level
-   LER by 7–8× (ASC, arXiv:2603.21499) and more merge rounds — *higher* timelike
-   distance — can *worsen* the total error (Cross–He–Rall–Yoder, arXiv:2407.18393
-   §4.2: R=7 beats R=d=12 at p=10⁻³).
-3. **The design space excluded the paper's own ideas.** Under distance+qubits,
-   dummy vertices and thickening are strictly losing moves (they cost qubits and
-   buy only check weight/degree, which v1 declared "not your job"). Evolution
-   could never rediscover the paper's stacked/cellulated designs. End-to-end
-   error is exactly the quantity those designs improve.
+The postmortem (verified by re-attacking the champion):
 
-## The design space (the paper's, in full)
+1. **At simulable p (1.4–2.8×10⁻³) the protocol error is bulk-dominated.**
+   Fewer elements ⇒ fewer fault locations ⇒ the tree beats the reference *on
+   level* across the entire measured curve. The d_eff fit measures the bulk
+   slope, not the tail.
+2. **The tree's protection had actually collapsed.** Its weakest cut violates
+   the paper's expansion desideratum maximally (WY Lemma 2 guarantees only
+   d\* ≥ min(h(G),1)·d = 2 at h = 1/6); the v4 attack finds a **weight-7..8
+   dressed X-logical** crossing a single tree edge. And R = 5 caps the
+   measurement outcome's timelike fault distance at 5 (Cross et al.
+   [arXiv:2407.18393](https://arxiv.org/abs/2407.18393) Lemma 9:
+   measurement fault distance = min(R, ...); a chain of R measurement flips
+   on one A_v is undetectable).
+3. **A weight-5..8 fault set fires at ~p³..p⁴** — orders of magnitude below
+   the measurable LER at the benchmark rates. No affordable shot budget can
+   see it; only a fault-set search can. (This is the "hidden weight-6 logical"
+   failure mode the task design discussion predicted for LER-only fitness.)
+
+**v4.1's answer: keep LER as the only criterion, but price the invisible
+tail.** The probes (grounded in Cross et al. Lemmas 9–11) hunt each design's
+lightest fault sets; every found set of weight w adds its analytic
+first-order failure rate `N·C(w,⌈w/2⌉)·p^⌈w/2⌉` to the candidate's
+*effective* LER at each scored point — **only when the Monte Carlo could not
+have seen it** (visible sets are already inside the measured number). So
+"cheap because invisible" stops working, while "cheap because genuinely
+negligible at the benchmark rates" is allowed through — which is the run
+owner's stated criterion. A v4.0 draft instead hard-gated a fault-distance
+target d̂ ≥ 10; that walls off the whole 23–35-element region (and forces
+R ≥ 10), so it was demoted to an optional campaign mode (`GAUGE_DTARGET`).
+The spanning-tree corner itself is excluded by **scope** (cycle rank ≥ 1
+validity), not by punishment: a tuned tree is numerically defensible at the
+benchmark rates (measured: R=5 tree beats the reference 1.6× at the gate
+point, floor at p ≈ 8×10⁻⁶), but it is the degenerate no-flux limit the
+field has already explored and abandoned — there is no discovery in
+re-finding it. Every valid design's found fault sets go on the record: the
+feedback names each operator's support and the **crossover rate** below
+which the tails would dominate ("valid down to p ~ …"). Static graph
+proxies (Fiedler, sparsest-cut conductance) stay **out of the metrics**
+(they misled gcg1's inner loop into optimizing conductance *among trees*).
+
+## The design space (unchanged — the paper's, in full)
 
 `propose_gadget()` in the EVOLVE-BLOCK of [initial.py](initial.py) returns
 
@@ -46,150 +82,222 @@ Three verified problems:
   layer stacks** (Definition 3) — all reachable by evolution here.
 - **Edges** — one new data qubit each (init |0⟩); multigraph allowed (the
   double-gross example doubles an edge); no self-loops. ≤ 60 edges, ≤ 24 dummies.
-- **R ∈ [1,24]** — deformed-code syndrome rounds: the measurement outcome is
-  protected in time only by the R repeats of the A_v checks (fault distance
-  min(R, spatial)), while every extra round exposes all 12 logical qubits to
-  more noise. Genuinely nontrivial optimum (see Cross et al. above).
+- **R ∈ [1,24]** — deformed-code syndrome rounds. A chain of R measurement
+  flips on one A_v silently flips the outcome (Cross et al. Lemma 9): that
+  cost is *measured* when sampling can see it (small R) and *priced* when it
+  cannot (larger R), while every extra round adds exposure on all 12
+  logicals — a genuine optimum, near R ≈ 4–8 at these rates (Cross et al.
+  Fig. 10b found the measurement-vs-logical crossover near R=7 at p=10⁻³).
 
-The 18 matching edges (support pairs sharing a Z-check — the weight-1
-deformation motif) are **provided but not forced**: any connected graph is
-valid; the evaluator routes every Z-check by exact minimum-weight T-joins.
+Check weights and qubit degrees are **not capped** (the v4.0 draft capped
+them at 9/9): they are priced through the schedule — depth per phase *is*
+the Tanner max degree, and idle noise scales with depth — so a weight-13 hub
+check pays its own way in the measured error. The reference profile (7/7) is
+reported for orientation.
 
 ## What the evaluator does (all derived, never evolved)
 
 [evaluate.py](evaluate.py), faithful to the paper:
 
 1. **Deformed code**: A_v Gauss-law checks; original Z-checks routed by exact
-   min-weight T-joins (Def. 2's "minimum weight path" convention); flux checks
-   B_p on a minimum-weight cycle basis (Horton), reduced by the BB Z-check
-   redundancy exactly as in App. B. *Validation:* fed the paper's 22-edge graph,
-   this machinery reproduces the published gadget exactly — 12 A_v, **7 B_p
-   (five triangles + two squares)**, max check weight 7, max qubit degree 7,
-   41 added elements.
-2. **Schedule**: the canonical deterministic scheduler — an **exact minimum
-   edge coloring of the bipartite Tanner graph** (König's theorem, constructive
-   alternating-path algorithm; property-tested proper and Δ-optimal in
-   [test_coloring.py](test_coloring.py)). This is
-   literally the input the coloration circuit asks for (Tremblay–Delfosse–
-   Beverland arXiv:2109.14609, Algorithm 1: "a minimum edge coloration of
-   T_X"). Depth per phase **equals the deformed Tanner graph's max degree Δ,
-   exactly** — a pure invariant of the gadget, independent of construction
-   order (the previous greedy first-fit could exceed Δ and depended on check
-   iteration order, muddying in-loop ablations; it wasted 2 ticks/phase on the
-   reference: 8/8 vs the true 6/7). Scheduling is *evaluated* (depth→idle
-   noise, hook propagation), not evolved — schedule search is its own task
-   ([../bb_syndrome_sched/](../bb_syndrome_sched/)).
+   min-weight T-joins; flux checks B_p on a minimum-weight cycle basis
+   (Horton), reduced by the BB Z-check redundancy exactly as in App. B.
+   *Validation:* fed the paper's 22-edge graph, this machinery reproduces the
+   published gadget exactly — 12 A_v, **7 B_p**, max check weight 7, max qubit
+   degree 7, 41 added elements.
+2. **Schedule**: exact **minimum edge coloring of the bipartite Tanner graph**
+   (König; property-tested in [test_coloring.py](test_coloring.py)) — the
+   coloration-circuit input (Tremblay–Delfosse–Beverland arXiv:2109.14609).
+   Depth per phase **equals the deformed Tanner graph's max degree Δ exactly**.
+   Scheduling is *evaluated* (depth→idle noise), not evolved.
 3. **Protocol circuit** (stim), following Cross–He–Rall–Yoder §3.2 adapted to
-   gauging: ideal MPP brackets → 1 noisy base round → gauge-in (edge qubits
-   |0⟩) → R noisy deformed rounds → gauge-out (edge MZ) → 1 noisy base round →
-   ideal MPPs. First-round A_v outcomes are individually random (no detector —
-   App. F Lemma 3); their product × the initial ideal X̄_α MPP is the
-   **measurement observable**. B_p and deformed checks get gauge-in/out boundary
-   detectors; the ungauging byproduct enters the Z-logical observables as
-   edge-readout parities. Both circuits are noiseless-deterministic (self-checked
-   every eval).
-4. **Noise — a three-point curve, not a single rate**: uniform circuit-level
-   depolarizing sampled at **p ∈ {1.4, 2.0, 2.8}×10⁻³** (0.7×, 1×, 1.4× the
-   gate rate `GAUGE_PHYS_P`): DEPOLARIZE2 after each CNOT, measure/reset flips,
-   and per-phase aggregated idle noise (p/10 per idle tick) so **schedule depth
-   is priced**. The hard gate lives at the center point; the score bonus
-   averages the margin over the curve; and the fitted scaling exponent
-   **d_eff ≈ 2·Δlog₁₀(LER)/Δlog₁₀(p)** is reported — a gadget that passes at
-   one noise rate but has a flat curve (collapsed effective distance) is
-   visible and under-rewarded. This is the GeneCS-style multi-p evaluation
-   made quantitative.
-5. **Decode + sample**: BP+OSD-0 (stimbposd/ldpc; 12 BP iterations, `osd0`) via
-   one sinter fan-out over all six circuits on ~20 workers (per-point error
-   budgets `P_BUDGET = (40,1500),(45,2000),(30,800)` errors/shot-cap per
-   circuit; low-p and gate feed the score, high-p is diagnostic-only and
-   lightest; caps scaled down for oversized gadgets), fresh seed per eval.
-   Deliberately fast-but-weak (~5× faster than BP+LSD here at equal observed
-   accuracy): absolute LERs are not paper-comparable, but candidates and the
-   reference are decoded identically, so the relative gate is self-consistent
-   (same philosophy as `bb_syndrome_sched`'s `osd_order=3`). Two circuits: X-basis (measurement observable + preservation
-   of the 12 X̄ logicals) and Z-basis (preservation of the 11 Z̄ logicals that
-   commute with X̄_α, byproduct-corrected).
+   gauging: ideal MPP brackets → 1 noisy base round → gauge-in → R noisy
+   deformed rounds → gauge-out → 1 noisy base round → ideal MPPs. Both bases'
+   circuits are noiseless-deterministic (self-checked every eval).
+4. **Fault-set probes + tail pricing (NEW)**: the lightest fault sets come
+   from
+   - `R` — the timelike chain on the measurement outcome (exact; Lemma 9;
+     multiplicity n_av parallel chains);
+   - `dressed_X/Z` — a **BP+OSD dressed-logical attack** on the deformed
+     code's two CSS sides (the d_X(L\*S_X) / d_Z(...) of Cross et al.
+     Lemma 10; the same attack style WY used as their fast filter). 48
+     trials/witness alternating random column permutations, growing prior
+     jitter, edge-biased priors and BP/OSD depth (the
+     [arXiv:2603.22532](https://arxiv.org/abs/2603.22532) recipe + a
+     diversity schedule; 16 trials missed a weight-9 operator that 48 finds
+     on every seed); ~2–4 s per attack, counts the distinct minimum-weight
+     operators, and reports each found operator's support;
+   - `stim_X/Z` — `shortest_graphlike_error` + budgeted
+     `search_for_undetectable_logical_errors` (exploration caps (2,4),
+     ~0.1–1 s/circuit, measured) on the actual protocol circuits — catches
+     circuit-level sets the code-level attack cannot represent.
+   Each found set of weight w is **priced** into the effective LER at every
+   scored point — `N·C(w,⌈w/2⌉)·p^⌈w/2⌉`, skipped when the point's shot
+   budget would already have sampled it (≥5 expected occurrences) — and the
+   **tail-crossover p** ("valid down to p ~ …") is reported. All finds are
+   upper bounds: a miss under-prices a bad design (bounded by the tail's
+   true size at benchmark p, and re-attacked with a fresh seed every eval);
+   it never over-prices a good one.
+5. **Noise**: uniform circuit-level depolarizing (DEPOLARIZE2 after each
+   CNOT, measure/reset flips, per-phase aggregated idle noise — p/10 per
+   idle tick — so **schedule depth is priced**). The benchmark gate rate is
+   `GAUGE_PHYS_P` = 2×10⁻³; the certification tier also measures 0.7× and
+   1.4× that.
+6. **Decode + sample — v5 two-tier** (the QEC-tasks memo's structure,
+   adapted): the **loop samples the GATE point only** at
+   `LOOP_BUDGET = (60 errors, 1000 shots)` per circuit — one sinter fan-out
+   over the two gate circuits, BP+OSD-0 (12 BP iters, `osd0`), fresh seed
+   per eval, ~2–4 min. Gate-only is sound because the low-p side is carried
+   deterministically: fault-set tails *shrink* with p, so gate-point pricing
+   is conservative for every lower p. The **full three-point curves** (and
+   d_eff) are the certification tier — `calibrate.py --certify [--only …]`,
+   run by the orchestrator on elites between windows, where strict 1.1×
+   claims are established. A fully deterministic loop was tested and
+   **rejected on measurement**: the DEM expected-fault-count λ separates the
+   benchmark gadgets by only ±1.5% while their measured LERs differ by
+   ±0.10 decades — candidate quality here lives in *decodability*, which
+   only decoding samples can see (λ is reported as a diagnostic).
+   Absolute LERs are **not** paper-comparable (Bravyi et al. ran
+   min-sum/10k iterations/OSD-CS-7), but candidates and the reference are
+   decoded identically, so the relative comparison is self-consistent; the
+   methodology otherwise follows the IBM line (Cross et al. §3.2/§4.2
+   protocol shape, error-budget stopping, identical decoder both arms).
 
 ## Score
 
 ```
-Q          = edge qubits + A_v checks + B_p checks    (paper gadget: 22+12+7 = 41)
-overall(p) = 1 - (1 - p_X)(1 - p_Z)                   (measured, per curve point)
-margin(p)  = log10( 2 x LER_REFS[p] / overall(p) )    (headroom vs the calibrated
-                                                       paper-gadget curve, clamped
-                                                       at each point's resolution)
+Q          = edge qubits + A_v checks + B_p checks     (paper gadget: 22+12+7 = 41)
+eff        = overall(gate) + priced_tail(gate)         (tail pricing, step 4;
+                                                        conservative for all p below)
+margin     = log10( LER_REF(gate) / eff )              (TRUE headroom, resolution-clamped)
+allow      = log10(1.1) + 2·sqrt(σ² + σ_ref²)          (noise-aware allowance,
+                                                        ~0.15 decades at LOOP_BUDGET)
 
-crash / garbage return                    ->  -1000  (correct=False)
-invalid gadget (named reason)             ->  -100
-valid, margin(p_gate) < 0  (unreliable)   ->  -8 + margin(p_gate)                 (>= -30)
-valid, margin(p_gate) >= 0 (reliable)     ->  (41 - Q) + min(2, ½·margin(p_lo) + ½·margin(p_gate))
+FEASIBLE   := margin ≥ −allow   (tail-priced LER not DEMONSTRABLY worse
+                                 than 1.1× the reference at the gate point)
+
+crash / garbage return               →  −1000  (correct=False)
+invalid spec                         →  −100   (+ named reason)
+valid, infeasible                    →  −8 + (margin + allow)               (≥ −30)
+FEASIBLE                             →  (41 − Q) + 3·min(2, max(0, margin))
 ```
 
-Reproducing the paper's gadget scores ~0..+2; every element saved below 41
-while staying reliable is +1. The bonus is the **low-p-weighted** headroom
-(low + gate points, high-p dropped) — *not* a symmetric average: over a
-log-symmetric grid the mean of all three margins algebraically cancels the
-candidate's slope (a steep design's low-p gain is offset by its high-p loss),
-so it would reward only curve *level*. Weighting toward low p makes a flat
-curve — whose low-p error barely drops below the paper's, which does drop —
-score strictly lower at the same gate-point error, so real distance-like
-protection is what earns the bonus. Each point's margin is clamped at its
-candidate-independent resolution bound, so a zero-error (floored) point can't
-claim more headroom than its shot budget resolves, nor couple the score to
-circuit size. The hard gate uses only the well-budgeted center point (gate
-flips from sampling noise stay ~7σ away); the whole bonus is a bounded ±2
-tiebreaker under the integer element-count ladder. The frontier is the
-**smallest reliable gadget** — and "reliable" is measured on the real
-protocol, so check-weight-reducing structure (dummies, stacking) can now
-*pay for itself*.
+The reference scores ~0. Every element saved while staying feasible is +1.
+The LER bonus pays only for **true dominance** (matching the reference earns
+0; a third of a decade of improvement = one element; cap +6) — so genuinely
+better error can outweigh 1–2 elements of size, and the outcome is a
+defensible LER-vs-size Pareto front over Q ∈ [~25, 41].
+
+Why 1.1× needs the noise allowance: 1.1× is 0.041 decades, and the gate
+sampling std at the ~3-minute loop budget is ~0.06 decades. The in-loop gate
+therefore rejects only what is *demonstrably* beyond 1.1× at 2σ; the strict
+1.1× verdict and the full curves belong to the certification tier
+(`calibrate.py --certify`, run on elites between windows).
+`GAUGE_RATIO_LIMIT` moves the bar; `GAUGE_DTARGET` (default off) restores
+the v4.0 hard fault-distance gate for a distance-preserving campaign.
 
 ### Anti-gaming
 
-The candidate returns only the spec; circuit, observables, decoder and sampling
-are all evaluator-owned, so there is no oracle to over-report to. Sampling noise
-is held ~constant by error-budget collection (score std ≈ 0.434/√errors ≈ 0.03
-decades ≪ the 0.30-decade gate margin), with a fresh seed per eval. Shinka's
-fresh-process-per-candidate isolation must stay ON; sinter workers are fresh
-spawned processes that re-import stim from disk.
+The candidate returns only the spec; circuit, observables, decoder, sampling
+and probes are all evaluator-owned. Pricing closes the LER-only blind spot
+(a found light fault set raises the candidate's effective LER by its
+analytic failure rate), while probe misses only under-price a tail —
+bounded by its true size at the benchmark rates — and fresh per-eval probe
+seeds re-attack every lineage each generation. Sampling noise is bounded by
+error-budget collection with a noise-aware feasibility allowance. Shinka's
+fresh-process-per-candidate isolation must stay ON.
 
-## Calibration (run owner)
+## GeneCS baseline (apple-to-apple)
+
+[genecs.py](genecs.py) reimplements the **GeneCS** ancilla-graph synthesis
+(Zhou, Javadi-Abhari, Li, [arXiv:2605.21746](https://arxiv.org/abs/2605.21746),
+Algorithm 1: deficit-weighted random edge addition over the path-matching
+graph — here exactly the 18-edge matching motif — with λ₂ recomputed after
+every edge and acceptance at λ₂ ≥ 2β, then random perfect-matching layers;
+restarts keep the smallest graph) so its output can be scored by **this**
+evaluator with the same schedule, protocol, decoder and noise. Measured β →
+size frontier: β=0.35 → Q=35, **β=0.46 → Q=37** (the spectral level the
+paper's own 22-edge gadget certifies), β=0.65 → Q=41 (= the reference size).
+
+**Reverse-engineering their unpublished config** (`genecs.py
+--fit-published`): in mono-layer gauging accounting, generic check count =
+E+1, so their published gross Full-Opt outcome (24 ancilla qubits, 25
+checks, degrees 7/8) pins **E = 24 exactly** — no thickening fits (a second
+layer would double the qubit count). The scan finds E=24 reproduced by
+**β ∈ [0.9, 1.0]** on every seed, with λ₂ landing at exactly **2.000** at
+β=0.9–0.95 — i.e. their effective gross-code acceptance is **λ₂ ≥ 2
+(certified Cheeger ≥ 1, the full WY theory bar, mono-layer)**, with raw
+cycle-basis check accounting (a BB-code-aware count gives 21 checks for the
+same graph, Q = 45 elements in this task's accounting — larger than WY's
+41). Their >85% headline reductions are vs. generic pipelines (Gauge
+239/240, CKBB 348/342). Still unidentifiable from their text: scheduler,
+decoder, protocol (no absolute LER numbers published); `calibrate.py
+--ablate` brackets that — rankings are scheduler-robust, absolute LER moves
+~1.5× with schedule depth.
+
+GeneCS contains **no scheduling or protocol treatment** and gates on a
+*spectral certificate*; this task measures and prices instead — and the
+certificate turns out loose in **both** directions: the β=0.46 graph
+certifies only Cheeger·d ≈ 5.6 yet measures dressed distance 10, while the
+β=0.35 graph certifies 4.2 and actually hides a **weight-9 dressed
+X-logical** (the attack finds it on every seed). Under v4.1 pricing both
+are feasible (a weight-9 tail prices at ~10⁻¹¹ at the gate point) — the
+weight-9 operator simply goes on β=0.35's record.
+
+## Calibration & comparison (run owner)
 
 `LER_REFS` in evaluate.py is the measured overall-error **curve** of the paper
-reference gadget (18 matching + 4 expansion edges, R=12) at the three P_GRID
-points under this exact harness (BP+OSD-0, König schedule). Recalibrate (env
-`GAUGE_LER_REF_LO/GATE/HI`, or edit the constants) whenever `GAUGE_PHYS_P`, the
-noise model, the scheduler, the decoder or the protocol shape changes:
+reference gadget under this exact harness. Recalibrate whenever `GAUGE_PHYS_P`,
+the noise model, the scheduler, the decoder or the protocol shape changes
+(v3 → v4 changed none of these, so the v3 calibration carries over):
 
 ```bash
-python tasks/gross_code_gauging/calibrate.py     # prints the three-point curve
+python tasks/gross_code_gauging/calibrate.py            # LER_REFS + reference d̂
+python tasks/gross_code_gauging/calibrate.py --compare  # score the benchmark set
 ```
 
-The evaluator **ships calibrated** (the three `LER_REFS` constants are baked
-from a run of `calibrate.py`); the boot guard in `main()` refuses to run and
-`aggregate_fn` scores every candidate −1000 only if the constants are ever
-reset to the `__CAL_*__` sentinels. The pure-structure scheduler is checked by
-`test_coloring.py` (`python tasks/gross_code_gauging/test_coloring.py`: 400
-random colorings verified proper + Δ-optimal, and `preview_gadget`'s structural
-fields verified equal to the evaluator's on the reference and matching-only
-gadgets).
+`--compare` runs the full v4.1 pipeline over {paper-41, gcg1 tree (R=5 and
+R=12), matching-18, GeneCS β=0.46 and β=0.35, seed} and prints the score
+table (size, lightest found fault set, tail price, crossover p, margins) —
+the regression test for any scoring retune. Measured (budget-scale 0.8,
+2026-07-16):
+
+```
+gadget               score   Q   R  w_min  tail@gate  cross_p   m_lo  m_gate  LER_gate
+paper-41 (R=12)       0.00  41  12   12    1.4e-11    none     -0.13  -0.02   5.83e-02
+gcg1-tree (R=5)      18.17  23   5    5    9.6e-07    8e-06    +0.06  +0.20   3.54e-02
+gcg1-tree (R=12)     18.00  23  12    7    5.7e-10    none     -0.07  -0.09   6.88e-02
+matching-18 (R=12)    8.00  33  12    8    2.2e-09    none     -0.11  -0.02   5.83e-02
+genecs b=.46 (Q=37)   4.00  37  12   12    1.4e-11    none     -0.06  +0.08   4.66e-02
+genecs b=.35 (Q=35)   6.00  35  12    9    9.4e-12    none     -0.01  +0.08   4.61e-02
+seed (Q=45)          -3.99  45  12   12    1.5e-11    none      0.00   0.00   5.53e-02
+```
+
+(Measured before the tree scope-exclusion landed — the tree rows are kept
+as the diagnostic that motivated it: a tuned tree wins the benchmark
+numerically, floor at p ≈ 8×10⁻⁶, which is exactly the known-trivial result
+the scope rule now removes from the search. Under the current evaluator the
+two tree rows score −100 INVALID; everything else is unchanged.) The open
+question for evolution is the Q ∈ [25, 33] region: whether cycle-bearing
+structure can approach the tree-level curves, and whether any Q < 33 design
+earns a real dominance bonus. Structural checks:
+`python tasks/gross_code_gauging/test_coloring.py` (König coloring proper +
+Δ-optimal, preview ↔ evaluator consistency, protocol determinism, probe
+regression on the known gadgets).
 
 The paper's 4 expansion edges in label space: `(2,9) (2,4) (9,11) (10,11)`
-(= (x²,x⁵y³), (x²,x⁶), (x⁵y³,x¹¹y³), (x⁷y³,x¹¹y³), Eq. 5). These are the
-*reference*, not a proven optimum — in either direction: GeneCS
-([arXiv:2605.21746](https://arxiv.org/abs/2605.21746)) compiles a comparable
-gross-code gadget at 24 ancilla qubits/25 checks with LER "closely matching" its
-gauging baseline, and nothing pins R=12 or a flat dummy-free graph as optimal.
+(= (x²,x⁵y³), (x²,x⁶), (x⁵y³,x¹¹y³), (x⁷y³,x¹¹y³), Eq. 5).
 
 ## The seed
 
 18 matching edges + 6 sparsest-cut-greedy expansion edges, no dummies, R=12:
-Q=45 (score ≈ −4 + margin bonus) — a reliably-measuring flat design with obvious
-pruning headroom (the reference reaches Q=41 with 4 expansion edges). Directions
-the seed does not explore: pruning/replacing matching edges, dummy-vertex
-structure (stars/layers/cellulation), round-count tuning, parallel edges.
-`preview_gadget()` (fixed tool in initial.py) gives a millisecond structural
-preview — element count, B_p count after redundancy reduction, check weights,
-schedule depths — so evolution can screen ideas before paying for a simulation.
+Q=45, feasible (score ≈ −4 + bonus) — a reliably-measuring flat design with
+proven headroom below it (reference Q=41; GeneCS-style Q=37/Q=35; spanning
+trees at Q=23 can be feasible at tuned R — the open question is what each
+element buys in total error across that range). Directions the seed does
+not explore: pruning/replacing matching edges, dummy-vertex structure
+(stars/layers/cellulation), R tuning, parallel edges. `preview_gadget()`
+gives a millisecond structural preview.
 
 ## How to run
 
@@ -204,21 +312,17 @@ python tasks/gross_code_gauging/evaluate.py \
 ```
 
 Expected: `correct=True`, `valid=1`, `elements=45`, `rounds=12`,
-`combined_score ≈ -3.7` (Q=45 → −4 elements + ~0.30 bonus), plus the
-structural fields (exact depths, weights, cut, Fiedler) and the measured noise
-curve (`ler_lo`/`overall_ler`/`ler_hi`, per-point margins, `d_eff_est`≈9). Depths
-are `depth_x=6`, `depth_z=7` (the exact Tanner max degrees). Runtime ~9–11 min
-(one sinter fan-out over 6 circuits on ~20 workers; BP+OSD-0 on ~90k-mechanism
-DEMs is the cost; error-budget sampling means worse candidates finish faster;
-worst case ~14 min at the shot caps). (If the `LER_REFS` constants have been
-reset to sentinels, the run aborts with an "UNCALIBRATED" message — run
-`calibrate.py` first; see Calibration.)
+`fault_dist_est=12`, `tail_gate≈0`, `tail_crossover_p=None`,
+`combined_score ≈ -4 + bonus` (measured: −3.78), `margin_gate ≈ 0±0.1`,
+`lam_bulk ≈ 77.1`, depths `depth_x=6`, `depth_z=7`. Runtime **~3–5 min**
+(v5 loop: probes ~10–30 s + gate-point sampling). Set the harness
+`eval_time >= 00:07:00`. Full curves: `calibrate.py --certify`.
 
 ### Full evolution (as the orchestrator)
 
 Author a run config (copy `configs/orchestrator_run.default.json`), point
 `task.eval_program_path` / `task.init_program_path` at this task's files, set
-the Azure `evo.llm_models` + `budget_usd`, and `eval_time >= 00:16:00`, then:
+the Azure `evo.llm_models` + `budget_usd`, and `eval_time >= 00:07:00`, then:
 
 ```bash
 python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
@@ -226,32 +330,46 @@ python orchestrator/harness/run_window.py --config <run>/run.json --until-decisi
 
 ## Deps
 
-`numpy`, `stim`, `sinter`, `stimbposd`, `ldpc`, all already in the `shinka`
-conda env. No new installs.
+`numpy`, `scipy`, `stim`, `sinter`, `stimbposd`, `ldpc`, all already in the
+`shinka` conda env. No new installs.
 
 ## Files
 
 | File | Role |
 |---|---|
-| [initial.py](initial.py) | Fixed problem data + graph/preview tools + EVOLVE-BLOCK (matching + greedy seed). |
-| [evaluate.py](evaluate.py) | Deformed-code builder, König scheduler, protocol circuits, BP+OSD-0/sinter multi-p sampling, scorer. |
-| [calibrate.py](calibrate.py) | Re-measures the `LER_REFS` curve on the paper reference gadget under the current harness. |
-| [test_coloring.py](test_coloring.py) | Property test: König coloring proper+Δ-optimal, preview ↔ evaluator consistency, protocol determinism. |
+| [initial.py](initial.py) | Fixed problem data + graph/preview tools + EVOLVE-BLOCK (matching + greedy seed, Q=45). |
+| [evaluate.py](evaluate.py) | Deformed-code builder, König scheduler, protocol circuits, fault-set probes + tail pricing, BP+OSD-0/sinter multi-p sampling, scorer. |
+| [genecs.py](genecs.py) | GeneCS-style (arXiv:2605.21746 Alg. 1) reimplementation: baseline synthesizer + `--fit-published` (reverse-engineer their unpublished β from the published gross-code outcome). |
+| [calibrate.py](calibrate.py) | Re-measures `LER_REFS` + reference probes; `--compare` scores the benchmark set through the in-loop view; `--certify` measures full three-point curves (the certification tier for elites); `--ablate` runs the scheduler-sensitivity study (König vs. greedy first-fit). |
+| [test_coloring.py](test_coloring.py) | Property tests: coloring, preview consistency, determinism, probe/pricing regression, scope rule. |
 
 ## Sources the redesign is grounded in
 
-- Williamson & Yoder, arXiv:2410.02213 (construction, dummy vertices Remark 2,
-  thickening Def. 3, FT protocol Thm 2 / App. F, gross example App. B).
-- Cross, He, Rall, Yoder, arXiv:2407.18393 (merge/split protocol shape, boundary
-  detectors, R<d finding, fault-distance = min(R, spatial)).
+- Williamson & Yoder, arXiv:2410.02213 (construction; Theorem 2 desiderata —
+  incl. sparsity and Cheeger h(G) ≥ 1; Lemma 2: d\* ≥ min(h(G),1)·d; the gross
+  example: 18 CKBB edges + 4 expansion edges → 22, d\*=12 certified by BP+OSD
+  screening + integer programming).
+- Cross, He, Rall, Yoder, arXiv:2407.18393 (merge/split protocol shape;
+  Definition 7 + Lemmas 9–10: measurement fault distance = min(R, d_Z(·)) with
+  the Z-side automatic ≥ d, logical fault distance = merged-code X-distance —
+  exactly what the v4.1 attack estimates; Theorem 11: R ≥ d suffices; §4.2:
+  merged circuits preserve circuit-level distance 10, measurement-vs-logical
+  error crossover near R=7 at p=1e-3 — the R-region v4.1's pricing keeps
+  open, charging the timelike chain its analytic rate).
+- Bravyi et al., Nature 627:778 (2024) (BB codes; d_circ ≤ 10 for the gross
+  code's depth-7 schedules; decoder anchor: min-sum BP 10⁴ iters + OSD-CS-7,
+  ≥100 errors/point, p ≥ 10⁻³ simulated).
 - Tremblay, Delfosse, Beverland, arXiv:2109.14609 (coloration circuit).
-- Bravyi et al., Nature 627:778 (2024) (BB codes; d_circ ≤ 10 for the gross code
-  under the depth-7 schedule).
-- Zhou, Javadi-Abhari, Li, arXiv:2605.21746 (GeneCS: expansion/congestion/degree
-  balance as the spatial objective set; 24-qubit gross-code gadget scale).
-  N.B. GeneCS itself contains **no scheduling or protocol treatment** — its LER
-  check is a static deformed-code simulation; the schedule-sensitivity evidence
-  is ASC (arXiv:2603.21499) / AlphaSyndrome (arXiv:2601.12509).
+- Webster, Jacob, Higgott, arXiv:2603.22532 (distance-finding benchmark; the
+  BP-OSD attack recipe — random column permutations across trials — and the
+  UEStim/GEStim stim-search wrappers the v4 probes follow).
+- Zhou, Javadi-Abhari, Li, arXiv:2605.21746 (GeneCS: Algorithm 1 expander
+  conditioning, λ₂ ≥ 2β acceptance, congestion machinery; gross-code Full-Opt
+  24 qubits + 25 checks; no scheduling/protocol treatment — its LER check is
+  a static deformed-code simulation).
+- ASC (arXiv:2603.21499) / AlphaSyndrome (arXiv:2601.12509): schedule choice
+  moves circuit-level LER by ~7–8× — why the schedule is held fixed (König)
+  for every candidate rather than co-evolved here.
 
 ## Project context
 

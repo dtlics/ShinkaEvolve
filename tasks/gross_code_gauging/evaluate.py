@@ -1,5 +1,5 @@
 """ShinkaEvolve EVALUATOR — END-TO-END gauging measurement of the gross-code
-logical X_alpha (v2, full-design-space, circuit-level).
+logical X_alpha (v4: end-to-end LER + protocol fault-distance probe).
 
 The candidate designs the complete GAUGING GADGET of Williamson & Yoder,
 "Low-overhead fault-tolerant quantum computation by gauging logical operators"
@@ -18,7 +18,8 @@ X_alpha of the [[144,12,12]] gross code:
     (the paper's double-gross example uses a doubled edge); self-loops not.
   * R = number of deformed-code syndrome-extraction rounds (the time axis;
     paper Thm 2 uses d=12; Cross et al. arXiv:2407.18393 found R=7 < d optimal
-    at p=1e-3 — the timelike/spacelike tradeoff is REAL and is measured here).
+    at p=1e-3, but note the measurement outcome's fault distance is capped at
+    R — see WHY v4 below).
 
 Everything else is derived DETERMINISTICALLY here (never evolved):
   * A_v Gauss-law checks; original Z-checks routed by exact minimum-weight
@@ -48,20 +49,61 @@ Everything else is derived DETERMINISTICALLY here (never evolved):
     priced), BP+OSD-0 decoding (stimbposd/ldpc; see BP_ITERS/OSD_ORDER note),
     all six circuits sampled in one parallel sinter fan-out.
 
-WHY END-TO-END (v1 postmortem). v1 gated on a BP+OSD *estimate* of the
-deformed-code distance — an upper bound the paper itself used only as a fast
-filter before proving distance with integer programming — and scored pure
-qubit count. That is doubly misleading: the estimate can over-report (v1's
-docs admit the reward-hack pressure), and even EXACT distance is an
-insufficient proxy for a measurement gadget's real quality — e.g. the gross
-code's own depth-7 schedule has circuit distance <= 10 < d=12 (Bravyi et al.
-Nature 2024, Table 1), and more merge rounds (higher timelike distance) can
-WORSEN total error (Cross et al. Sec. 4.2). Worse, a distance+qubits score
-makes the paper's dummy-vertex/thickening design axes strictly losing moves
-(they cost qubits and buy only check-weight/depth, which v1 declared "not
-your job") — evolution could never rediscover them. Here the score is the
-measured end-to-end error of the actual measurement protocol, which is what
-those design axes exist to improve, plus the ancilla overhead.
+WHY v4 (the gcg1 postmortem — how the v2/v3 evaluator was beaten). v1 gated
+on a BP+OSD distance estimate and was gameable; v2/v3 swung fully to measured
+end-to-end LER and was beaten from the OTHER side: run gcg1 converged to an
+11-edge SPANNING TREE (Q=23, R=5) that PASSED the reliability gate with
++0.57 decades of margin. The mechanism: at the simulable noise rates
+(p ~ 1.4-2.8e-3) the protocol error is dominated by the bulk fault-location
+count, so a smaller gadget WINS ON LEVEL — while its collapsed protection is
+invisible. A tree violates the paper's expansion desideratum maximally
+(balanced single-edge cut -> Cheeger h = 1/6 -> WY Lemma 2 guarantees only
+d* >= 2; the measured dressed X-logical of that tree has weight 8 < 12), and
+R=5 caps the measurement outcome's timelike fault distance at 5 (a chain of 5
+A_v measurement flips is undetectable; Cross et al. Lemma 9: measurement
+fault distance = min(R, ...)). A weight-5..8 tail fires at ~p^3..p^4 — orders
+of magnitude below the measurable LER at the benchmark rates, and the
+three-point d_eff fit measures the BULK slope, not the tail. Monte Carlo
+cannot see this hole at any affordable budget; only a fault-set search can.
+
+v4.1 therefore keeps end-to-end LER as the ONLY feasibility criterion but
+makes the comparison honest by PRICING the invisible tail instead of gating
+on a distance target (the v4.0 draft hard-gated d_hat >= 10, which walls off
+the whole 23..35-element region and forces R >= 10; the run owner's goal is
+explicitly to explore that region, accepting any design whose TOTAL error
+stays within RATIO_LIMIT of the reference at the benchmark rates):
+  (a) the probes (all upper-bound finders, fresh random seed per eval):
+      * R — a chain of R measurement flips on one A_v silently flips the
+        outcome (Cross et al. Lemma 9), n_av parallel chains;
+      * a BP+OSD dressed-logical attack on the deformed code's X and Z sides
+        (the quantities of Cross et al. Lemma 10; WY's own fast filter;
+        arXiv:2603.22532 recipe — random column permutations + prior jitter
+        across trials — plus a diversity schedule), which also counts the
+        DISTINCT minimum-weight operators it finds;
+      * budgeted stim searches (shortest_graphlike_error +
+        search_for_undetectable_logical_errors at graphlike caps) on the
+        actual protocol circuits.
+  (b) TAIL PRICING: each found fault set of weight w contributes its
+      first-order failure probability N * C(w, ceil(w/2)) * p^ceil(w/2) to
+      the candidate's EFFECTIVE LER at each scored point — but only when the
+      Monte Carlo could NOT have seen it (expected occurrences below
+      TAIL_MIN_EXPECT in the shot budget; visible sets are already inside
+      the measured number). A healthy design pays ~0; a near-tree at R=5
+      pays ~1e-6 at the gate point (negligible — allowed through with its
+      tail on the record); an R=1 design pays its silent outcome-flip rate
+      ~n_av*p (and MC measures it too).
+  (c) the reported tail_crossover_p diagnostic: the physical rate below
+      which the found tails overtake the reference's extrapolated curve —
+      i.e. how far down in p the candidate's advantage claim survives
+      ("valid down to p ~ ..."), the same role d_circ plays in Bravyi et
+      al.'s own extrapolation formula p_L = p^(d_circ/2)*exp(...).
+  SCOPE: spanning trees/forests (cycle rank 0 — no flux checks, no gauge
+  structure; the corner the field abandoned and run gcg1 trivially found)
+  are INVALID by the run owner's decision; the cheapest valid cycle is a
+  doubled edge, so the size floor is Q ~ 25. Optional: set GAUGE_DTARGET > 0
+  to restore a hard fault-distance gate for a distance-preserving campaign
+  (10 = the gross code's own circuit-level ceiling, Bravyi et al. Nature
+  2024; Cross et al. Sec 4.2).
 
 ================  SCORING (Shinka MAXIMISES combined_score)  ===================
   Q  = total added elements = edge qubits + A_v checks + B_p checks
@@ -71,62 +113,93 @@ those design axes exist to improve, plus the ancilla overhead.
        measurement-outcome observable + preservation of the 12 X logicals;
        Z basis: preservation of the 11 Z logicals that commute with X_alpha,
        byproduct-corrected), sampled at each p in P_GRID.
-  margin(p)  = log10(GATE_FACTOR x LER_REFS[p] / overall(p)) — reliability
-       headroom vs the calibrated PAPER-gadget curve at the same p, clamped at
-       each point's resolution bound (a zero-error point cannot claim more than
+  eff(p)     = overall(p) + tail(p)            [tail pricing, see above]
+  margin(p)  = log10(LER_REFS[p] / eff(p)) — TRUE headroom vs the calibrated
+       PAPER-gadget curve at the same p (no free factor), clamped at each
+       point's resolution bound (a zero-error point cannot claim more than
        its shot budget resolves, size-independently).
-  The HARD GATE is margin(P_GATE) >= 0 (center point only, so the gate's
-       sampling noise is the well-budgeted point's). The BONUS is the LOW-p-
-       WEIGHTED headroom 0.5*margin(P_LO) + 0.5*margin(P_GATE) — NOT a
-       symmetric average: over a log-symmetric grid the mean of all three
-       margins algebraically cancels the candidate's slope, rewarding only
-       curve LEVEL. Weighting toward low p makes a flat curve (collapsed
-       effective distance: low-p error barely drops below the paper's, which
-       does drop) score strictly lower than a steep one at the same gate-point
-       error. d_eff ~ 2*dlog10(overall)/dlog10(p) is reported (diagnostic).
+
+  FEASIBLE := at the GATE point (v5: the loop samples ONLY the gate point),
+       margin >= -(log10(RATIO_LIMIT) + NOISE_Z * sqrt(sigma^2 + SIGMA_REF^2))
+       i.e. the tail-priced error is not DEMONSTRABLY worse than
+       RATIO_LIMIT (default 1.1x) times the reference. Gate-only is sound
+       because the two low-p roles the old curve served are now covered
+       deterministically: the TAIL below the gate is bounded by the pricing
+       (a fault-set tail SHRINKS with p, so gate-point pricing is
+       conservative for every lower p), and the curve/d_eff moved to the
+       certification tier (calibrate.py --certify, full three-point curves
+       at real budgets). The noise allowance exists because 0.041 decades
+       (1.1x) is ~1 sigma at the loop budget; the strict 1.1x verdict
+       belongs to certification.
+  The LER bonus rewards only TRUE dominance: max(0, margin_gate) — a design
+       that merely matches the reference earns no bonus.
+  (v5 design note, MEASURED: a fully deterministic inner loop was tested
+       and rejected — the DEM expected-fault-count lambda separates the
+       benchmark gadgets by only +-1.5% while their measured LERs differ by
+       +-0.10 decades; candidate quality here lives in DECODABILITY, which
+       only decoding samples can see. lambda is reported as a diagnostic.)
 
   candidate crashes / returns garbage          -> -1000   (correct=False)
   parseable but invalid gadget (SpecError)     ->  -100   (+ named reason)
-  valid, unreliable (gate margin < 0)          ->  -8 + margin(P_GATE)
+  valid but INFEASIBLE                         ->  -8
+                                                   + min(0, margin_gate+allow_gate)
+                                                   + min(0, margin_lo+allow_lo)
                                                    (clamped to >= -30; smooth
-                                                    gradient toward the gate)
-  valid, reliable  (gate margin >= 0)          ->  (Q_REF - Q)
-                                                   + min(2.0, 0.5*margin(P_LO)
-                                                              + 0.5*margin(P_GATE))
-       Q_REF = 41. So: reproduce the paper gadget ->  ~0..+2; every element
-       saved below the paper is +1; the capped low-p-weighted bonus rewards
-       reliability headroom and good SCALING but can never buy more than 2
-       elements. A gadget that is smaller AND still reliable outranks
-       everything else.
+                                                    gradient toward the bar;
+                                                    with GAUGE_DTARGET set, an
+                                                    unprotected design also
+                                                    pays 1.5/unit shortfall)
+  FEASIBLE                                     ->  (Q_REF - Q)
+                                                   + 3.0 * min(2.0, max(0,
+                                                     min(margin_lo, margin_gate)))
+       Q_REF = 41. Reproducing the paper gadget scores ~0; every element saved
+       below the paper while staying FEASIBLE is +1; the worst-case LER bonus
+       (0.33 decades of true dominance = +1 element, cap +6) is how end-to-end
+       error tie-breaks and can outweigh 1-2 elements of size. The frontier is
+       the SMALLEST gadget whose tail-priced curve stays within RATIO_LIMIT of
+       the reference — with every light fault set it carries priced and
+       reported, so the result is a defensible LER-vs-size Pareto front over
+       Q in [~25, 41], not a sampling artifact.
 
 ================  ANTI-GAMING  ================================================
 The candidate returns only the gadget spec. The code, the deformation, the
-schedule, the circuit, the observables, the decoder and the sampling all live
-here. The score's only measured quantity is the stim-sampled logical error of
-an evaluator-built circuit — there is no oracle to over-report to (v1's
-failure mode). Sampling noise is bounded by per-point error-budget collection
-(sinter max_errors) with a fresh seed per eval, so a candidate cannot lock
-onto a lucky noise realization; the hard gate's margin (GATE_FACTOR=2 -> 0.30
-decades) is ~7x the gate point's sampling std at the default budgets, and the
-low-p point enters only the (capped, 0.5-weighted) bonus — the whole bonus is
-a bounded tiebreaker (max +2) under the integer element-count ladder, so its
-residual noise (~0.03 decades) cannot flip the size ranking. Fresh-process-
-per-candidate isolation (the Shinka harness default)
+schedule, the circuit, the observables, the decoder, the sampling AND the
+fault-set probes all live here. The score's measured quantities are the
+stim-sampled logical error of an evaluator-built circuit and the analytic
+price of fault sets the probes actually FIND — there is no oracle to
+over-report to (v1's failure mode), and the LER-only blind spot (the gcg1
+tree) is closed by pricing: a found light set raises the candidate's
+effective LER by its first-order failure rate, so "cheap because invisible"
+stops working while "cheap because genuinely negligible at the benchmark
+rates" is allowed through — which is the run owner's stated criterion. The
+probes are upper-bound finders: a miss under-prices the tail (never
+over-prices a good design), its benefit is bounded by the tail's true size
+at the benchmark p, and fresh per-eval probe seeds re-attack every lineage
+each generation. Sampling noise is bounded by per-point error-budget
+collection (sinter max_errors) with a fresh seed per eval; the feasibility
+allowance is explicitly noise-aware (reject only when demonstrably beyond
+RATIO_LIMIT at NOISE_Z sigma), and the worst-case LER bonus is bounded
+(max +6 = 2 decades of TRUE dominance) under the integer element-count
+ladder. Fresh-process-per-candidate isolation (the Shinka harness default)
 must stay ON; sinter workers are fresh spawned processes that re-import this
 module and stim from disk, so a candidate monkey-patching module globals in
 the eval process does not reach the samplers/decoders. Do not reuse an eval
 process across candidates.
 
-================  RUNTIME (24-core Windows, shinka env, measured)  =============
-  build + structural checks + 6 circuits      ~20 s
-  sinter sampling, 6 circuits, 20 workers     ~9-11 min for reference-like
-       gadgets (BP+OSD-0 is ~1.5-2 core-s/shot on these ~90k-mechanism DEMs, so
-       shots drive the cost; per-point error budgets mean worse candidates
-       finish sooner, excellent ones run to the shot caps)
-  worst case bounded by the mechanism-scaled shot caps: ~14 min. Set the
-  harness eval_time generously (>= 00:16:00). Shrink P_BUDGET to trade score
-  noise for throughput (the steep-reference slope signal tolerates it).
-Env overrides: GAUGE_PHYS_P, GAUGE_WORKERS, GAUGE_LER_REF_LO/GATE/HI.
+================  RUNTIME (24-core Windows, shinka env; v5 two-tier)  ==========
+  build + structural checks + 2 gate circuits ~10 s
+  fault-set probes (code attack + stim)       ~5-30 s
+  sinter sampling, GATE point only, 2 circuits at LOOP_BUDGET
+                                              ~2-4 min
+  total ~3-5 min per candidate (vs ~10-14 min for the old three-point loop —
+  the QEC-tasks memo's two-tier advice, adapted: the deterministic
+  probes/pricing carry the low-p side, the reduced gate-point Monte Carlo
+  carries the decodability signal a deterministic loop provably lacks here,
+  and the full curves live in the certification tier the ORCHESTRATOR runs
+  between windows on elites: calibrate.py --certify [--only ...]).
+  Set the harness eval_time >= 00:07:00.
+Env overrides: GAUGE_PHYS_P, GAUGE_WORKERS, GAUGE_LER_REF_LO/GATE/HI,
+GAUGE_RATIO_LIMIT (default 1.1), GAUGE_DTARGET (default 0 = pricing only).
 """
 
 from __future__ import annotations
@@ -148,10 +221,13 @@ from shinka.core import run_shinka_eval
 # module is loaded in this process (see ANTI-GAMING above).
 import sinter as _sinter_mod
 import stimbposd as _stimbposd_mod
+import scipy.sparse as _scipy_sparse
+from ldpc import BpOsdDecoder as _LDPC_BPOSD
 _SINTER_COLLECT = _sinter_mod.collect
 _SINTER_TASK = _sinter_mod.Task
 _SINTER_OPTIONS = _sinter_mod.CollectionOptions
 _SINTER_DEC_CLS = _stimbposd_mod.SinterDecoder_BPOSD
+_CSR = _scipy_sparse.csr_matrix
 
 # ----------------------------------------------------------------------
 # Benchmark / scoring constants
@@ -177,22 +253,65 @@ OSD_ORDER   = 0            # fast-but-weak (~5x faster than BP+LSD here at equal
                            # gadget are decoded identically, so the relative
                            # gate is self-consistent (same philosophy as
                            # bb_syndrome_sched's osd_order=3 choice).
-# Per-point sampling budgets (max_errors, max_shots) PER CIRCUIT. Low-p and gate
-# both feed the bonus (and gate carries the hard gate), so both get real budget;
-# the high-p point is diagnostic only (reported curve + d_eff fit, NOT scored),
-# so it is the lightest. A good gadget's low-p errors are rare — the shot cap
-# bounds the tail cost and the resolution clamp handles the floored case. The
-# low-p estimate can be noisy: the steep reference makes flat-vs-steep separate
-# by ~0.8 decades at low p (>> the ~0.1 std here), so the slope signal survives
-# a modest budget. BP+OSD-0 is ~1.5-2 core-s/shot on these DEMs, so shots ARE
-# the eval-time driver. All six circuits run in ONE sinter fan-out so the worker
-# pool stays saturated. Bump these (or lower GATE_FACTOR margin reliance) to
-# tighten; recalibration is NOT needed (LER_REFS are budget-independent).
-P_BUDGET    = ((40, 1500), (45, 2000), (30, 800))
+# IN-LOOP sampling budget (max_errors, max_shots) PER CIRCUIT — v5 samples the
+# GATE POINT ONLY (~3 min instead of ~10): the low/high points' role in the
+# loop is fully covered by the deterministic machinery (tail pricing at the
+# gate p is conservative for every lower p, since a fault-set tail SHRINKS
+# with p; the curve/d_eff belong to the certification tier). At ref-parity
+# this budget observes ~45-55 errors -> sigma ~0.06 decades, absorbed by the
+# noise-aware allowance. NOTE (measured, do not "optimize" this away): a
+# fully deterministic loop is NOT available here — the DEM expected-fault-
+# count lambda spans only +-1.5% across the benchmark set while measured
+# LERs span +-0.10 decades (decodability, not fault count, separates
+# candidates), so the gate-point Monte Carlo IS the discriminating signal.
+LOOP_BUDGET = (60, 1000)
+# CERTIFICATION-tier budgets (calibrate.py / --certify): the full three-point
+# curve at real budgets, for elites and for recalibration only.
+P_BUDGET    = ((55, 2600), (70, 2800), (25, 700))
 N_WORKERS   = int(os.environ.get("GAUGE_WORKERS", str(max(2, min(20, (os.cpu_count() or 8) - 4)))))
 
 Q_REF       = 41           # paper gadget: 22 edge qubits + 12 A_v + 7 B_p (App. B)
-GATE_FACTOR = 2.0
+# --- v4.1 scoring constants (see module docstring SCORING) ---
+RATIO_LIMIT = float(os.environ.get("GAUGE_RATIO_LIMIT", "1.1"))
+                           # feasibility: tail-priced LER must stay within this
+                           # RATIO of the reference at every scored point (the
+                           # run owner's non-inferiority bar)
+LOG_RATIO   = float(np.log10(RATIO_LIMIT))          # ~0.0414 decades at 1.1x
+NOISE_Z     = 2.0          # feasibility is noise-aware: reject only when
+                           # DEMONSTRABLY beyond the ratio, i.e. margin <
+                           # -(LOG_RATIO + NOISE_Z*sigma). 1.1x is ~1 sigma at
+                           # the 10-min budgets, so without this allowance the
+                           # gate would flip on sampling luck.
+SIGMA_REF   = 0.025        # decades: the reference curve's own calibration
+                           # uncertainty (300-error calibrate.py run), added in
+                           # quadrature to the candidate's per-point sigma
+W_LER       = 3.0          # score per decade of TRUE worst-case dominance
+BONUS_CAP   = 2.0          # decades of dominance that can earn score (max +6)
+TAIL_MIN_EXPECT = 5.0      # price a probe-found fault set into the effective
+                           # LER only if MC could NOT have seen it (< this many
+                           # expected occurrences in the point's shot budget);
+                           # sets MC already samples are in the measured number
+D_TARGET    = int(os.environ.get("GAUGE_DTARGET", "0"))
+                           # OPTIONAL hard fault-distance gate (0 = off, the
+                           # default). Set e.g. 10 to run a distance-preserving
+                           # campaign (10 = the gross code's own circuit-level
+                           # ceiling, Bravyi et al. Nature 2024); by default
+                           # v4.1 PRICES probed tails instead of gating — see
+                           # WHY v4.1 in the docstring.
+# Fault-distance probe budgets:
+ATTACK_TRIALS = 48         # BP+OSD dressed-logical attack trials per witness
+                           # (trial 0 clean; others alternate random column
+                           # permutations, growing prior jitter, edge-biased
+                           # priors and BP/OSD depth — the arXiv:2603.22532
+                           # recipe plus a diversity schedule; rare light
+                           # operators live in narrow OSD basins: 16 trials
+                           # MISSED a weight-9 dressed logical in the GeneCS
+                           # beta=0.35 graph that 48+ trials find on every
+                           # seed). ~2-4 s per attack at deformed-code scale —
+                           # trivial next to the ~10 min sampling
+STIM_PROBE_CAPS = (2, 4)   # (det-set size, edge degree) exploration caps: the
+                           # graphlike regime, ~0.1-1 s per circuit (measured);
+                           # deeper caps belong in calibrate.py, not in-loop
 # Overall end-to-end error of the PAPER gadget (18 matching + 4 expansion
 # edges, R=12) under THIS harness, at each P_GRID point — calibrated by
 # calibrate.py; MUST be recalibrated if the noise model, P grid, scheduler,
@@ -212,7 +331,6 @@ def _ref(env, default):
 LER_REFS    = (_ref("GAUGE_LER_REF_LO",   "9.2966e-3"),
                _ref("GAUGE_LER_REF_GATE", "5.5630e-2"),
                _ref("GAUGE_LER_REF_HI",   "2.2252e-1"))
-GATE        = GATE_FACTOR * LER_REFS[1]
 
 INVALID_SCORE = -100.0   # below any buildable gadget's score (min feasible ~ -76)
 CRASH_SCORE   = -1000.0
@@ -357,6 +475,15 @@ def parse_spec(spec):
         raise SpecError(f"graph disconnected: vertices {sorted(missing)} unreachable from "
                         f"vertex 0 — all 12 support vertices and every used dummy must lie "
                         f"in ONE connected component (Theorem 1 hypothesis)")
+    cycle_rank = len(edges) - len(verts) + 1
+    if cycle_rank < 1:
+        raise SpecError(
+            f"spanning-tree/forest gadget (cycle rank {cycle_rank}: {len(edges)} edges on "
+            f"{len(verts)} vertices) is OUT OF SCOPE: with no independent cycle there are "
+            f"no flux checks B_p and no gauge structure — the degenerate no-flux limit of "
+            f"gauging (incl. the unverified Shor-star via a dummy hub) is the known-trivial "
+            f"corner this task does not study. Add at least one cycle (a doubled edge is "
+            f"the paper's own double-gross motif); the size floor is Q ~ 25.")
     return edges, dummies, rounds
 
 def _shortest_paths(verts, edges):
@@ -729,46 +856,203 @@ def _noiseless_ok(circuit, shots=16):
     return (not det.any()) and (not obs.any())
 
 # ----------------------------------------------------------------------
-# Structural diagnostics for feedback
+# Protocol fault-distance probes (v4). d_hat = min over
+#   * R                        — the measurement observable's timelike cap: a
+#                                chain of R measurement flips on ONE A_v check
+#                                is undetectable and flips the recorded outcome
+#                                (Cross et al. arXiv:2407.18393 Lemma 9:
+#                                measurement fault distance = min(R, ...));
+#   * dressed-logical attack   — BP+OSD low-weight-logical search on the
+#                                deformed code's X and Z sides (the quantities
+#                                d_X(L* S_X) / d_Z(...) of Cross et al.
+#                                Lemma 10; a found weight-w dressed logical is
+#                                an undetectable weight-w protocol fault set);
+#   * stim circuit probe       — shortest_graphlike_error + budgeted
+#                                search_for_undetectable_logical_errors on the
+#                                ACTUAL protocol circuits (catches circuit-
+#                                level, schedule-induced sets the code-level
+#                                attack cannot see).
+# All parts are UPPER-bound estimators: a small result certifies vulnerability;
+# a large result proves nothing — which is the safe direction for a gate (see
+# ANTI-GAMING). Randomization (fresh seed per eval, random column permutations
+# + prior jitter across trials, arXiv:2603.22532 recipe) keeps the attack from
+# being systematically blind to a lineage.
 # ----------------------------------------------------------------------
-def _graph_diag(edges, dummies):
-    verts = list(range(12)) + list(dummies)
-    nV = len(verts); vpos = {v: i for i, v in enumerate(verts)}
-    adj = {i: set() for i in range(nV)}
-    Lap = np.zeros((nV, nV))
-    for (u, w) in edges:
-        i, j = vpos[u], vpos[w]
-        adj[i].add(j); adj[j].add(i)
-        Lap[i, i] += 1; Lap[j, j] += 1; Lap[i, j] -= 1; Lap[j, i] -= 1
-    deg = [len(adj[i]) for i in range(nV)]
-    fiedler = float(sorted(np.linalg.eigvalsh(Lap))[1]) if nV > 1 else 0.0
-    # sparsest cut: exact for <= 14 vertices, Fiedler sweep otherwise
-    best = None
-    if nV <= 14:
-        vol = sum(deg)
-        for r in range(1, nV // 2 + 1):
-            for S in itertools.combinations(range(nV), r):
-                Ss = set(S)
-                cut = sum(1 for i in S for j in adj[i] if j not in Ss)
-                vS = sum(deg[i] for i in S); other = vol - vS
-                cond = cut / min(vS, other) if min(vS, other) > 0 else 9.0
-                if best is None or cond < best[0]:
-                    best = (cond, cut, [verts[i] for i in S])
-    else:
-        vec = np.linalg.eigh(Lap)[1][:, 1]
-        order = np.argsort(vec); vol = sum(deg)
-        for cutpos in range(1, nV):
-            S = order[:cutpos]; Ss = set(S.tolist())
-            cut = sum(1 for i in Ss for j in adj[i] if j not in Ss)
-            vS = sum(deg[i] for i in Ss); other = vol - vS
-            if min(vS, other) == 0: continue
-            cond = cut / min(vS, other)
-            if best is None or cond < best[0]:
-                best = (cond, cut, sorted(verts[i] for i in Ss))
-    cond, cut, side = best if best else (9.0, 0, [])
-    return {"fiedler": round(fiedler, 3), "cut_conductance": round(cond, 3),
-            "cut_edges": cut, "cut_side": side,
-            "min_degree": int(min(deg)), "max_degree": int(max(deg))}
+def dressed_logical_attack(g, rng, trials=None, osd_order=6):
+    """Min-weight dressed logical of the deformed code, per CSS side.
+    Returns {"X": {"weight": int|None, "support": str}, "Z": {...}}."""
+    trials = ATTACK_TRIALS if trials is None else trials
+    nq = g["nq"]
+    out = {}
+    for side in ("X", "Z"):
+        # side "X": light X-type logicals v with HZdef v = 0 that anticommute
+        # with some Z-side logical witness w (v nontrivial in the deformed
+        # code). Side "Z" symmetric.
+        Hdual = g["HZdef"] if side == "X" else g["HXdef"]
+        Hstab = g["HXdef"] if side == "X" else g["HZdef"]
+        wits = _logical_reps(Hdual, _nullspace(Hstab))
+        A = (np.vstack([Hdual, np.zeros((1, nq), np.int8)]) % 2).astype(np.uint8)
+        syn = np.zeros(A.shape[0], np.uint8); syn[-1] = 1
+        best, best_vec = None, None
+        min_ops = set()      # distinct operators found AT the best weight
+        for w in wits:
+            A[-1] = (w % 2).astype(np.uint8)
+            for t in range(trials):
+                # Diversity schedule (rare light operators live in narrow OSD
+                # basins — a fixed configuration repeatedly finds the SAME
+                # heavier solution): alternate column permutations, growing
+                # prior jitter, edge-biased priors (light dressed logicals
+                # concentrate on cut edges), and BP/OSD depth.
+                perm = rng.permutation(nq) if t % 2 else np.arange(nq)
+                pr = np.full(nq, 0.05)
+                if t >= 4 and t % 4 == 0:
+                    pr[2 * N:] = 0.20
+                if t >= 1:
+                    pr = np.clip(pr * np.exp(rng.normal(0.0, 0.5 + 0.1 * t, nq)),
+                                 1e-4, 0.4)
+                try:
+                    dec = _LDPC_BPOSD(_CSR(A[:, perm]),
+                                      channel_probs=list(pr[perm]),
+                                      max_iter=(20 if t % 3 == 0 else 60),
+                                      bp_method="minimum_sum",
+                                      ms_scaling_factor=0.625,
+                                      osd_method="OSD_CS",
+                                      osd_order=(osd_order if t % 2 == 0
+                                                 else osd_order + 2))
+                    sol = np.asarray(dec.decode(syn), np.uint8)
+                except Exception:
+                    continue
+                e = np.zeros(nq, np.uint8)
+                e[perm] = sol
+                if ((Hdual @ e) % 2).any() or int(w @ e) % 2 != 1:
+                    continue
+                wgt = int(e.sum())
+                if best is None or wgt < best:
+                    best, best_vec = wgt, e.copy()
+                    min_ops = {tuple(np.flatnonzero(e))}
+                elif wgt == best:
+                    min_ops.add(tuple(np.flatnonzero(e)))
+        supp = ""
+        if best_vec is not None:
+            base_supp = [int(q) for q in np.flatnonzero(best_vec[:2 * N])]
+            on_meas = sorted(i for i, q in enumerate(SUPPORT) if best_vec[q])
+            eids = [int(j) for j in np.flatnonzero(best_vec[2 * N:])]
+            supp = (f"{len(base_supp)} base-code qubits"
+                    + (f" (touching support labels {on_meas})" if on_meas else "")
+                    + (f" + gadget edges {[g['edges'][j] for j in eids]}" if eids else ""))
+        out[side] = {"weight": best, "support": supp,
+                     "n_min": max(1, len(min_ops))}
+    return out
+
+
+def stim_circuit_probe(circuit):
+    """Budgeted undetectable-logical search on one protocol circuit.
+    Returns the min found weight, or None if nothing was found within the
+    exploration caps (no evidence — NOT a certificate of safety)."""
+    found = []
+    try:
+        errs = circuit.shortest_graphlike_error(ignore_ungraphlike_errors=True)
+        if errs:
+            found.append(len(errs))
+    except Exception:
+        pass
+    try:
+        errs = circuit.search_for_undetectable_logical_errors(
+            dont_explore_detection_event_sets_with_size_above=STIM_PROBE_CAPS[0],
+            dont_explore_edges_with_degree_above=STIM_PROBE_CAPS[1],
+            dont_explore_edges_increasing_symptom_degree=True,
+            canonicalize_circuit_errors=False,
+        )
+        if errs:
+            found.append(len(errs))
+    except Exception:
+        pass
+    return min(found) if found else None
+
+
+def estimate_fault_distance(g, rounds, circ_x, circ_z, rng):
+    """Combine all probe parts. Returns (d_hat, parts, counts, weakest, attack).
+    counts[k] = first-order multiplicity estimate for part k's fault sets
+    (n_av parallel A_v chains for the timelike part; the number of DISTINCT
+    minimum-weight operators the attack found for the dressed parts; 1 for
+    the stim finds)."""
+    attack = dressed_logical_attack(g, rng)
+    parts = {
+        "rounds": rounds,
+        "dressed_x": attack["X"]["weight"],
+        "dressed_z": attack["Z"]["weight"],
+        "stim_x": stim_circuit_probe(circ_x),
+        "stim_z": stim_circuit_probe(circ_z),
+    }
+    counts = {
+        "rounds": g["n_av"],
+        "dressed_x": attack["X"]["n_min"],
+        "dressed_z": attack["Z"]["n_min"],
+        "stim_x": 1,
+        "stim_z": 1,
+    }
+    live = {k: v for k, v in parts.items() if v is not None}
+    weakest = min(live, key=live.get)
+    return int(live[weakest]), parts, counts, weakest, attack
+
+
+def _comb(n, k):
+    from math import comb
+    return comb(n, k)
+
+
+def tail_bound(parts, counts, p, shots=None):
+    """First-order failure probability of the probe-found fault sets at
+    physical rate p: sum over parts of N * C(w, ceil(w/2)) * p^ceil(w/2)
+    (a weight-w undetectable set defeats the decoder once ceil(w/2) of its
+    locations fault). If `shots` is given, sets Monte Carlo already samples
+    (expected occurrences >= TAIL_MIN_EXPECT in the budget) are SKIPPED —
+    their failures are in the measured number; pricing them again would
+    double-count. Stim finds are included only when strictly lighter than
+    every other part (else they duplicate the timelike/dressed sets)."""
+    total = 0.0
+    non_stim = [v for k, v in parts.items()
+                if v is not None and not k.startswith("stim")]
+    floor_w = min(non_stim) if non_stim else None
+    for k, w in parts.items():
+        if w is None:
+            continue
+        if k.startswith("stim") and floor_w is not None and w >= floor_w:
+            continue
+        contrib = counts.get(k, 1) * _comb(int(w), (int(w) + 1) // 2) \
+            * p ** ((int(w) + 1) // 2)
+        if shots is not None and contrib * shots >= TAIL_MIN_EXPECT:
+            continue
+        total += contrib
+    return total
+
+
+# Reference-curve slope (decades of LER per decade of p), from the calibrated
+# three-point curve — used only for the reported "advantage floor" diagnostic.
+def _ref_slope():
+    try:
+        return float((np.log10(LER_REFS[2]) - np.log10(LER_REFS[0]))
+                     / (np.log10(P_GRID[2]) - np.log10(P_GRID[0])))
+    except Exception:
+        return 4.5
+
+
+def tail_crossover_p(parts, counts):
+    """The physical rate below which the probe-found tail overtakes 10% of the
+    reference's extrapolated curve — i.e. how far DOWN in p the candidate's
+    measured-LER advantage remains meaningful ("valid down to p ~ ...").
+    The tail's leading order is lower than the reference slope whenever a
+    light fault set exists, so tail/ref GROWS as p falls: scanning downward
+    from the gate point, the first p where tail >= 0.1*ref is the crossover.
+    Returns None if the tail never reaches that level above p = 1e-6 (no
+    floor anywhere in the plausible hardware range)."""
+    slope = _ref_slope()
+    for lp in np.linspace(float(np.log10(P_GATE)), -6.0, 400):
+        p = float(10.0 ** lp)
+        ref = LER_REFS[1] * (p / P_GATE) ** slope
+        if tail_bound(parts, counts, p) >= 0.1 * ref:
+            return p
+    return None
 
 # ----------------------------------------------------------------------
 # Sampling
@@ -779,22 +1063,27 @@ REF_MECHS = 90_000    # ~error mechanisms of the reference gate-point circuit;
                       # ~flat as gadgets grow (statistics matter most near the
                       # frontier, where gadgets are small)
 
-def sample_curve(circs):
+def sample_curve(circs, budget_scale=1.0):
     """circs: [(p, circ_x, circ_z)] in P_GRID order. Runs all six circuits in
     ONE sinter fan-out (per-point error budgets + mechanism-scaled shot caps),
     so the worker pool stays saturated through the tail. Returns a list of
-    per-point dicts."""
+    per-point dicts. budget_scale < 1 shrinks both budgets uniformly (used for
+    candidates that already failed the fault-distance gate: their margins only
+    shape the infeasible-branch gradient, so cheap estimates suffice)."""
     mechs = max(circs[1][1].detector_error_model().num_errors,
                 circs[1][2].detector_error_model().num_errors)
-    scale = min(1.0, REF_MECHS / max(1, mechs))
+    scale = min(1.0, REF_MECHS / max(1, mechs)) * budget_scale
     tasks = []
+    nominals = []
     for i, ((p, cx, cz), (max_err, max_sh)) in enumerate(zip(circs, P_BUDGET)):
-        cap = int(max(800, max_sh * scale))
+        cap = int(max(400, max_sh * scale))
+        nominals.append(int(max(400, max_sh * budget_scale)))
         for basis, c in (("X", cx), ("Z", cz)):
             tasks.append(_SINTER_TASK(
                 circuit=c, json_metadata={"i": i, "basis": basis},
                 collection_options=_SINTER_OPTIONS(
-                    max_errors=max_err, max_shots=cap)))
+                    max_errors=max(10, int(max_err * budget_scale)),
+                    max_shots=cap)))
     results = _SINTER_COLLECT(
         num_workers=N_WORKERS,
         tasks=tasks,
@@ -819,13 +1108,47 @@ def sample_curve(circs):
         # candidate-SIZE-INDEPENDENT value to the score (a big gadget that
         # sampled fewer shots is not penalised, nor a small one rewarded, purely
         # by the shot cap). "0 errors" means "at least this good"; we credit the
-        # nominal resolution uniformly.
-        nominal = P_BUDGET[i][1]
+        # nominal resolution uniformly. (budget_scale shrinks the nominal too.)
+        nominal = nominals[i]
         overall_eff = overall if overall > 0.0 else 1.0 / nominal
         curve.append({"p": p, "px": px, "pz": pz, "overall": overall,
                       "overall_eff": overall_eff, "resolution": 1.0 / nominal,
                       "ex": ex, "sx": sx, "ez": ez, "sz": sz})
     return curve
+
+
+def sample_gate(circ_x, circ_z, budget=None):
+    """v5 in-loop sampler: ONE sinter fan-out over the two GATE-point
+    circuits at LOOP_BUDGET, mechanism-scaled like sample_curve. Returns the
+    same per-point dict shape as one sample_curve entry."""
+    max_err, max_sh = budget or LOOP_BUDGET
+    mechs = max(circ_x.detector_error_model().num_errors,
+                circ_z.detector_error_model().num_errors)
+    scale = min(1.0, REF_MECHS / max(1, mechs))
+    cap = int(max(300, max_sh * scale))
+    tasks = [
+        _SINTER_TASK(circuit=c, json_metadata={"basis": b},
+                     collection_options=_SINTER_OPTIONS(
+                         max_errors=max_err, max_shots=cap))
+        for b, c in (("X", circ_x), ("Z", circ_z))
+    ]
+    results = _SINTER_COLLECT(
+        num_workers=N_WORKERS, tasks=tasks, decoders=["bposd0"],
+        custom_decoders={"bposd0": _SINTER_DEC_CLS(
+            max_bp_iters=BP_ITERS, osd_order=OSD_ORDER, osd_method="osd0")},
+        print_progress=False,
+    )
+    out = {r.json_metadata["basis"]: (int(r.errors), int(r.shots)) for r in results}
+    ex, sx = out.get("X", (0, 0))
+    ez, sz = out.get("Z", (0, 0))
+    if sx == 0 or sz == 0:
+        raise RuntimeError("sinter returned no shots for the gate point")
+    px, pz = ex / sx, ez / sz
+    overall = 1.0 - (1.0 - px) * (1.0 - pz)
+    nominal = int(max(300, max_sh))
+    return {"p": P_GATE, "px": px, "pz": pz, "overall": overall,
+            "overall_eff": overall if overall > 0.0 else 1.0 / nominal,
+            "resolution": 1.0 / nominal, "ex": ex, "sx": sx, "ez": ez, "sz": sz}
 
 # ----------------------------------------------------------------------
 # ShinkaEvolve entry point
@@ -865,131 +1188,188 @@ def aggregate_fn(results: list) -> dict:
         return _crash("Gadget construction crashed:\n" + traceback.format_exc())
 
     t0 = time.time()
-    circs = []
-    meta = None
-    for p in P_GRID:
-        cx, m = build_protocol_circuit(g, rounds, "X", p)
-        cz, _ = build_protocol_circuit(g, rounds, "Z", p)
-        circs.append((p, cx, cz))
-        if p == P_GRID[1]:
-            meta = m
-    if not (_noiseless_ok(circs[1][1]) and _noiseless_ok(circs[1][2])):
+    circ_x, meta = build_protocol_circuit(g, rounds, "X", P_GATE)
+    circ_z, _ = build_protocol_circuit(g, rounds, "Z", P_GATE)
+    if not (_noiseless_ok(circ_x) and _noiseless_ok(circ_z)):
         # Should be impossible for a spec that passed build_gauged; treat as
         # an evaluator-side assertion, not a candidate mistake.
         return _crash("protocol circuit failed the noiseless determinism self-check "
                       "(evaluator invariant violated — report this)")
     build_s = time.time() - t0
 
+    # ---- protocol fault-set probes (the MC-invisible-tail PRICER) ----
+    t0 = time.time()
+    rng = np.random.default_rng()          # fresh probe seed per eval
+    try:
+        d_hat, d_parts, d_counts, weakest, attack = estimate_fault_distance(
+            g, rounds, circ_x, circ_z, rng)
+    except Exception:
+        return _crash("fault-distance probe crashed:\n" + traceback.format_exc())
+    probe_s = time.time() - t0
+
     t0 = time.time()
     try:
-        curve = sample_curve(circs)
+        mid = sample_gate(circ_x, circ_z)
     except Exception:
         return _crash("sinter sampling crashed:\n" + traceback.format_exc())
     sim_s = time.time() - t0
 
-    lo, mid, hi = curve
     n_err_gate = mid["ex"] + mid["ez"]
     est_std = 0.434 / np.sqrt(n_err_gate) if n_err_gate > 0 else None
-    # Per-point reliability margin vs the calibrated PAPER-gadget curve, clamped
-    # at each point's candidate-independent resolution bound so a zero-error
-    # (floored) point cannot claim more headroom than the shot budget resolves.
-    margins = [min(float(np.log10(GATE_FACTOR * LER_REFS[i] / curve[i]["overall_eff"])),
-                   float(np.log10(GATE_FACTOR * LER_REFS[i] / curve[i]["resolution"])))
-               for i in range(3)]
-    margin = margins[1]                       # the hard gate lives at P_GATE
-    # Bonus = the LOW-p-weighted headroom (low + gate, high-p DROPPED). This is
-    # what makes SCALING actually count: over a log-symmetric grid the mean of
-    # all three margins algebraically cancels the candidate's slope (a steep
-    # design's low-p gain is offset by its high-p loss), so a symmetric average
-    # rewards only curve LEVEL, not steepness. Weighting toward low p makes a
-    # flatter curve — whose low-p error barely drops below the paper's, which
-    # DOES drop — score strictly lower at equal gate-point error, which is the
-    # documented intent. The high-p point stays in the reported curve + d_eff
-    # fit (diagnostic) but not the score.
-    curve_bonus = float(min(2.0, 0.5 * margins[0] + 0.5 * margins[1]))
-    # empirical scaling exponent d_eff ~ 2 * slope of log10(LER) vs log10(p),
-    # over points with enough observed errors to mean anything
-    fit_pts = [(np.log10(P_GRID[i]), np.log10(curve[i]["overall_eff"]))
-               for i in range(3) if curve[i]["ex"] + curve[i]["ez"] >= 5]
-    if len(fit_pts) >= 2:
-        xs, ys = zip(*fit_pts)
-        d_eff = float(2.0 * np.polyfit(xs, ys, 1)[0])
-    else:
-        d_eff = None
+    # Tail pricing at the GATE point: add each probe-found fault set's
+    # first-order failure to the measured LER — but only the sets Monte Carlo
+    # could NOT have seen at this shot budget (the visible ones are already
+    # inside the measured number). Gate-point pricing is CONSERVATIVE for
+    # every lower p (a fault-set tail SHRINKS with p), which is why v5 needs
+    # no in-loop low point: a healthy design pays ~0; a collapsed design has
+    # the failure probability the sampling is blind to restored, so the 1.1x
+    # comparison stays honest without gating.
+    tail_gate = tail_bound(d_parts, d_counts, P_GATE,
+                           shots=mid["sx"] + mid["sz"])
+    # TRUE margin vs the calibrated PAPER-gadget gate point (positive =
+    # strictly better than the reference), on the tail-priced effective LER,
+    # clamped at the candidate-independent resolution bound.
+    margin_gate = min(float(np.log10(LER_REFS[1] / (mid["overall_eff"] + tail_gate))),
+                      float(np.log10(LER_REFS[1] / mid["resolution"])))
+    # Noise-aware feasibility: reject only when DEMONSTRABLY beyond the
+    # RATIO_LIMIT — the allowance is the ratio (0.041 decades at 1.1x) plus
+    # NOISE_Z sigma of the sampling std and the reference-calibration std in
+    # quadrature (~0.15 decades at LOOP_BUDGET); a strict 1.1x verdict needs
+    # the certification tier (calibrate.py --certify).
+    sigma_gate = float(0.434 / np.sqrt(max(1, n_err_gate)))
+    allow_gate = LOG_RATIO + NOISE_Z * float(np.hypot(sigma_gate, SIGMA_REF))
+    ler_ok = margin_gate >= -allow_gate
+    worst_margin = margin_gate
+    protected = (D_TARGET <= 0) or (d_hat >= D_TARGET)
+    cross_p = tail_crossover_p(d_parts, d_counts)
+    cross_p = tail_crossover_p(d_parts, d_counts)
+    lam_bulk = None
+    try:
+        lam_bulk = 0.0
+        for c in (circ_x, circ_z):
+            for inst in c.detector_error_model().flattened():
+                if inst.type == "error":
+                    lam_bulk += inst.args_copy()[0]
+    except Exception:
+        lam_bulk = None
     Q = g["overhead"]
-    diag = _graph_diag(edges, dummies)
 
+    part_names = {"rounds": f"R={rounds} (timelike cap on the measurement outcome)",
+                  "dressed_x": "dressed X-logical of the deformed code",
+                  "dressed_z": "dressed Z-logical of the deformed code",
+                  "stim_x": "circuit-level fault set (X-basis stim search)",
+                  "stim_z": "circuit-level fault set (Z-basis stim search)"}
+    cross_str = (f"tail-vs-reference crossover at p~{cross_p:.1e} (below that "
+                 f"rate the lightest found fault sets dominate the comparison)"
+                 if cross_p is not None else
+                 "no tail crossover above p=1e-6 (found fault sets stay "
+                 "negligible across the plausible hardware range)")
+    dstr = (f"probed fault sets: lightest weight {d_hat} ({part_names[weakest]}) "
+            f"[parts R/dressedX/dressedZ/stimX/stimZ = {d_parts['rounds']}/"
+            f"{d_parts['dressed_x']}/{d_parts['dressed_z']}/{d_parts['stim_x']}/"
+            f"{d_parts['stim_z']}; priced into the effective LER at "
+            f"{tail_gate:.1e} @gate p, not gated]; {cross_str}")
     depths = (f"SE depth/round: X={meta['depth_def'][0]} Z={meta['depth_def'][1]} ticks "
               f"(= exact Tanner-graph max degree; base code: "
               f"{meta['depth_base'][0]}/{meta['depth_base'][1]})")
-    wstr = (f"max deformed check weight Z={g['wz_max']} X={g['wx_max']}, max qubit degree "
-            f"{g['qdeg_max']}, worst Z-check routing +{g['route_w_max']} edges, longest "
-            f"flux cycle {g['cycle_w_max']}")
-    cstr = (f"graph: {len(edges)} edges, {len(dummies)} dummies; weakest cut "
-            f"{diag['cut_side']} (conductance {diag['cut_conductance']}, "
-            f"{diag['cut_edges']} crossing), Fiedler {diag['fiedler']}")
-    deff_str = f"{d_eff:.1f}" if d_eff is not None else "n/a (too few errors)"
-    lstr = (f"measured noise curve (overall protocol error): "
-            f"{lo['overall_eff']:.2e} @p={P_GRID[0]:.4g} | "
-            f"{mid['overall_eff']:.2e} @p={P_GRID[1]:.4g} [GATE point, "
-            f"X {mid['ex']}/{mid['sx']}, Z {mid['ez']}/{mid['sz']}"
-            + (f", +-{est_std:.3f} decades" if est_std else "") + f"] | "
-            f"{hi['overall_eff']:.2e} @p={P_GRID[2]:.4g}; "
-            f"fitted scaling exponent d_eff~{deff_str} (steeper = better low-p scaling); "
-            f"resolution-clamped margins vs 2x reference (low/gate/high p): "
-            f"{margins[0]:+.2f}/{margins[1]:+.2f}/{margins[2]:+.2f} decades (bonus uses low+gate)")
+    wstr = (f"max deformed check weight Z={g['wz_max']} X={g['wx_max']}, "
+            f"max qubit degree {g['qdeg_max']} (reference profile 7/7 — heavy "
+            f"checks/degrees are priced through schedule depth and idle noise), "
+            f"worst Z-check routing +{g['route_w_max']} edges, longest flux cycle "
+            f"{g['cycle_w_max']}")
+    lstr = (f"measured gate-point protocol error: "
+            f"{mid['overall_eff']:.2e} @p={P_GATE:.4g} "
+            f"[X {mid['ex']}/{mid['sx']}, Z {mid['ez']}/{mid['sz']}"
+            + (f", +-{est_std:.3f} decades" if est_std else "") + f"]; "
+            f"tail-priced margin vs reference {margin_gate:+.2f} decades; "
+            f"feasibility: within {RATIO_LIMIT}x of the reference, i.e. margin >= "
+            f"-({LOG_RATIO:.3f} + {NOISE_Z}sigma) = -{allow_gate:.2f}; bonus only "
+            f"above 0. (v5 loop samples the gate point only — the low-p side is "
+            f"covered by the pricing, which is conservative for all p below the "
+            f"gate; full curves are the certification tier: calibrate.py --certify)")
 
-    if margin >= 0.0:
-        score = float(Q_REF - Q) + curve_bonus
+    if ler_ok and protected:
+        bonus = W_LER * min(BONUS_CAP, max(0.0, worst_margin))
+        score = float(Q_REF - Q) + float(bonus)
         verdict = (
-            f"RELIABLE at {Q} added elements ({g['E']} edge qubits + {g['n_av']} A_v + "
-            f"{g['n_bp']} B_p checks), R={rounds} deformed rounds; score={score:+.2f} "
-            f"(elements saved vs 41-element reference {Q_REF - Q:+d}, low-p-weighted "
-            f"reliability bonus {curve_bonus:+.2f}). {lstr}. {depths}; {wstr}. {cstr}. "
-            f"To improve: remove elements (edges/dummies/implied checks) or reduce "
-            f"rounds while staying reliable — the gate margin shrinks as you cut, and "
-            f"a flat curve (low d_eff) means the design is coasting on the benchmark "
-            f"noise rate, not real protection. Structure moves that keep reliability "
-            f"cheap: keep check weights and degrees low (schedule depth IS the Tanner "
-            f"max degree), keep routing short, keep flux cycles short, keep the graph "
-            f"expanding where the code's logicals pinch it."
+            f"FEASIBLE at {Q} added elements ({g['E']} edge qubits + "
+            f"{g['n_av']} A_v + {g['n_bp']} B_p checks), R={rounds}; score={score:+.2f} "
+            f"(elements saved vs the 41-element paper reference {Q_REF - Q:+d}, "
+            f"LER dominance bonus {bonus:+.2f}). {lstr}. {dstr}. {depths}; "
+            f"{wstr}. To improve: remove elements (edges / dummies / implied checks) "
+            f"while keeping the tail-priced error within {RATIO_LIMIT}x of the "
+            f"reference, or earn the bonus by genuinely beating the reference. The "
+            f"probes price what sampling cannot see: light fault sets (low R -> "
+            f"weight-R chains of A_v measurement flips on the outcome; sparse cuts "
+            f"-> light dressed logicals, support reported when found) are charged "
+            f"their analytic failure rate, so a cheap design must be GENUINELY "
+            f"cheap at the benchmark noise rates, not just below the sampling "
+            f"floor. Dummy vertices can shorten routings / split heavy checks "
+            f"(depth = Tanner max degree)."
+        )
+    elif not protected:
+        # Optional distance-preserving campaign mode (GAUGE_DTARGET > 0 only).
+        score = float(max(-30.0,
+                          -8.0
+                          + min(0.0, margin_gate + allow_gate)
+                          - 1.5 * float(D_TARGET - d_hat)))
+        verdict = (
+            f"UNPROTECTED (distance-preserving mode, GAUGE_DTARGET={D_TARGET}): "
+            f"lightest probed fault set has weight {d_hat} < {D_TARGET} "
+            f"({part_names[weakest]}). score={score:.2f}. {dstr}. {lstr}. "
+            f"Config: {Q} elements, R={rounds}. {depths}; {wstr}."
         )
     else:
-        score = float(max(-30.0, -8.0 + margin))
+        score = float(max(-30.0, -8.0 + (margin_gate + allow_gate)))
+        tail_note = ""
+        if tail_gate > 0.2 * mid["overall_eff"]:
+            tail_note = (f" NOTE: the priced tail ({tail_gate:.1e} at the gate p) "
+                         f"is a significant part of the effective error — the "
+                         f"design's lightest fault sets, not its bulk, are what "
+                         f"break the comparison; see the probed parts above.")
         verdict = (
-            f"UNRELIABLE: gate-point protocol error is {-margin:.2f} decades ABOVE the "
-            f"reliability gate; score={score:.2f}. {lstr}. Config: {Q} elements "
-            f"({g['E']} edges, {g['n_av']} A_v, {g['n_bp']} B_p), R={rounds}. {depths}; "
-            f"{wstr}. {cstr}. Likely causes: too few deformed rounds (measurement "
-            f"observable is protected only by A_v repetitions: R={rounds}), a graph cut "
-            f"too sparse where a logical pinches (add edges/dummy structure across the "
-            f"weakest cut), or heavy checks/degrees inflating schedule depth and idle "
-            f"noise (split long routings/cycles with dummy vertices)."
+            f"NOT WITHIN {RATIO_LIMIT}x OF THE REFERENCE: tail-priced protocol error "
+            f"is demonstrably beyond the limit at the gate point (margin "
+            f"{margin_gate:+.2f} vs noise-aware allowance -{allow_gate:.2f}); "
+            f"score={score:.2f}.{tail_note} {dstr}. {lstr}. Config: {Q} elements "
+            f"({g['E']} edges, {g['n_av']} A_v, {g['n_bp']} B_p), R={rounds}. "
+            f"{depths}; {wstr}. Likely causes: heavy checks/degrees inflating "
+            f"schedule depth and idle noise (split long routings/cycles with dummy "
+            f"vertices), far too many rounds adding pure exposure, too few rounds "
+            f"letting outcome flips through (that cost is measured AND priced), or "
+            f"simply too many noisy elements — the paper reference sets this bar, "
+            f"so match its economy."
         )
 
     public = {
         "combined_score": round(score, 3), "valid": 1,
         "overall_ler": mid["overall_eff"], "x_ler": mid["px"], "z_ler": mid["pz"],
-        "ler_lo": lo["overall_eff"], "ler_hi": hi["overall_eff"],
-        "gate_margin_decades": round(margin, 3),
-        "margin_lo": round(margins[0], 3), "margin_hi": round(margins[2], 3),
-        "curve_bonus": round(curve_bonus, 3),
-        "d_eff_est": (round(d_eff, 2) if d_eff is not None else None),
+        "margin_gate": round(margin_gate, 3),
+        "fault_dist_est": d_hat,
+        "tail_gate": float(f"{tail_gate:.3g}"),
+        "tail_crossover_p": (float(f"{cross_p:.3g}") if cross_p is not None else None),
+        "d_rounds": d_parts["rounds"],
+        "d_dressed_x": d_parts["dressed_x"], "d_dressed_z": d_parts["dressed_z"],
+        "d_stim_x": d_parts["stim_x"], "d_stim_z": d_parts["stim_z"],
+        "lam_bulk": (round(lam_bulk, 3) if lam_bulk is not None else None),
         "elements": Q, "edge_qubits": g["E"], "av_checks": g["n_av"],
         "bp_checks": g["n_bp"], "dummies": len(dummies), "rounds": rounds,
         "depth_x": meta["depth_def"][0], "depth_z": meta["depth_def"][1],
         "wz_max": g["wz_max"], "wx_max": g["wx_max"], "qdeg_max": g["qdeg_max"],
         "route_w_max": g["route_w_max"], "cycle_w_max": g["cycle_w_max"],
-        "fiedler": diag["fiedler"], "cut_conductance": diag["cut_conductance"],
-        "cut_side": diag["cut_side"],
     }
     private = {
-        "ler_refs": list(LER_REFS), "gate": GATE, "gate_factor": GATE_FACTOR,
-        "q_ref": Q_REF, "p_grid": list(P_GRID),
-        "shots": [[c["sx"], c["sz"]] for c in curve],
-        "errors": [[c["ex"], c["ez"]] for c in curve],
+        "ler_refs": list(LER_REFS),
+        "ratio_limit": RATIO_LIMIT, "noise_z": NOISE_Z, "sigma_ref": SIGMA_REF,
+        "allowance_gate": round(allow_gate, 4),
+        "d_target": D_TARGET, "w_ler": W_LER,
+        "q_ref": Q_REF, "p_gate": P_GATE, "loop_budget": list(LOOP_BUDGET),
+        "tail_counts": d_counts,
+        "attack_supports": {s: attack[s]["support"] for s in ("X", "Z")},
+        "shots": [mid["sx"], mid["sz"]], "errors": [mid["ex"], mid["ez"]],
         "score_std_decades": est_std,
-        "build_s": round(build_s, 1), "sim_s": round(sim_s, 1),
+        "build_s": round(build_s, 1), "probe_s": round(probe_s, 1),
+        "sim_s": round(sim_s, 1),
     }
     return {"combined_score": score, "correct": True, "public": public,
             "private": private, "extra_data": {}, "text_feedback": verdict}
@@ -1018,9 +1398,13 @@ def main(program_path: str, results_dir: str) -> None:
             f"{LER_REFS}. Run `python tasks/gross_code_gauging/calibrate.py`, then set the "
             "three __CAL_*__ placeholder defaults in evaluate.py (or export "
             "GAUGE_LER_REF_LO/GATE/HI) before evolving. See the README Calibration section.")
-    print(f"Benchmark: p grid={tuple(round(p, 5) for p in P_GRID)}, "
-          f"gate={GATE:.3e} ({GATE_FACTOR}x reference at p={P_GATE}), "
-          f"budgets per circuit={P_BUDGET}, {N_WORKERS} workers")
+    print(f"Benchmark (v5 loop): GATE point p={P_GATE} only, "
+          f"feasibility = tail-priced LER within {RATIO_LIMIT}x (+{NOISE_Z} sigma) of "
+          f"reference {LER_REFS[1]:.2e}"
+          + (f", HARD fault-distance gate {D_TARGET} (GAUGE_DTARGET)" if D_TARGET > 0
+             else ", probed fault tails priced (no distance gate)")
+          + f", loop budget/circuit={LOOP_BUDGET}, {N_WORKERS} workers "
+          f"(full curves: calibrate.py --certify)")
     metrics, correct, err = run_shinka_eval(
         program_path=program_path,
         results_dir=results_dir,

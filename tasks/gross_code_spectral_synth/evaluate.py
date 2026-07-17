@@ -1,0 +1,389 @@
+"""ShinkaEvolve EVALUATOR — the GeneCS-criteria spectral synthesis RACE.
+
+Head-to-head question: is Shinka-style evolution a better OPTIMIZER than the
+GeneCS compiler heuristic (Zhou, Javadi-Abhari, Li, arXiv:2605.21746,
+Algorithm 1: deficit-weighted random edge addition with first-passage
+acceptance, 100 restarts) at GeneCS's OWN acceptance criteria, on GeneCS's
+own benchmark instance — the gauging-measurement graph for the weight-12
+logical X_alpha of the [[144,12,12]] gross code?
+
+THE CRITERIA ARE THEIRS, REVERSE-ENGINEERED FROM THEIR PUBLISHED OUTCOME
+(../gross_code_gauging/genecs.py --fit-published): their gross-code Full-Opt
+result (24 ancilla qubits, 25 checks, degrees 7/8) pins E = 24 mono-layer,
+reproduced exactly by acceptance lambda_2(G) >= 2.0 — i.e. certified Cheeger
+constant >= 1 via the spectral proxy (Cheeger >= lambda_2/2), which is the
+full Williamson-Yoder Theorem 2 expansion bar. In their generic accounting
+checks = (#vertices) A_v + (E - #vertices + 1) cycle checks = E + 1
+regardless of dummies, so qubits + checks = 2E + 1 and THE OBJECTIVE IS
+PURELY: MINIMIZE THE EDGE COUNT E SUBJECT TO lambda_2 >= 2.
+
+    spec = {"edges": [(u, v), ...]}      (no rounds — no protocol here)
+
+  * labels 0..11  = the 12 qubits of supp(X_alpha) (the ports);
+  * labels 12..35 = OPTIONAL dummy vertices (a structural move the GeneCS
+    pipeline does not have: in their accounting a dummy is FREE — +1 A_v
+    check, -1 cycle check — but changes which topologies exist);
+  * parallel edges allowed (another move their simple-graph family lacks;
+    a doubled edge is the gauging double-gross motif), no self-loops.
+
+WHY EVOLUTION CAN WIN (the structural gaps in their search): Algorithm 1 is
+add-only over the fixed path-matching graph with first-passage acceptance —
+it cannot remove a redundant earlier addition, cannot swap, cannot drop
+path-matching edges (any connected graph deforms via paths — T-joins — so
+G0-containment is their restriction, not the theory's), and has no dummy
+vertices. Measured wall: within their family E jumps 23 (lambda_2 ~ 1.72)
+-> 24 (lambda_2 = 2.000 exactly) on every seed; the spectral floor is far
+below (degree >= 2 only forces E >= 12). Whether ANY 12-port multigraph
+(possibly with dummies) reaches lambda_2 >= 2 at E <= 23 is the race.
+
+THE SEED is the hand-crafted WY/IBM 22-edge graph of the 41-element paper
+gadget — which their certificate REJECTS (lambda_2 = 0.925, certified
+Cheeger 0.46 < 1) even though its deformed distance 12 is proven by integer
+programming. The certificate cannot see actual distance; this task
+deliberately optimizes THEIR criterion anyway (the race is about search,
+not physics), and any certified winner should be cross-scored on the real
+protocol by ../gross_code_gauging/ (calibrate.py --compare machinery).
+
+================  SCORING (Shinka MAXIMISES combined_score)  ===================
+  lam2       = second-smallest eigenvalue of the (multi)graph Laplacian
+  CERTIFIED := lam2 >= LAM2_MIN (2.0; env SPECTRAL_LAM2_MIN)
+  rho        = congestion: max #(minimum-cycle-basis cycles) through an edge
+               (their secondary criterion; gentle tiebreak only)
+
+  crash / garbage return               -> -1000   (correct=False)
+  invalid spec                         ->  -100   (+ named reason)
+  valid, NOT certified                 ->  -8 - 5*(LAM2_MIN - lam2) - 0.05*E
+                                           (smooth gradient toward the
+                                            certificate; always <= -8, so
+                                            any plausibly-sized certified
+                                            graph outranks every
+                                            uncertified one)
+  valid, CERTIFIED                     ->  (24 - E) - 0.02*max(0, rho - 2)
+                                                    - 0.01*max(0, maxdeg - 4)
+       24 = what THEIR algorithm achieves at these criteria (measured:
+       100 restarts, every seed). Certified E=24 scores ~0 — matching their
+       compiler; every edge below that is +1 and BEATS the published
+       pipeline at its own game. E<=23 certified is the win condition.
+
+Anti-gaming: the candidate returns only the edge list; the Laplacian, the
+eigensolve, the congestion and the scoring all live here, and the eval is
+DETERMINISTIC (no sampling, no seeds) — nothing to get lucky against.
+
+RUNTIME: < 1 s per candidate (12-36-vertex eigensolve + Horton cycle basis).
+Set eval_time ~ 00:02:00; this task is built for very high candidate
+throughput — the race is about search moves, not evaluation cost.
+"""
+
+from __future__ import annotations
+
+import argparse
+import itertools
+import os
+import sys
+import traceback
+
+import numpy as np
+
+from shinka.core import run_shinka_eval
+
+LAM2_MIN    = float(os.environ.get("SPECTRAL_LAM2_MIN", "2.0"))
+LAM2_EPS    = 1e-9      # certification tolerance: graphs whose true lambda_2
+                        # IS the threshold (integer spectra are common here —
+                        # the E=24 GeneCS graphs land at exactly 2) must not
+                        # flip on eigensolver rounding
+E_BASE      = 24        # GeneCS Algorithm 1 at these criteria (measured; also
+                        # matches their published 24-qubit gross Full-Opt)
+PEN_LAM2    = 5.0       # uncertified-branch gradient per unit of lambda_2 gap
+TIE_CONG    = 0.02      # certified-branch congestion tiebreak
+TIE_DEG     = 0.01      # certified-branch degree tiebreak
+MAX_EDGES   = 60
+MAX_DUMMIES = 24
+MAX_DEGREE  = 12        # GeneCS's stated degree bound
+INVALID_SCORE = -100.0
+CRASH_SCORE   = -1000.0
+
+N_PORTS = 12
+
+
+class SpecError(ValueError):
+    pass
+
+
+def parse_spec(spec):
+    if not isinstance(spec, dict):
+        raise SpecError(f"spec must be a dict {{'edges': [...]}}, got "
+                        f"{type(spec).__name__}")
+    edges_in = spec.get("edges")
+    if not isinstance(edges_in, (list, tuple)):
+        raise SpecError("spec['edges'] must be a list of (u,v) label pairs")
+    edges = []
+    for e in edges_in:
+        try:
+            u, v = int(e[0]), int(e[1])
+        except Exception:
+            raise SpecError(f"edge {e!r} is not a pair of integer labels")
+        if u == v:
+            raise SpecError(f"self-loop edge {e!r} not allowed")
+        if not (0 <= u < N_PORTS + MAX_DUMMIES and 0 <= v < N_PORTS + MAX_DUMMIES):
+            raise SpecError(f"edge {e!r} uses a label outside 0.."
+                            f"{N_PORTS + MAX_DUMMIES - 1}")
+        edges.append((min(u, v), max(u, v)))
+    if not edges:
+        raise SpecError("no edges — the graph must connect all 12 ports")
+    if len(edges) > MAX_EDGES:
+        raise SpecError(f"{len(edges)} edges exceeds the cap of {MAX_EDGES}")
+    dummies = sorted({x for e in edges for x in e if x >= N_PORTS})
+    verts = list(range(N_PORTS)) + dummies
+    adj = {v: set() for v in verts}
+    deg = {v: 0 for v in verts}
+    for (u, v) in edges:
+        adj[u].add(v); adj[v].add(u)
+        deg[u] += 1; deg[v] += 1
+    if max(deg.values()) > MAX_DEGREE:
+        raise SpecError(f"max degree {max(deg.values())} exceeds the GeneCS "
+                        f"degree bound {MAX_DEGREE}")
+    seen, stack = set(), [0]
+    while stack:
+        x = stack.pop()
+        if x in seen:
+            continue
+        seen.add(x)
+        stack.extend(adj[x] - seen)
+    missing = set(verts) - seen
+    if missing:
+        raise SpecError(f"graph disconnected: vertices {sorted(missing)} "
+                        f"unreachable from port 0 — all 12 ports and every "
+                        f"used dummy must lie in one component")
+    return edges, dummies, verts
+
+
+def lambda2_and_fiedler(edges, verts):
+    """(lambda_2, Fiedler-vector sign split, #crossing edges) of the
+    multigraph Laplacian — the split is the weakest spectral cut, i.e.
+    exactly where an edge buys the most lambda_2."""
+    pos = {v: i for i, v in enumerate(verts)}
+    n = len(verts)
+    Lap = np.zeros((n, n))
+    for (u, v) in edges:
+        i, j = pos[u], pos[v]
+        Lap[i, i] += 1; Lap[j, j] += 1
+        Lap[i, j] -= 1; Lap[j, i] -= 1
+    w, V = np.linalg.eigh(Lap)
+    lam2 = float(w[1])
+    fied = V[:, 1]
+    side = sorted(verts[i] for i in range(n) if fied[i] < 0)
+    if len(side) > n // 2:
+        side = sorted(set(verts) - set(side))
+    sset = set(side)
+    crossing = sum(1 for (u, v) in edges if (u in sset) != (v in sset))
+    return lam2, side, crossing
+
+
+def congestion(edges, verts):
+    """Max number of minimum-cycle-basis cycles through any edge (GeneCS's
+    congestion rho), exact via Horton candidates + greedy independence."""
+    E = len(edges)
+    dim = E - len(verts) + 1
+    if dim <= 0:
+        return 0
+    adj = {v: [] for v in verts}
+    for j, (u, v) in enumerate(edges):
+        adj[u].append((v, j)); adj[v].append((u, j))
+    paths = {}
+    for s in verts:
+        prev = {s: None}; order = [s]; qi = 0
+        while qi < len(order):
+            x = order[qi]; qi += 1
+            for (y, j) in adj[x]:
+                if y not in prev:
+                    prev[y] = (x, j); order.append(y)
+        for t in verts:
+            es = set(); x = t
+            while prev[x] is not None:
+                px, j = prev[x]; es.add(j); x = px
+            paths[(s, t)] = frozenset(es)
+    cands = set()
+    for j, (x, y) in enumerate(edges):
+        for v in verts:
+            c = set(paths[(v, x)]) ^ set(paths[(v, y)]); c.add(j)
+            dd = {}
+            for k in c:
+                for w in edges[k]:
+                    dd[w] = dd.get(w, 0) + 1
+            if all(d % 2 == 0 for d in dd.values()):
+                cands.add(frozenset(c))
+    by_pair = {}
+    for j, e in enumerate(edges):
+        by_pair.setdefault(tuple(e), []).append(j)
+    for js in by_pair.values():
+        for a, b in itertools.combinations(js, 2):
+            cands.add(frozenset({a, b}))
+
+    def _rank(Mx):
+        Mx = Mx.copy() % 2; r = 0
+        for c in range(Mx.shape[1]):
+            piv = next((i for i in range(r, Mx.shape[0]) if Mx[i, c]), None)
+            if piv is None:
+                continue
+            Mx[[r, piv]] = Mx[[piv, r]]
+            for i in range(Mx.shape[0]):
+                if i != r and Mx[i, c]:
+                    Mx[i] ^= Mx[r]
+            r += 1
+        return r
+
+    basis, cur = [], np.zeros((0, E), np.int8)
+    for c in sorted(cands, key=lambda c: (len(c), sorted(c))):
+        v = np.zeros(E, np.int8)
+        for j in c:
+            v[j] = 1
+        t = np.vstack([cur, v.reshape(1, -1)])
+        if _rank(t) > cur.shape[0]:
+            cur = t; basis.append(c)
+            if len(basis) == dim:
+                break
+    use = [0] * E
+    for c in basis:
+        for j in c:
+            use[j] += 1
+    return max(use) if use else 0
+
+
+def _crash(text):
+    return {"combined_score": CRASH_SCORE, "correct": False,
+            "public": {"valid": 0}, "private": {}, "extra_data": {},
+            "text_feedback": text}
+
+
+def _invalid(reason):
+    return {"combined_score": INVALID_SCORE, "correct": True,
+            "public": {"valid": 0, "reason": reason}, "private": {},
+            "extra_data": {},
+            "text_feedback": f"INVALID ({INVALID_SCORE:.0f}): {reason}"}
+
+
+def aggregate_fn(results: list) -> dict:
+    if not results:
+        return _crash("run_experiment returned no result.")
+    propose = results[0]
+    if not callable(propose):
+        return _crash(f"run_experiment must return the propose_graph callable, "
+                      f"got {type(propose).__name__}.")
+    try:
+        spec = propose()
+    except Exception:
+        return _crash("Candidate propose_graph() crashed:\n" + traceback.format_exc())
+    try:
+        edges, dummies, verts = parse_spec(spec)
+    except SpecError as e:
+        return _invalid(str(e))
+    except Exception:
+        return _crash("Graph parsing crashed:\n" + traceback.format_exc())
+
+    E = len(edges)
+    lam2, weak_side, crossing = lambda2_and_fiedler(edges, verts)
+    rho = congestion(edges, verts)
+    deg = {v: 0 for v in verts}
+    for (u, v) in edges:
+        deg[u] += 1; deg[v] += 1
+    maxdeg = max(deg.values())
+    certified = lam2 >= LAM2_MIN - LAM2_EPS
+    checks_raw = E + 1                       # (12+d) A_v + (E-(12+d)+1) cycles
+    qpc = 2 * E + 1                          # their qubits+checks objective
+
+    if certified:
+        score = float((E_BASE - E)
+                      - TIE_CONG * max(0, rho - 2)
+                      - TIE_DEG * max(0, maxdeg - 4))
+        verdict = (
+            f"CERTIFIED at E={E} edges (lambda_2={lam2:.3f} >= {LAM2_MIN} — "
+            f"certified Cheeger >= {lam2 / 2:.2f}); score={score:+.2f}. In GeneCS "
+            f"accounting: {E} qubits + {checks_raw} checks = {qpc} (their "
+            f"published gross result: 24 + 25 = 49; their algorithm at these "
+            f"criteria: E={E_BASE} on every measured seed). "
+            f"{len(dummies)} dummies, congestion rho={rho}, max degree {maxdeg}. "
+            + (f"BEATS the GeneCS compiler by {E_BASE - E} edge(s) — verify "
+               f"end-to-end by scoring this graph in ../gross_code_gauging/. "
+               if E < E_BASE else
+               f"Matches their compiler; the win condition is a certified "
+               f"E <= {E_BASE - 1}. ")
+            + f"To shrink: try removing an edge whose loss keeps lambda_2 >= "
+            f"{LAM2_MIN} (their add-only first-passage search never checks "
+            f"this), swapping edges across the weakest spectral cut "
+            f"{weak_side} ({crossing} crossing now), replacing several port "
+            f"edges with a well-placed dummy hub (free in this accounting), "
+            f"or doubling a strategic edge."
+        )
+    else:
+        score = float(-8.0 - PEN_LAM2 * (LAM2_MIN - lam2) - 0.05 * E)
+        verdict = (
+            f"NOT CERTIFIED: lambda_2={lam2:.3f} < {LAM2_MIN} (certified "
+            f"Cheeger only {lam2 / 2:.2f}; the acceptance is GeneCS's own "
+            f"fitted gross-code criterion); score={score:.2f}. E={E} edges, "
+            f"{len(dummies)} dummies, congestion rho={rho}, max degree "
+            f"{maxdeg}. The weakest spectral cut is {weak_side} with only "
+            f"{crossing} crossing edge(s) — add or re-route edges across THAT "
+            f"cut to raise lambda_2 fastest. (Note: the hand-crafted WY/IBM "
+            f"seed itself sits here at lambda_2=0.925 — its real distance 12 "
+            f"is IP-proven but the spectral certificate cannot see it; this "
+            f"task races the CERTIFICATE objective on purpose.)"
+        )
+
+    public = {
+        "combined_score": round(score, 3), "valid": 1,
+        "certified": int(certified), "lam2": round(lam2, 4),
+        "cheeger_cert": round(lam2 / 2, 4),
+        "edges": E, "dummies": len(dummies),
+        "checks_raw": checks_raw, "qubits_plus_checks": qpc,
+        "congestion": rho, "max_degree": maxdeg,
+        "weak_cut_side": weak_side, "weak_cut_crossing": crossing,
+    }
+    private = {
+        "lam2_min": LAM2_MIN, "e_base": E_BASE,
+        "pen_lam2": PEN_LAM2, "tie_cong": TIE_CONG, "tie_deg": TIE_DEG,
+    }
+    return {"combined_score": score, "correct": True, "public": public,
+            "private": private, "extra_data": {}, "text_feedback": verdict}
+
+
+def _force_utf8_stdio():
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+        except Exception:
+            pass
+
+
+def main(program_path: str, results_dir: str) -> None:
+    _force_utf8_stdio()
+    print(f"Evaluating program: {program_path}")
+    print(f"Saving results to: {results_dir}")
+    os.makedirs(results_dir, exist_ok=True)
+    print(f"Race criteria: lambda_2 >= {LAM2_MIN} (GeneCS fitted gross-code "
+          f"acceptance), objective = minimize E (their qubits+checks = 2E+1); "
+          f"baseline to beat: their Algorithm 1 at E={E_BASE}.")
+    metrics, correct, err = run_shinka_eval(
+        program_path=program_path,
+        results_dir=results_dir,
+        experiment_fn_name="run_experiment",
+        num_runs=1,
+        get_experiment_kwargs=lambda i: {},
+        aggregate_metrics_fn=aggregate_fn,
+        validate_fn=None,
+    )
+    if not correct:
+        print(f"Evaluation reported correct=False: {err}")
+    else:
+        print("Evaluation completed successfully.")
+    print(f"combined_score = {metrics.get('combined_score')!r}")
+    if isinstance(metrics.get("public"), dict):
+        for k, v in metrics["public"].items():
+            print(f"  public.{k} = {v!r}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="gross_code_spectral_synth evaluator")
+    parser.add_argument("--program_path", type=str, default="initial.py")
+    parser.add_argument("--results_dir", type=str, required=True)
+    args = parser.parse_args()
+    main(args.program_path, args.results_dir)

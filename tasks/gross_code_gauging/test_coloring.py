@@ -13,11 +13,13 @@ Checks:
   * both protocol circuits (paper reference gadget) are noiseless-deterministic;
   * preview_gadget's structural fields match the evaluator's on the reference
     gadget AND on the matching-only (prune-all-expansion) gadget;
-  * fault-distance probe regression (v4): on the paper gadget the dressed
-    attack finds 12/12 (X/Z) and d_hat = 12 = R; on the gcg1 champion tree it
-    finds a dressed X-logical of weight <= 9 (< D_TARGET), and R caps d_hat
-    at 5 when R=5; on the matching-only graph it finds <= 9 (WY note that the
-    bare 18-edge CKBB graph lacks the expansion for distance 12).
+  * fault-set probe regression (v4.1): on the paper gadget the dressed attack
+    finds 12/12 (X/Z) with a ~zero tail price; on the gcg1 champion tree it
+    finds a dressed X-logical of weight <= 9 and reports its support, R caps
+    the lightest set at 5 when R=5, and the tail pricing + crossover
+    diagnostics behave (tiny price at the gate point, a finite crossover p);
+    on the matching-only graph it finds <= 9 (WY note the bare 18-edge CKBB
+    graph lacks the expansion for distance 12).
 """
 import os
 import sys
@@ -104,10 +106,11 @@ def test_coloring_and_preview():
           "gadgets schedule-consistent, noiseless-deterministic, preview matches evaluator")
 
 
-def test_fault_distance_probes():
-    """v4 regression: the probe suite must reproduce the known separations
-    (paper 12 / matching-only <= 9 / gcg1 tree <= 9 with R capping at 5).
-    Decision-stable across seeds even though the estimates jitter above 10."""
+def test_fault_set_probes_and_pricing():
+    """v4.1 regression: the probe suite must reproduce the known separations
+    (paper 12/12 with ~zero tail; matching-only <= 9; gcg1 tree <= 9 spatial
+    with R capping the lightest set at 5), and the tail pricing/crossover
+    diagnostics must behave."""
     ev, ini = _import()
     matching = _matching_edges(ev)
     tree = [(0, 1), (1, 2), (2, 3), (3, 8), (8, 11), (11, 4),
@@ -122,36 +125,39 @@ def test_fault_distance_probes():
         return g, ev.estimate_fault_distance(g, r, cx, cz, rng)
 
     for seed in (0, 1):
-        g, (d_hat, parts, weakest, attack) = probe(
+        g, (d_hat, parts, counts, weakest, attack) = probe(
             matching + [(2, 9), (2, 4), (9, 11), (10, 11)], 12, seed)
         assert parts["dressed_x"] == 12 and parts["dressed_z"] == 12, \
             ("paper dressed", parts)
         assert d_hat == 12, ("paper d_hat", d_hat, parts)
+        # weight-12 sets price at ~C(12,6)*p^6 ~ 1e-14 — nothing
+        assert ev.tail_bound(parts, counts, ev.P_GATE) < 1e-8, "paper tail ~ 0"
 
-        g, (d_hat, parts, _, _) = probe(matching, 12, seed)
+        g, (d_hat, parts, counts, _, _) = probe(matching, 12, seed)
         assert parts["dressed_x"] is not None and parts["dressed_x"] <= 9, \
             ("matching-only dressed_x", parts)
-        assert d_hat < ev.D_TARGET, ("matching-only d_hat", d_hat)
 
-        g, (d_hat, parts, _, attack) = probe(tree, 12, seed)
+        g, (d_hat, parts, counts, _, attack) = probe(tree, 12, seed)
         assert parts["dressed_x"] is not None and parts["dressed_x"] <= 9, \
             ("tree dressed_x", parts)
-        assert "edges" in attack["X"]["support"] or attack["X"]["support"], \
+        assert attack["X"]["support"], \
             ("tree attack should name the found operator", attack)
 
-        g, (d_hat, parts, weakest, _) = probe(tree, 5, seed)
-        assert d_hat <= 5, ("tree R=5 timelike cap", d_hat, parts)
-    # LDPC caps: the gcg1 tree's routed Z-checks exceed the weight cap, so the
-    # full evaluator rejects it as INVALID even before the probes.
-    edges, dummies, _ = ev.parse_spec({"edges": tree, "rounds": 5})
-    g = ev.build_gauged(edges, dummies)
-    assert max(g["wz_max"], g["wx_max"]) > ev.WMAX_CHECK, \
-        ("tree should violate the LDPC weight cap", g["wz_max"], g["wx_max"])
-    print("OK: fault-distance probes reproduce the known separations "
-          "(paper 12/12; matching-only & tree <= 9; R caps at 5; tree also "
-          "violates the LDPC weight cap)")
+        g, (d_hat, parts, counts, weakest, _) = probe(tree, 5, seed)
+        assert d_hat <= 5, ("tree R=5 lightest set", d_hat, parts)
+        # tail pricing: the R=5 chains price at ~n_av*C(5,3)*p^3 ~ 1e-6 at the
+        # gate point — small (the tree is allowed through, per the run owner's
+        # criterion) but nonzero, and the crossover diagnostic must exist
+        t = ev.tail_bound(parts, counts, ev.P_GATE)
+        assert 0.0 < t < 1e-4, ("tree R=5 tail at gate", t)
+        cp = ev.tail_crossover_p(parts, counts)
+        assert cp is not None and cp < ev.P_GATE, ("tree crossover p", cp)
+    print("OK: fault-set probes reproduce the known separations "
+          "(paper 12/12, tail ~0; matching-only & tree <= 9 with named "
+          "operators; R caps the lightest set at 5, priced ~1e-6 at the gate "
+          "point with a finite crossover p)")
 
 
 if __name__ == "__main__":
     test_coloring_and_preview()
-    test_fault_distance_probes()
+    test_fault_set_probes_and_pricing()

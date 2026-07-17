@@ -72,11 +72,13 @@ def calibrate(args):
     assert ev._noiseless_ok(circs[1][1]) and ev._noiseless_ok(circs[1][2])
 
     rng = np.random.default_rng(0)
-    d_hat, parts, weakest, _ = ev.estimate_fault_distance(
+    d_hat, parts, counts, weakest, _ = ev.estimate_fault_distance(
         g, rounds, circs[1][1], circs[1][2], rng)
     print(f"reference gadget OK (Q=41, deformed depths {meta['depth_def']}); "
-          f"fault-distance estimate d_hat={d_hat} (weakest={weakest}, parts={parts}) "
-          f"— the evaluator's D_TARGET={ev.D_TARGET} must be <= the spatial parts here.")
+          f"lightest probed fault set weight {d_hat} (weakest={weakest}, "
+          f"parts={parts}); tail price at gate p: "
+          f"{ev.tail_bound(parts, counts, ev.P_GATE):.2e} (should be ~0 for "
+          f"the reference).")
 
     ev.P_BUDGET = ((args.errors, args.shots_lo),
                    (args.errors, args.shots_gate),
@@ -152,16 +154,20 @@ def compare(args):
         print(f"[{time.strftime('%H:%M:%S')}] {name}: score={res['combined_score']:.2f} "
               f"({rows[-1][3]:.0f} s)", flush=True)
 
-    print("\n=== v4 comparison table ===")
-    hdr = (f"{'gadget':<22} {'score':>7} {'Q':>3} {'R':>3} {'d_hat':>5} "
-           f"{'m_lo':>6} {'m_gate':>6} {'LER_gate':>9} {'feasible':>8}")
+    print("\n=== v4.1 comparison table ===")
+    hdr = (f"{'gadget':<22} {'score':>7} {'Q':>3} {'R':>3} {'w_min':>5} "
+           f"{'tail@gate':>9} {'cross_p':>8} {'m_lo':>6} {'m_gate':>6} "
+           f"{'LER_gate':>9} {'feasible':>8}")
     print(hdr); print("-" * len(hdr))
     for name, score, pub, dt in rows:
         if pub.get("valid"):
-            feas = "YES" if (pub.get("protected") and score > -8) else "no"
+            feas = "YES" if score > -8 else "no"
+            cp = pub.get("tail_crossover_p")
+            cps = f"{cp:.0e}" if cp is not None else "none"
             print(f"{name:<22} {score:>7.2f} {pub['elements']:>3} {pub['rounds']:>3} "
-                  f"{pub['fault_dist_est']:>5} {pub['margin_lo']:>6.2f} "
-                  f"{pub['margin_gate']:>6.2f} {pub['overall_ler']:>9.2e} {feas:>8}")
+                  f"{pub['fault_dist_est']:>5} {pub['tail_gate']:>9.1e} {cps:>8} "
+                  f"{pub['margin_lo']:>6.2f} {pub['margin_gate']:>6.2f} "
+                  f"{pub['overall_ler']:>9.2e} {feas:>8}")
         else:
             print(f"{name:<22} {score:>7.2f}  INVALID: {pub.get('reason', '?')[:60]}")
 

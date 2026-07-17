@@ -74,12 +74,15 @@ never publishes its own Alg-1 beta; tau is likewise never given a number).
 Measured beta -> size frontier here (restarts=150, seed 1): beta 0.35 ->
 19 edges (Q=35), 0.46 -> 20 (Q=37), 0.55 -> 21 (Q=39), 0.65 -> 22 (Q=41),
 0.8 -> 23 (Q=43). The evaluator's dressed-logical attack measures the
-beta=0.46 graph at X-distance 10 (feasible, score +4 — the current benchmark)
-and the beta=0.35 graph at X-distance 9 (UNPROTECTED — rejected, despite its
-spectral certificate; certified floors are 5.6 and 4.2 respectively, so the
-certificate is loose in BOTH directions: 0.46 under-promises a real 10, 0.35
-would let a broken graph through — which is exactly why this task verifies
-by attack instead of gating on the certificate).
+beta=0.46 graph at X-distance 10 and the beta=0.35 graph at X-distance 9 —
+against certified floors of 5.6 and 4.2 respectively, so the spectral
+certificate is loose in BOTH directions (0.46 under-promises a real 10;
+0.35 hides a genuinely lighter operator the certificate never sees). Under
+the evaluator's v4.1 tail pricing both are feasible mid-Pareto baselines
+(a weight-9/10 dressed logical prices at ~1e-11 at the benchmark rates);
+the weight-9 operator goes on beta=0.35's record, and the reported
+tail-crossover p says how far down in physical error rate each graph's
+comparison against the hand-crafted reference stays meaningful.
 """
 
 from __future__ import annotations

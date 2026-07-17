@@ -55,11 +55,15 @@ SCORE (higher is better; deterministic, < 1 s per eval): the FRONTIER
   expansion level (measured anchors (0.438,18) (0.70,19) (1.105,20)
   (1.202,21) (1.438,22) (1.722,23) (2.0,24), piecewise linear, capped at
   24 above the acceptance threshold):
-  lam2 >= 0.438 (the G0 level):  E_theirs(lam2) - E
+  lam2 >= 0.438 (the G0 level):  3.0 + E_theirs(lam2) - E
                                    - 0.02*max(0, congestion-2)
                                    - 0.01*max(0, maxdeg-4)
-      positive = beats their compiler at its own beta knob; their outputs
-      tie at ~0; CERTIFIED (lam2 >= 2.0) graphs get +1 per edge below 24.
+      The scale: THIS SEED boots at ~+0.5 (valid, modest); +3.0 is
+      GeneCS-compiler PARITY (their measured outputs land there);
+      anything above +3 beats the published pipeline at its own beta
+      knob; CERTIFIED (lam2 >= 2.0) graphs earn +1 more per edge below
+      24 (the known annealing result, certified E=21, scores +6; the
+      open-question region below that is worth more).
   lam2 < 0.438:  -4 - 6*(0.438 - lam2) - 0.05*E   (no frontier credit
       below their own start graph; gradient points back up)
   invalid spec: -100;  crash: -1000.

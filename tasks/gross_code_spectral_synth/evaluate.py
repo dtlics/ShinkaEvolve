@@ -59,18 +59,21 @@ protocol by ../gross_code_gauging/ (calibrate.py --compare machinery).
   valid, lam2 below the G0 level       ->  -4 - 6*(0.438 - lam2) - 0.05*E
        (their add-only pipeline has no output below its own start graph,
         so there is no frontier credit down there — only a gradient up)
-  valid, lam2 >= G0 level              ->  E_theirs(lam2) - E  - tiebreaks
+  valid, lam2 >= G0 level              ->  3.0 + E_theirs(lam2) - E
+                                           - tiebreaks
                                            (- 0.02*max(0, rho-2)
                                             - 0.01*max(0, maxdeg-4))
-       FRONTIER SCORE: positive = beats their compiler at its own beta
-       knob (fewer edges for the same certified expansion level); their
-       measured outputs tie at ~0; a CERTIFIED graph below 24 edges is
-       automatically >= +1 per edge saved. MEASURED HEADROOM: plain local
-       annealing already finds certified E=21 (+3) and lambda_2=2.28 at
-       E=23 — their frontier is beatable by +0.34..+0.80 everywhere — so
-       the real discovery target is the TRUE minimum certified E (the
-       Fiedler bound lambda_2 <= vertex-connectivity <= min-degree only
-       forces E >= 12; where in [12, 21] the boundary lies is open).
+       FRONTIER SCORE, offset so the scale reads naturally for evolution:
+       the WY seed boots at ~+0.5 (valid, modest), +3.0 is GeneCS-compiler
+       PARITY (their measured outputs land there), anything above +3 beats
+       the published pipeline at its own beta knob, and a CERTIFIED graph
+       earns +1 more per edge below 24 (certified E=21 -> +6). MEASURED
+       HEADROOM: plain local annealing already finds certified E=21 and
+       lambda_2=2.28 at E=23 — their frontier is beatable by +0.34..+0.80
+       everywhere — so the real discovery target is the TRUE minimum
+       certified E (the Fiedler bound lambda_2 <= vertex-connectivity <=
+       min-degree only forces E >= 12; where in [12, 21] the boundary
+       lies is open).
 
 Anti-gaming: the candidate returns only the edge list; the Laplacian, the
 eigensolve, the congestion and the scoring all live here, and the eval is
@@ -109,6 +112,13 @@ GENECS_FRONTIER = ((0.4384, 18),   # G0, the 18-edge path-matching motif
                    (1.438, 22), (1.722, 23), (LAM2_MIN, 24))
 TIE_CONG    = 0.02      # congestion tiebreak
 TIE_DEG     = 0.01      # degree tiebreak
+SCORE_OFFSET = 3.0      # constant shift of the frontier score so the scale
+                        # reads naturally for evolution: the WY seed boots at
+                        # a modest POSITIVE (~+0.5), GeneCS-compiler parity is
+                        # the +3.0 milestone (not the origin), and anything
+                        # above +3 beats the published pipeline. Pure offset —
+                        # every gradient and ordering is unchanged; negative
+                        # scores are reserved for below-seed-quality graphs.
 
 
 def frontier_edges(lam2):
@@ -328,13 +338,15 @@ def aggregate_fn(results: list) -> dict:
         # Positive = beats the GeneCS compiler at its own beta knob; 0 = ties
         # its measured outputs; certified E <= 23 is automatically >= +1.
         f_e = frontier_edges(lam2)
-        score = float(f_e - E - tiebreak)
+        score = float(SCORE_OFFSET + f_e - E - tiebreak)
         status = "CERTIFIED" if certified else "uncertified"
         verdict = (
             f"{status} at E={E} edges, lambda_2={lam2:.3f} (certified Cheeger "
             f">= {lam2 / 2:.2f}; acceptance is lambda_2 >= {LAM2_MIN}); "
-            f"score={score:+.2f} = (their compiler needs {f_e:.1f} edges for "
-            f"this expansion level) - (your {E}) - tiebreaks. In GeneCS "
+            f"score={score:+.2f} = {SCORE_OFFSET} + (their compiler needs "
+            f"{f_e:.1f} edges for this expansion level) - (your {E}) - "
+            f"tiebreaks; {SCORE_OFFSET:+.1f} is GeneCS-compiler PARITY — "
+            f"anything above it beats the published pipeline. In GeneCS "
             f"accounting: {E} qubits + {checks_raw} checks = {qpc} (their "
             f"published gross result: 24 + 25 = 49). {len(dummies)} dummies, "
             f"congestion rho={rho}, max degree {maxdeg}. "
@@ -384,6 +396,7 @@ def aggregate_fn(results: list) -> dict:
     }
     private = {
         "lam2_min": LAM2_MIN, "e_base": E_BASE,
+        "score_offset": SCORE_OFFSET,
         "genecs_frontier": [list(p) for p in GENECS_FRONTIER],
         "tie_cong": TIE_CONG, "tie_deg": TIE_DEG,
     }

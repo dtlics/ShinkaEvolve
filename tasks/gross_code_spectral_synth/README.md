@@ -74,16 +74,22 @@ linear; capped at 24 above the acceptance threshold — overshoot earns
 nothing, matching their first-passage semantics).
 
 ```
-λ₂ ≥ 0.438 (their G0 level):  E_theirs(λ₂) − E − 0.02·max(0,ρ−2) − 0.01·max(0,Δmax−4)
+λ₂ ≥ 0.438 (their G0 level):  3.0 + E_theirs(λ₂) − E − 0.02·max(0,ρ−2) − 0.01·max(0,Δmax−4)
 λ₂ < 0.438:                   −4 − 6·(0.438 − λ₂) − 0.05·E   (no frontier credit
                               below their own start graph)
 invalid spec: −100;  crash: −1000
 ```
 
-Positive = beats their compiler at its own β knob; their measured outputs
-tie at ~0; a **certified** (λ₂ ≥ 2) graph earns +1 per edge below 24.
-Measured smoke: WY seed −2.48, their E=24 output −0.02, an annealed
-certified E=23 graph +0.95, a 12-ring −5.62.
+The +3.0 offset makes the scale read naturally for evolution (the seed
+boots modestly positive instead of the GeneCS optimum sitting at the
+origin — kinder to the mutation LLM's prompt framing and to the
+stagnation logic's relative thresholds, with every gradient unchanged):
+the **seed ≈ +0.5**; **+3.0 = GeneCS-compiler parity** (their measured
+outputs land there); anything above +3 beats the published pipeline at
+its own β knob; a **certified** (λ₂ ≥ 2) graph earns +1 more per edge
+below 24. Measured smoke: WY seed **+0.52**, their E=24 output **+2.98**,
+an annealed certified E=23 graph **+3.95** (known annealing best,
+certified E=21, would score **+6**), a 12-ring **−5.62**.
 
 **Measured headroom (the reward is dense and the jackpot reachable):**
 plain simulated annealing over edge swaps already finds a **certified

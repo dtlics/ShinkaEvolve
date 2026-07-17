@@ -1,87 +1,131 @@
-"""ShinkaEvolve EVALUATOR — the GeneCS-criteria spectral synthesis RACE.
+"""ShinkaEvolve EVALUATOR — minimum-edge spectral certification on the
+gross-code gauging graph (v2, post-star-loophole rework).
 
-Head-to-head question: is Shinka-style evolution a better OPTIMIZER than the
-GeneCS compiler heuristic (Zhou, Javadi-Abhari, Li, arXiv:2605.21746,
-Algorithm 1: deficit-weighted random edge addition with first-passage
-acceptance, 100 restarts) at GeneCS's OWN acceptance criteria, on GeneCS's
-own benchmark instance — the gauging-measurement graph for the weight-12
-logical X_alpha of the [[144,12,12]] gross code?
+THE PROBLEM (self-contained, combinatorial): find the SMALLEST simple graph
+on the 12 labelled "ports" (plus optional dummy vertices) whose Laplacian
+algebraic connectivity satisfies
 
-THE CRITERIA ARE THEIRS, REVERSE-ENGINEERED FROM THEIR PUBLISHED OUTCOME
-(../gross_code_gauging/genecs.py --fit-published): their gross-code Full-Opt
-result (24 ancilla qubits, 25 checks, degrees 7/8) pins E = 24 mono-layer,
-reproduced exactly by acceptance lambda_2(G) >= 2.0 — i.e. certified Cheeger
-constant >= 1 via the spectral proxy (Cheeger >= lambda_2/2), which is the
-full Williamson-Yoder Theorem 2 expansion bar. In their generic accounting
-checks = (#vertices) A_v + (E - #vertices + 1) cycle checks = E + 1
-regardless of dummies, so qubits + checks = 2E + 1 and THE OBJECTIVE IS
-PURELY: MINIMIZE THE EDGE COUNT E SUBJECT TO lambda_2 >= 2.
+    lambda_2(G) >= 2.0
 
-    spec = {"edges": [(u, v), ...]}      (no rounds — no protocol here)
+i.e. certified Cheeger constant >= 1 via Cheeger's inequality h >= lambda_2/2
+— the expansion bar of Williamson-Yoder Theorem 2 (arXiv:2410.02213) for the
+gauging graph of the weight-12 logical X_alpha of the [[144,12,12]] gross
+code. Ports 0..11 are that logical's qubits.
 
-  * labels 0..11  = the 12 qubits of supp(X_alpha) (the ports);
-  * labels 12..35 = OPTIONAL dummy vertices (a structural move the GeneCS
-    pipeline does not have: in their accounting a dummy is FREE — +1 A_v
-    check, -1 cycle check — but changes which topologies exist);
-  * parallel edges allowed (another move their simple-graph family lacks;
-    a doubled edge is the gauging double-gross motif), no self-loops.
+PROVENANCE, STATED HONESTLY (post-run verification, do not oversell): this
+criterion is STRICTER than the GeneCS compiler's real acceptance — the paper
+(arXiv:2605.21746) gates at lambda_2 >= 2*beta with beta < 1 (~0.34-0.46),
+and its gross-code result (24 qubits / 25 checks, degrees 7/8, Table 2) is
+degree-augmentation-driven with NO minimality claim. So this task is NOT a
+head-to-head against GeneCS's published numbers; it is a clean spectral
+minimization problem grounded in the WY expansion desideratum, with the
+GeneCS-style constructor's measured output (E=24 at lambda_2 >= 2) and the
+hand-crafted WY 22-edge graph (lambda_2 = 0.925, UNcertified — its distance
+12 is IP-proven, which the spectral certificate cannot see) as context.
 
-WHY EVOLUTION CAN WIN (the structural gaps in their search): Algorithm 1 is
-add-only over the fixed path-matching graph with first-passage acceptance —
-it cannot remove a redundant earlier addition, cannot swap, cannot drop
-path-matching edges (any connected graph deforms via paths — T-joins — so
-G0-containment is their restriction, not the theory's), and has no dummy
-vertices. Measured wall: within their family E jumps 23 (lambda_2 ~ 1.72)
--> 24 (lambda_2 = 2.000 exactly) on every seed; the spectral floor is far
-below (degree >= 2 only forces E >= 12). Whether ANY 12-port multigraph
-(possibly with dummies) reaches lambda_2 >= 2 at E <= 23 is the race.
+STATE OF KNOWLEDGE (independently verified — the baselines to beat):
+  * certified E=20 EXISTS (run spectral_v1's record, re-verified from the
+    raw edge list): degrees 3^8 4^4, integral Laplacian spectrum
+    {0, 2^5, 4^3, 6^3}, lambda_2 = 2 exactly. It is the SEED of this task.
+  * 300-restart simulated annealing reaches only certified E=21 and cannot
+    reproduce E=20 from scratch; all circulants C_12(S) need E=24; dummy /
+    bipartite constructions (K_{2,12}, cones) need E=24 — dummies DILUTE
+    lambda_2 and are useless for certification (verified).
+  * E=19 lambda_2 ceiling found so far ~1.59, E=18 ~1.47; no 12-vertex
+    3-regular graph can certify (provable by an adjacency-trace argument).
+    The Fiedler bound (lambda_2 <= vertex connectivity <= min degree) only
+    forces E >= 12. So certified E <= 19 is the OPEN jackpot: strong
+    evidence says it does not exist, and any find would be a genuine
+    combinatorial discovery. Secondary targets: structurally distinct
+    certified E=20 graphs (the known one is a rare integral graph; the
+    novelty machinery rewards distinct structures) and better secondary
+    profiles (congestion, max degree) at E=20-22.
 
-THE SEED is the hand-crafted WY/IBM 22-edge graph of the 41-element paper
-gadget — which their certificate REJECTS (lambda_2 = 0.925, certified
-Cheeger 0.46 < 1) even though its deformed distance 12 is proven by integer
-programming. The certificate cannot see actual distance; this task
-deliberately optimizes THEIR criterion anyway (the race is about search,
-not physics), and any certified winner should be cross-scored on the real
-protocol by ../gross_code_gauging/ (calibrate.py --compare machinery).
+    spec = {"edges": [(u, v), ...]}      (SIMPLE graph: no parallel edges)
+
+  * labels 0..11  = the 12 ports (must all be present and connected);
+  * labels 12..35 = optional dummy vertices (allowed but verified
+    self-defeating for certification — they dilute lambda_2);
+  * no self-loops, no parallel edges (v2: multigraphs removed so the
+    minimum-edge claim stays a clean simple-graph statement), <= 60 edges,
+    <= 24 dummies, max degree <= 12.
+
+================  WHY v2 (the star-loophole postmortem)  =======================
+Run spectral_v1's champion (+11.67) was an E=11 PORT-STAR with lambda_2 =
+1.0 — uncertified, physically the worst possible expander. v1's score paid
+"frontier credit" for reaching intermediate lambda_2 levels with few edges,
+interpolated from the constructor's measured curve; but that curve lives on
+G0-containing graphs (E >= 18) while sparse hubs reach mid-band lambda_2
+trivially (a star has lambda_2 = 1 exactly), so the credit at low lambda_2
+was wildly over-generous and the degenerate corner became the global
+maximum — the same failure class as the gcg1 spanning tree: any region
+where score can improve while the certifying quantity degrades will become
+the champion. v2 removes the entire mechanism:
+
+  1. EDGES ARE ONLY REWARDED AFTER CERTIFICATION. Below lambda_2 = 2 the
+     edge count earns nothing (and costs nothing): the only way up is
+     raising lambda_2.
+  2. CERTIFIED ALWAYS DOMINATES in the competitive region: every certified
+     graph with E <= 24 outscores every possible uncertified graph
+     (uncertified scores are capped below 5.0; certified starts at +6.0
+     for E=24).
+  3. LEAVES ARE PRICED AS CERTIFICATION-BLOCKERS: by Fiedler,
+     lambda_2 <= vertex connectivity <= min degree, so ANY degree-1 vertex
+     caps lambda_2 at 1 and makes certification impossible while it
+     exists. Each leaf costs -1.0 in the uncertified branch — a port-star
+     (11 leaves) scores ~-8.6 instead of +11.67.
 
 ================  SCORING (Shinka MAXIMISES combined_score)  ===================
-  lam2       = second-smallest eigenvalue of the (multi)graph Laplacian
-  CERTIFIED := lam2 >= LAM2_MIN (2.0; env SPECTRAL_LAM2_MIN)
+  lam2       = algebraic connectivity of the (simple) graph Laplacian
+  CERTIFIED := lam2 >= 2.0 - 1e-9   (integer spectra are common here; the
+                                     epsilon absorbs eigensolver rounding)
+  leaves     = number of degree-1 vertices (ports or dummies)
   rho        = congestion: max #(minimum-cycle-basis cycles) through an edge
-               (their secondary criterion; gentle tiebreak only)
-  E_theirs(lam2) = the GeneCS compiler's measured lambda_2-vs-E frontier
-               (GENECS_FRONTIER anchors, piecewise linear, capped at 24
-               above the acceptance threshold — overshoot earns nothing,
-               matching their first-passage semantics)
+  tiebreaks  = 0.02*max(0, rho - 2) + 0.01*max(0, maxdeg - 4)   (tiny)
 
-  crash / garbage return               -> -1000   (correct=False)
-  invalid spec                         ->  -100   (+ named reason)
-  valid, lam2 below the G0 level       ->  -4 - 6*(0.438 - lam2) - 0.05*E
-       (their add-only pipeline has no output below its own start graph,
-        so there is no frontier credit down there — only a gradient up)
-  valid, lam2 >= G0 level              ->  3.0 + E_theirs(lam2) - E
-                                           - tiebreaks
-                                           (- 0.02*max(0, rho-2)
-                                            - 0.01*max(0, maxdeg-4))
-       FRONTIER SCORE, offset so the scale reads naturally for evolution:
-       the WY seed boots at ~+0.5 (valid, modest), +3.0 is GeneCS-compiler
-       PARITY (their measured outputs land there), anything above +3 beats
-       the published pipeline at its own beta knob, and a CERTIFIED graph
-       earns +1 more per edge below 24 (certified E=21 -> +6). MEASURED
-       HEADROOM: plain local annealing already finds certified E=21 and
-       lambda_2=2.28 at E=23 — their frontier is beatable by +0.34..+0.80
-       everywhere — so the real discovery target is the TRUE minimum
-       certified E (the Fiedler bound lambda_2 <= vertex-connectivity <=
-       min-degree only forces E >= 12; where in [12, 21] the boundary
-       lies is open).
+  crash / garbage return       -> -1000   (correct=False)
+  invalid spec                 ->  -100   (+ named reason; includes parallel
+                                           edges, self-loops, degree > 12,
+                                           disconnection)
+  valid, UNCERTIFIED           ->  2.5 * lam2 - 1.0 * leaves
+                                   - 1.0 * max(0, E - 24) - tiebreaks
+       monotone in lambda_2, hard-capped below 5.0 (< any certified score
+       at E <= 24, whose floor is 6.0 minus a bounded tiebreak >= ~5.7);
+       NO edge-count REWARD — sparsity buys nothing until the certificate
+       holds (v1's star lesson: only penalties, never rewards, for edges
+       below certification; the oversize term just pushes E > 24 bloat
+       back toward the competitive region and removes the lambda_2->2-
+       from-below plateau that would otherwise out-order oversized
+       certified graphs). The WY 22-edge context graph sits at ~+2.3; a
+       port-star at ~-8.6; a bare 12-cycle at ~+0.7.
+  valid, CERTIFIED             ->  6.0 + (24 - E) - tiebreaks
+       E=24 (constructor level) -> +6, E=21 (SA record) -> +9,
+       E=20 (the seed / known record) -> +10, E=19 (open jackpot) -> +11,
+       and +1 more per further edge. At equal E the tiebreaks prefer lower
+       congestion and lower max degree — measured to matter: the DEGENERATE
+       second known certified-E=20 graph, the two-hub K_{2,10} (lambda_2 =
+       2 exactly, vertex connectivity 2, congestion 9, max degree 10),
+       scores 9.80 and correctly ranks BELOW the genuine record's 9.96.
+       It is disclosed here so no search budget is wasted rediscovering
+       it; structurally NEW certified E=20 graphs are rewarded through the
+       archive's novelty machinery, not the scalar.
 
 Anti-gaming: the candidate returns only the edge list; the Laplacian, the
-eigensolve, the congestion and the scoring all live here, and the eval is
-DETERMINISTIC (no sampling, no seeds) — nothing to get lucky against.
+eigensolve, the leaf count, the congestion and the scoring all live here,
+and the eval is DETERMINISTIC at the GRAPH level (edges are canonically
+sorted before scoring, so permuting the submitted list cannot move the
+congestion tiebreak). The v2 invariant — no uncertified graph outscores
+ANY certified graph with E <= 24 — is checked by test_spectral.py
+(landmark regressions + a fuzz property test), and an independent
+adversarial exploit-hunt (3 attack agents + numeric verification) found no
+breaks-intent exploit: the uncertified cap and the certified floor hold
+analytically and empirically, the 1e-9 epsilon is load-bearing (the
+record's lambda_2 computes 1.3e-15 below 2) but uninhabited by genuinely
+sub-2 graphs (closest found: 1.7e-4 below), and dummies/hubs/parse tricks
+all fail.
 
-RUNTIME: < 1 s per candidate (12-36-vertex eigensolve + Horton cycle basis).
-Set eval_time ~ 00:02:00; this task is built for very high candidate
-throughput — the race is about search moves, not evaluation cost.
+RUNTIME: < 1 s per candidate. Set eval_time ~ 00:02:00; throughput is the
+whole point. SPECTRAL_LAM2_MIN moves the certification bar (default 2.0).
 """
 
 from __future__ import annotations
@@ -97,48 +141,21 @@ import numpy as np
 from shinka.core import run_shinka_eval
 
 LAM2_MIN    = float(os.environ.get("SPECTRAL_LAM2_MIN", "2.0"))
-LAM2_EPS    = 1e-9      # certification tolerance: graphs whose true lambda_2
-                        # IS the threshold (integer spectra are common here —
-                        # the E=24 GeneCS graphs land at exactly 2) must not
-                        # flip on eigensolver rounding
-E_BASE      = 24        # GeneCS Algorithm 1 at these criteria (measured; also
-                        # matches their published 24-qubit gross Full-Opt)
-# THEIR compiler's measured lambda_2-vs-E frontier (best over seeds, Alg-1 /
-# 100 restarts; from ../gross_code_gauging/genecs.py --fit-published + scans):
-# the anchor of the race score — a candidate is scored by how many edges
-# THEIR compiler needs to reach the candidate's certified expansion level.
-GENECS_FRONTIER = ((0.4384, 18),   # G0, the 18-edge path-matching motif
-                   (0.7007, 19), (1.105, 20), (1.202, 21),
-                   (1.438, 22), (1.722, 23), (LAM2_MIN, 24))
+LAM2_EPS    = 1e-9      # certification tolerance (integer spectra are common)
+E_REF       = 24        # the GeneCS-style constructor's measured output at
+                        # lambda_2 >= 2 (context baseline; certified E=24
+                        # scores +6, every edge below is +1)
+CERT_BASE   = 6.0       # certified-branch floor: strictly above the
+                        # uncertified cap (2.5 * lam2 < 5.0), so certified
+                        # dominates everywhere in the competitive region
+W_LAM       = 2.5       # uncertified: score per unit of lambda_2
+LEAF_PEN    = 1.0       # uncertified: per degree-1 vertex (a leaf caps
+                        # lambda_2 at 1 — Fiedler — so it BLOCKS certification)
 TIE_CONG    = 0.02      # congestion tiebreak
 TIE_DEG     = 0.01      # degree tiebreak
-SCORE_OFFSET = 3.0      # constant shift of the frontier score so the scale
-                        # reads naturally for evolution: the WY seed boots at
-                        # a modest POSITIVE (~+0.5), GeneCS-compiler parity is
-                        # the +3.0 milestone (not the origin), and anything
-                        # above +3 beats the published pipeline. Pure offset —
-                        # every gradient and ordering is unchanged; negative
-                        # scores are reserved for below-seed-quality graphs.
-
-
-def frontier_edges(lam2):
-    """E_theirs(lambda_2): edges the GeneCS compiler needs (piecewise-linear
-    in lambda_2 through the measured anchors; capped at E_BASE above the
-    acceptance threshold — overshooting expansion earns nothing, exactly
-    like their first-passage acceptance). Defined only for lambda_2 >= the
-    G0 level 0.4384 — below that THEIR pipeline has no output at all (it is
-    add-only from G0), so there is no frontier to beat."""
-    pts = GENECS_FRONTIER
-    if lam2 >= pts[-1][0]:
-        return float(pts[-1][1])
-    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
-        if lam2 <= x1:
-            t = (lam2 - x0) / (x1 - x0)
-            return float(y0 + t * (y1 - y0))
-    return float(pts[0][1])
 MAX_EDGES   = 60
 MAX_DUMMIES = 24
-MAX_DEGREE  = 12        # GeneCS's stated degree bound
+MAX_DEGREE  = 12
 INVALID_SCORE = -100.0
 CRASH_SCORE   = -1000.0
 
@@ -157,9 +174,15 @@ def parse_spec(spec):
     if not isinstance(edges_in, (list, tuple)):
         raise SpecError("spec['edges'] must be a list of (u,v) label pairs")
     edges = []
+    seen_pairs = set()
     for e in edges_in:
+        if isinstance(e, str):
+            raise SpecError(f"edge {e!r} is a string, not a pair of integer labels")
         try:
-            u, v = int(e[0]), int(e[1])
+            eu, ev = tuple(e)          # exactly two entries — no silent truncation
+            u, v = int(eu), int(ev)
+            if u != eu or v != ev:     # integral values only — no float rounding
+                raise ValueError
         except Exception:
             raise SpecError(f"edge {e!r} is not a pair of integer labels")
         if u == v:
@@ -167,7 +190,13 @@ def parse_spec(spec):
         if not (0 <= u < N_PORTS + MAX_DUMMIES and 0 <= v < N_PORTS + MAX_DUMMIES):
             raise SpecError(f"edge {e!r} uses a label outside 0.."
                             f"{N_PORTS + MAX_DUMMIES - 1}")
-        edges.append((min(u, v), max(u, v)))
+        pair = (min(u, v), max(u, v))
+        if pair in seen_pairs:
+            raise SpecError(f"parallel edge {pair} — v2 requires a SIMPLE "
+                            f"graph (the minimum-edge claim is a simple-graph "
+                            f"statement)")
+        seen_pairs.add(pair)
+        edges.append(pair)
     if not edges:
         raise SpecError("no edges — the graph must connect all 12 ports")
     if len(edges) > MAX_EDGES:
@@ -180,8 +209,8 @@ def parse_spec(spec):
         adj[u].add(v); adj[v].add(u)
         deg[u] += 1; deg[v] += 1
     if max(deg.values()) > MAX_DEGREE:
-        raise SpecError(f"max degree {max(deg.values())} exceeds the GeneCS "
-                        f"degree bound {MAX_DEGREE}")
+        raise SpecError(f"max degree {max(deg.values())} exceeds the bound "
+                        f"{MAX_DEGREE}")
     seen, stack = set(), [0]
     while stack:
         x = stack.pop()
@@ -194,13 +223,17 @@ def parse_spec(spec):
         raise SpecError(f"graph disconnected: vertices {sorted(missing)} "
                         f"unreachable from port 0 — all 12 ports and every "
                         f"used dummy must lie in one component")
-    return edges, dummies, verts
+    # Canonical order: the congestion tiebreak's Horton tie-breaking depends
+    # on edge indices, so sort the normalized edge list — the score is then a
+    # function of the GRAPH, not of the submitted edge ordering (exploit-hunt
+    # finding: permuted edge lists shifted rho by 1, +-0.02 score).
+    return sorted(edges), dummies, verts
 
 
 def lambda2_and_fiedler(edges, verts):
-    """(lambda_2, Fiedler-vector sign split, #crossing edges) of the
-    multigraph Laplacian — the split is the weakest spectral cut, i.e.
-    exactly where an edge buys the most lambda_2."""
+    """(lambda_2, Fiedler-vector sign split, #crossing edges): the second
+    Laplacian eigenvalue and the weakest spectral cut — where an edge buys
+    the most lambda_2."""
     pos = {v: i for i, v in enumerate(verts)}
     n = len(verts)
     Lap = np.zeros((n, n))
@@ -220,8 +253,8 @@ def lambda2_and_fiedler(edges, verts):
 
 
 def congestion(edges, verts):
-    """Max number of minimum-cycle-basis cycles through any edge (GeneCS's
-    congestion rho), exact via Horton candidates + greedy independence."""
+    """Max number of minimum-cycle-basis cycles through any edge, exact via
+    Horton candidates + greedy independence (tiebreak only)."""
     E = len(edges)
     dim = E - len(verts) + 1
     if dim <= 0:
@@ -252,12 +285,6 @@ def congestion(edges, verts):
                     dd[w] = dd.get(w, 0) + 1
             if all(d % 2 == 0 for d in dd.values()):
                 cands.add(frozenset(c))
-    by_pair = {}
-    for j, e in enumerate(edges):
-        by_pair.setdefault(tuple(e), []).append(j)
-    for js in by_pair.values():
-        for a, b in itertools.combinations(js, 2):
-            cands.add(frozenset({a, b}))
 
     def _rank(Mx):
         Mx = Mx.copy() % 2; r = 0
@@ -327,77 +354,69 @@ def aggregate_fn(results: list) -> dict:
     for (u, v) in edges:
         deg[u] += 1; deg[v] += 1
     maxdeg = max(deg.values())
+    leaves = sum(1 for v in verts if deg[v] == 1)
     certified = lam2 >= LAM2_MIN - LAM2_EPS
-    checks_raw = E + 1                       # (12+d) A_v + (E-(12+d)+1) cycles
-    qpc = 2 * E + 1                          # their qubits+checks objective
-
     tiebreak = TIE_CONG * max(0, rho - 2) + TIE_DEG * max(0, maxdeg - 4)
-    if lam2 >= GENECS_FRONTIER[0][0]:
-        # FRONTIER SCORE: how many edges THEIR compiler needs to reach this
-        # candidate's expansion level, minus what the candidate spent.
-        # Positive = beats the GeneCS compiler at its own beta knob; 0 = ties
-        # its measured outputs; certified E <= 23 is automatically >= +1.
-        f_e = frontier_edges(lam2)
-        score = float(SCORE_OFFSET + f_e - E - tiebreak)
-        status = "CERTIFIED" if certified else "uncertified"
+
+    if certified:
+        score = float(CERT_BASE + (E_REF - E) - tiebreak)
         verdict = (
-            f"{status} at E={E} edges, lambda_2={lam2:.3f} (certified Cheeger "
-            f">= {lam2 / 2:.2f}; acceptance is lambda_2 >= {LAM2_MIN}); "
-            f"score={score:+.2f} = {SCORE_OFFSET} + (their compiler needs "
-            f"{f_e:.1f} edges for this expansion level) - (your {E}) - "
-            f"tiebreaks; {SCORE_OFFSET:+.1f} is GeneCS-compiler PARITY — "
-            f"anything above it beats the published pipeline. In GeneCS "
-            f"accounting: {E} qubits + {checks_raw} checks = {qpc} (their "
-            f"published gross result: 24 + 25 = 49). {len(dummies)} dummies, "
-            f"congestion rho={rho}, max degree {maxdeg}. "
-            + (f"BEATS the certified GeneCS compiler output by {E_BASE - E} "
-               f"edge(s) — cross-score this graph end-to-end in "
-               f"../gross_code_gauging/. "
-               if certified and E < E_BASE else
-               (f"Certified and matching their compiler; push E below "
-                f"{E_BASE} (local annealing is KNOWN to reach certified "
-                f"E=21 — beat that, then find the true minimum; the Fiedler "
-                f"bound only forces E >= 12). "
-                if certified else
-                f"Not yet certified — the score still pays for beating their "
-                f"frontier at THIS expansion level; certification (lambda_2 "
-                f">= {LAM2_MIN}) unlocks the E<=23 jackpot ladder. "))
-            + f"Moves their add-only first-passage search cannot make: remove "
-            f"an edge whose loss keeps lambda_2 high (they never re-check), "
-            f"swap edges across the weakest spectral cut {weak_side} "
-            f"({crossing} crossing now), drop matching edges, place a dummy "
-            f"hub (free in this accounting), double a strategic edge."
+            f"CERTIFIED at E={E} edges (lambda_2={lam2:.4f} >= {LAM2_MIN}, "
+            f"certified Cheeger >= {lam2 / 2:.2f}); score={score:+.2f} = "
+            f"{CERT_BASE} + ({E_REF} - {E}) - tiebreaks. Landmarks: "
+            f"constructor E=24 -> +6, SA record E=21 -> +9, the known-record "
+            f"integral graph E=20 -> +10 (the seed), OPEN jackpot E<=19 -> "
+            f"+11 and up (strong evidence it does not exist — E=19 lambda_2 "
+            f"ceiling found so far ~1.59 — so any find is a genuine "
+            f"discovery). {len(dummies)} dummies, congestion rho={rho}, max "
+            f"degree {maxdeg}. "
+            + (f"NEW RECORD TERRITORY — independently re-verify lambda_2 "
+               f"from the raw edge list, then cross-score the graph on the "
+               f"real protocol in ../gross_code_gauging/. "
+               if E < 20 else "")
+            + f"At equal E, lower congestion / lower max degree win the "
+            f"tiebreaks, and structurally DISTINCT certified graphs are "
+            f"valuable (the known E=20 record has degrees 3^8 4^4 and "
+            f"integral spectrum {{0, 2^5, 4^3, 6^3}} — different structures "
+            f"at E=20 are worth keeping via novelty even at equal score)."
         )
     else:
-        # Below the G0 level their pipeline has no output at all — no
-        # frontier to beat down here, only a gradient back up.
-        score = float(-4.0 - 6.0 * (GENECS_FRONTIER[0][0] - lam2)
-                      - 0.05 * E - tiebreak)
+        oversize = max(0, E - E_REF)
+        score = float(W_LAM * lam2 - LEAF_PEN * leaves
+                      - 1.0 * oversize - tiebreak)
+        leaf_note = (f" {leaves} degree-1 vertex(es) cost -{LEAF_PEN * leaves:.0f}: "
+                     f"a leaf caps lambda_2 at 1 (Fiedler: lambda_2 <= vertex "
+                     f"connectivity <= min degree), so leaves BLOCK "
+                     f"certification — attach every vertex at least twice."
+                     if leaves else "")
+        size_note = (f" OVERSIZED: {oversize} edge(s) beyond E={E_REF} cost "
+                     f"-1.0 each — shed edges toward the competitive region "
+                     f"(certification only pays at E <= {E_REF})."
+                     if oversize else "")
         verdict = (
-            f"BELOW THE G0 EXPANSION LEVEL: lambda_2={lam2:.3f} < "
-            f"{GENECS_FRONTIER[0][0]:.3f} (the 18-edge path-matching motif "
-            f"itself) — the GeneCS pipeline has no output this weak, so there "
-            f"is no frontier credit here; score={score:.2f}. E={E} edges, "
-            f"congestion rho={rho}, max degree {maxdeg}. The weakest spectral "
-            f"cut is {weak_side} with only {crossing} crossing edge(s) — add "
-            f"or re-route edges across THAT cut to raise lambda_2 fastest."
+            f"UNCERTIFIED: lambda_2={lam2:.4f} < {LAM2_MIN}; score={score:+.2f} "
+            f"= {W_LAM}*lambda_2 - {LEAF_PEN}*leaves - oversize - tiebreaks. "
+            f"Edge count earns NOTHING until the certificate holds (v1's star "
+            f"loophole is closed): the only way up is raising lambda_2 toward "
+            f"2.0, then shaving edges.{leaf_note}{size_note} E={E} edges, "
+            f"{len(dummies)} dummies, congestion rho={rho}, max degree "
+            f"{maxdeg}. The weakest spectral cut is {weak_side} with "
+            f"{crossing} crossing edge(s) — add or re-route edges across THAT "
+            f"cut to raise lambda_2 fastest. (Dummies are verified "
+            f"self-defeating here: they dilute lambda_2.)"
         )
 
     public = {
         "combined_score": round(score, 3), "valid": 1,
         "certified": int(certified), "lam2": round(lam2, 4),
         "cheeger_cert": round(lam2 / 2, 4),
-        "frontier_edges_theirs": (round(frontier_edges(lam2), 2)
-                                  if lam2 >= GENECS_FRONTIER[0][0] else None),
-        "edges": E, "dummies": len(dummies),
-        "checks_raw": checks_raw, "qubits_plus_checks": qpc,
+        "edges": E, "dummies": len(dummies), "leaves": leaves,
         "congestion": rho, "max_degree": maxdeg,
         "weak_cut_side": weak_side, "weak_cut_crossing": crossing,
     }
     private = {
-        "lam2_min": LAM2_MIN, "e_base": E_BASE,
-        "score_offset": SCORE_OFFSET,
-        "genecs_frontier": [list(p) for p in GENECS_FRONTIER],
+        "lam2_min": LAM2_MIN, "e_ref": E_REF, "cert_base": CERT_BASE,
+        "w_lam": W_LAM, "leaf_pen": LEAF_PEN,
         "tie_cong": TIE_CONG, "tie_deg": TIE_DEG,
     }
     return {"combined_score": score, "correct": True, "public": public,
@@ -417,9 +436,10 @@ def main(program_path: str, results_dir: str) -> None:
     print(f"Evaluating program: {program_path}")
     print(f"Saving results to: {results_dir}")
     os.makedirs(results_dir, exist_ok=True)
-    print(f"Race criteria: lambda_2 >= {LAM2_MIN} (GeneCS fitted gross-code "
-          f"acceptance), objective = minimize E (their qubits+checks = 2E+1); "
-          f"baseline to beat: their Algorithm 1 at E={E_BASE}.")
+    print(f"v2 criteria: certified = lambda_2 >= {LAM2_MIN} (WY Cheeger >= 1 "
+          f"bar); certified score = {CERT_BASE} + ({E_REF} - E); uncertified = "
+          f"{W_LAM}*lambda_2 - {LEAF_PEN}*leaves (edges pay only after "
+          f"certification; certified always dominates).")
     metrics, correct, err = run_shinka_eval(
         program_path=program_path,
         results_dir=results_dir,
@@ -440,7 +460,7 @@ def main(program_path: str, results_dir: str) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="gross_code_spectral_synth evaluator")
+    parser = argparse.ArgumentParser(description="gross_code_spectral_synth evaluator (v2)")
     parser.add_argument("--program_path", type=str, default="initial.py")
     parser.add_argument("--results_dir", type=str, required=True)
     args = parser.parse_args()

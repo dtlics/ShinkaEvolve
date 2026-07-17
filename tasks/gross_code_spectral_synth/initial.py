@@ -1,94 +1,80 @@
 """
-ShinkaEvolve INITIAL PROGRAM -- the GeneCS-criteria spectral synthesis RACE
-on the gross-code gauging graph.
+ShinkaEvolve INITIAL PROGRAM -- minimum-edge spectral certification on the
+gross-code gauging graph (v2, post-star-loophole rework).
 
-GOAL. Find the SMALLEST graph that GeneCS's own acceptance criterion
-certifies, on GeneCS's own benchmark instance -- the gauging graph for the
-weight-12 logical X_alpha of the [[144,12,12]] gross code. The criterion
-(reverse-engineered from their published outcome; see the task README):
+GOAL. Find the SMALLEST simple graph on the 12 labelled ports (labels 0..11
+-- the qubits of the weight-12 logical X_alpha of the [[144,12,12]] gross
+code; optional dummy labels 12..35) whose Laplacian algebraic connectivity
+satisfies lambda_2 >= 2.0 -- certified Cheeger constant >= 1, the
+Williamson-Yoder Theorem 2 expansion bar for gauging graphs. This is a
+clean combinatorial-spectral problem; no quantum knowledge is needed to
+optimize it. (Provenance, honestly: the criterion is STRICTER than the
+GeneCS compiler's real acceptance -- lambda_2 >= 2*beta, beta ~ 0.34 -- and
+GeneCS makes no minimality claim; its constructor-style output E=24 and the
+hand-crafted WY 22-edge graph, lambda_2 = 0.925 uncertified, are context
+baselines, not a head-to-head.)
 
-    lambda_2(graph Laplacian) >= 2.0     (certified Cheeger constant >= 1,
-                                          the full Williamson-Yoder
-                                          expansion bar)
-
-In GeneCS's generic accounting, checks = #vertices A_v checks + cycle checks
-= E + 1 regardless of dummies, so their qubits+checks objective equals
-2E + 1: THE OBJECTIVE IS PURELY THE EDGE COUNT E. Their compiler heuristic
-(add-only deficit-weighted random edge addition with first-passage
-acceptance, 100 restarts) reaches E = 24 on every measured seed, and their
-published gross-code result (24 qubits / 25 checks) matches it exactly.
-Score = (24 - E) once certified: E = 24 matches the published compiler,
-E <= 23 BEATS it at its own game.
+STATE OF KNOWLEDGE (verified; do not re-discover -- go BEYOND):
+  * THE SEED below is the known record: a certified E=20 graph, degrees
+    3^8 4^4, INTEGRAL Laplacian spectrum {0, 2^5, 4^3, 6^3}, lambda_2 = 2
+    exactly -- found by a previous evolution run, independently
+    re-verified, and NOT reproducible by 300-restart simulated annealing.
+  * Certified E=21 is reachable by plain SA; circulants and dummy/bipartite
+    constructions need E=24; dummies dilute lambda_2 (useless here).
+  * E=19's lambda_2 ceiling found so far is ~1.59 (E=18: ~1.47), and no
+    12-vertex 3-regular graph can certify (adjacency-trace argument). The
+    Fiedler bound (lambda_2 <= vertex connectivity <= min degree) only
+    forces E >= 12.
+  TARGETS, in order of value:
+  1. A certified E<=19 graph (+11 and up): the OPEN jackpot. Strong
+     evidence says it does not exist -- so treat it as a long-shot
+     discovery hunt: exotic structures (integral graphs, strongly-regular
+     fragments, algebraic constructions over the port labels), not blind
+     local search, are the plausible route.
+  2. Structurally DISTINCT certified E=20 graphs (same score +10; the
+     archive's novelty machinery keeps them): is the known record unique,
+     or a family?
+  3. Better secondary profiles at E=20..22: lower congestion, lower max
+     degree (tiny tiebreaks reward them at equal E).
 
 WHAT YOU RETURN:
   propose_graph() -> {"edges": [(u, v), ...]}
-  * labels 0..11 = the 12 qubits of supp(X_alpha) -- the ports. Monomial map
-    (WY App. B): 0:1, 1:x, 2:x^2, 3:x^3, 4:x^6, 5:x^7, 6:x^8, 7:x^9,
-    8:xy^3, 9:x^5y^3, 10:x^7y^3, 11:x^11y^3.
-  * labels 12..35 = OPTIONAL dummy vertices -- a move the GeneCS pipeline
-    does NOT have, and FREE in its accounting (+1 A_v check, -1 cycle
-    check): a well-placed hub or subdivision changes which topologies exist.
-  * parallel edges allowed (another move their simple-graph family lacks);
-    no self-loops; <= 60 edges; <= 24 dummies; max degree 12 (their bound).
+  * SIMPLE graph only: no self-loops, NO parallel edges (invalid, -100);
+  * all 12 ports present and connected (with any used dummies) in one
+    component; <= 60 edges; <= 24 dummies; max degree <= 12.
 
-WHERE THE ROOM IS (measured -- their E=24 is NOT optimal):
-  * their search only ADDS edges to the fixed 18-edge path-matching graph
-    and stops the instant lambda_2 crosses -- it never removes a redundant
-    earlier addition, never swaps, and never considers graphs that DROP
-    matching edges (any connected graph works: the deformation routes
-    through paths);
-  * MEASURED: plain simulated annealing over edge swaps already finds a
-    CERTIFIED E=21 graph (lambda_2 = 2.000; score +3) and lambda_2 = 2.28
-    at E=23 -- their frontier is beatable by +0.34..+0.80 at every size.
-    So the real discovery target is the TRUE MINIMUM certified E: the
-    Fiedler bound (lambda_2 <= vertex connectivity <= min degree) only
-    forces E >= 12, and where in [12, 21] the boundary lies is open;
-  * structured graphs (circulant-like patterns over the monomial labels,
-    near-regular expanders) beat random matchings on lambda_2-per-edge; a
-    dummy hub is free in their accounting; a doubled edge is a legal move;
-  * the evaluator's feedback reports the WEAKEST SPECTRAL CUT (Fiedler
-    split) and its crossing count every eval -- edges across that cut raise
-    lambda_2 fastest; edges inside it are candidates for removal.
-
-SCORE (higher is better; deterministic, < 1 s per eval): the FRONTIER
-  score -- E_theirs(lam2) = edges THEIR compiler needs to reach your
-  expansion level (measured anchors (0.438,18) (0.70,19) (1.105,20)
-  (1.202,21) (1.438,22) (1.722,23) (2.0,24), piecewise linear, capped at
-  24 above the acceptance threshold):
-  lam2 >= 0.438 (the G0 level):  3.0 + E_theirs(lam2) - E
-                                   - 0.02*max(0, congestion-2)
-                                   - 0.01*max(0, maxdeg-4)
-      The scale: THIS SEED boots at ~+0.5 (valid, modest); +3.0 is
-      GeneCS-compiler PARITY (their measured outputs land there);
-      anything above +3 beats the published pipeline at its own beta
-      knob; CERTIFIED (lam2 >= 2.0) graphs earn +1 more per edge below
-      24 (the known annealing result, certified E=21, scores +6; the
-      open-question region below that is worth more).
-  lam2 < 0.438:  -4 - 6*(0.438 - lam2) - 0.05*E   (no frontier credit
-      below their own start graph; gradient points back up)
+SCORE (higher is better; deterministic, < 1 s):
+  CERTIFIED (lambda_2 >= 2.0):  6.0 + (24 - E)
+                                 - 0.02*max(0, congestion-2)
+                                 - 0.01*max(0, maxdeg-4)
+      E=24 -> +6, E=21 -> +9, E=20 (this seed) -> +10, E<=19 -> +11+.
+  UNCERTIFIED:  2.5*lambda_2 - 1.0*(#degree-1 vertices) - tiebreaks
+      Monotone in lambda_2, capped below every competitive certified
+      score. EDGE COUNT EARNS NOTHING BELOW CERTIFICATION -- v1's champion
+      was an E=11 port-star (lambda_2 = 1.0, uncertified) that exploited a
+      frontier-interpolation credit; that mechanism is deleted. Leaves are
+      penalized because a degree-1 vertex caps lambda_2 at 1 (Fiedler),
+      making certification impossible while it exists.
   invalid spec: -100;  crash: -1000.
 
-THE SEED is the hand-crafted WY/IBM 22-edge graph (18 matching + 4
-expansion edges -- the graph of the 41-element paper gadget). NOTE: the
-certificate REJECTS it (lambda_2 = 0.925, certified Cheeger 0.46), even
-though its actual deformed distance 12 is proven by integer programming --
-the spectral criterion cannot see real distance, and racing it anyway is
-the point of this task (optimizer-vs-optimizer, same rules). From this seed
-you must first CROSS the certificate boundary (add/re-route edges across
-weak cuts; their compiler needs 24 edges to get there), then SHRINK below
-E=24 using the moves their pipeline lacks (removal, swaps, dummies,
-parallel edges, dropping matching edges). Any certified E <= 23 should also
-be cross-scored on the real protocol via ../gross_code_gauging/.
-
 TOOLS PROVIDED (fixed, callable from the EVOLVE-BLOCK):
-  graph_lambda2(edges)         lambda_2 of the multigraph Laplacian
+  graph_lambda2(edges)         lambda_2 of the graph Laplacian
   fiedler_cut(edges)           (weak side, crossing count) -- the spectral
-                               bottleneck; raise lambda_2 by crossing it
+                               bottleneck; add edges across it to raise
+                               lambda_2 fastest
   vertex_degrees(edges)        {vertex: degree}
-  preview(edges)               {'edges', 'lam2', 'certified',
+  preview(edges)               {'edges', 'lam2', 'certified', 'leaves',
                                 'score_if_certified', 'weak_cut', ...} --
                                microseconds; screen every idea before
                                returning it
+
+HOW TO WRITE A STRONG CANDIDATE. propose_graph() may run arbitrary bounded
+computation: implement a real search (constructions + local moves screened
+with preview()), seed any RNG deterministically, and return the best
+still-valid graph found. For target 1, bias toward structure: the known
+record is an integral graph -- enumerate/perturb algebraic constructions
+(vertex-transitive-ish patterns, graph joins, subdivided expanders) rather
+than pure random swaps, which are known to stall at E=21.
 """
 
 import numpy as np
@@ -107,8 +93,17 @@ MATCHING_EDGES = sorted({
     for (a, b) in F_TERMS for (cc, dd) in _conn
     for nb in [((a + cc) % L, (b + dd) % M)]
     if nb in _fpos and nb != (a, b)
-})          # the 18-edge path-matching motif (GeneCS's G0)
+})          # the 18-edge path-matching motif (context)
 PAPER_EXPANSION = [(2, 9), (2, 4), (9, 11), (10, 11)]   # WY App. B Eq. 5
+
+# The verified record: certified E=20, degrees 3^8 4^4, integral spectrum
+# {0, 2^5, 4^3, 6^3} (lambda_2 = 2 exactly). Found by run spectral_v1,
+# independently re-verified from this raw edge list.
+RECORD_E20 = [
+    (0, 1), (0, 8), (0, 11), (1, 2), (1, 5), (2, 3), (2, 6), (2, 10),
+    (3, 4), (3, 11), (4, 5), (4, 8), (5, 6), (5, 9), (6, 7), (7, 8),
+    (7, 11), (8, 9), (9, 10), (10, 11),
+]
 
 
 def _verts_of(edges):
@@ -159,6 +154,8 @@ def preview(edges):
     edges = [(min(int(u), int(v)), max(int(u), int(v))) for (u, v) in edges]
     if any(u == v for (u, v) in edges):
         return {"error": "self-loop"}
+    if len(edges) != len(set(edges)):
+        return {"error": "parallel edge (simple graphs only)"}
     if len(edges) > MAX_EDGES:
         return {"error": f">{MAX_EDGES} edges"}
     deg = vertex_degrees(edges)
@@ -179,32 +176,34 @@ def preview(edges):
     lam2 = graph_lambda2(edges)
     side, crossing = fiedler_cut(edges)
     E = len(edges)
-    return {"edges": E, "dummies": len(verts) - N_PORTS,
+    leaves = sum(1 for v in verts if deg[v] == 1)
+    return {"edges": E, "dummies": len(verts) - N_PORTS, "leaves": leaves,
             "lam2": round(lam2, 4), "certified": lam2 >= 2.0 - 1e-9,
-            "score_if_certified": 24 - E,
-            "qubits_plus_checks": 2 * E + 1,
+            "score_if_certified": 6.0 + (24 - E),
             "weak_cut": side, "weak_cut_crossing": crossing,
             "max_degree": max(deg.values())}
 
 
 # EVOLVE-BLOCK-START
 def propose_graph():
-    """Return {"edges": [(u, v), ...]}.
+    """Return {"edges": [(u, v), ...]} (simple graph).
 
-    SEED: the hand-crafted WY/IBM 22-edge graph (18 matching + 4 expansion
-    edges) of the 41-element paper gadget. The certificate REJECTS it
-    (lambda_2 = 0.925 < 2.0) despite its IP-proven distance 12 -- so the
-    first job is to cross the certificate boundary (the feedback and
-    fiedler_cut() point at the weakest cut every eval; edges across it buy
-    the most lambda_2), and the second job is to get back UNDER 24 edges
-    using moves the GeneCS compiler does not have: remove redundant edges
-    (their first-passage search never re-checks), swap across cuts, drop
-    matching edges, place dummy hubs (free in this accounting), double
-    strategic edges. preview() screens every idea in microseconds -- use it
-    liberally inside this function and return the best graph you find.
+    SEED: the verified record itself — certified E=20, integral spectrum
+    {0, 2^5, 4^3, 6^3}, score +10. It is the strongest known solution, so
+    the job is to go BEYOND it, in order of value:
+      1. certified E<=19 (+11; open jackpot, likely nonexistent — hunt with
+         STRUCTURED constructions: integral graphs, algebraic patterns over
+         the ports, joins/subdivisions of small expanders; blind swap-SA is
+         known to stall at E=21);
+      2. structurally DISTINCT certified E=20 graphs (novelty keeps them);
+      3. equal-E refinements (congestion, max degree) via the tiny
+         tiebreaks.
+    Use preview() to screen every idea in microseconds. Removing any single
+    edge from THIS seed drops lambda_2 below 2 (it is edge-minimal in that
+    sense) — a certified E=19 needs a genuinely different structure, not a
+    pruned copy.
     """
-    edges = list(MATCHING_EDGES) + list(PAPER_EXPANSION)
-    return {"edges": edges}
+    return {"edges": list(RECORD_E20)}
 # EVOLVE-BLOCK-END
 
 

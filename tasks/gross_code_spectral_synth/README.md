@@ -1,117 +1,107 @@
-# `gross_code_spectral_synth` — the GeneCS-criteria optimizer race
+# `gross_code_spectral_synth` — minimum-edge spectral certification (v2)
 
-ShinkaEvolve task: **is LLM-driven evolution a better optimizer than the
-GeneCS compiler heuristic at GeneCS's own acceptance criteria, on its own
-benchmark instance?** The instance is the gauging-measurement graph for the
-weight-12 logical X̄_α of the [[144,12,12]] gross code — the same design
-space as [../gross_code_gauging/](../gross_code_gauging/), but scored by
-**their certificate, not by physics**. This is a *search* claim
-(optimizer-vs-optimizer, same rules), deliberately complementary to the
-end-to-end task, which owns the physics claim.
+ShinkaEvolve task: find the **smallest simple graph** on the 12 ports (the
+qubits of the weight-12 logical X̄_α of the [[144,12,12]] gross code, plus
+optional dummies) with algebraic connectivity **λ₂ ≥ 2.0** — certified
+Cheeger constant ≥ 1, the Williamson–Yoder Theorem 2 expansion bar for
+gauging graphs. A clean, deterministic, sub-second combinatorial problem.
 
-## The criteria (theirs, reverse-engineered)
+**Provenance, stated honestly** (corrected after post-run verification of
+arXiv:2605.21746): this criterion is *stricter than* the GeneCS compiler's
+real acceptance (λ₂ ≥ 2β with β ≈ 0.34, i.e. λ₂ ≥ 0.68), and GeneCS's
+gross-code output (24 qubits/25 checks, degrees 7/8) is
+degree-augmentation-driven with **no minimality claim**. So this task is
+**not** a head-to-head against the paper's published numbers; it is a
+self-contained spectral minimization grounded in the WY expansion
+desideratum, with the GeneCS-style constructor's measured E=24 and the
+hand-crafted WY 22-edge graph (λ₂ = 0.925 — *uncertified*, though its
+distance-12 is IP-proven; the certificate cannot see distance) as context
+baselines.
 
-GeneCS (Zhou, Javadi-Abhari, Li, [arXiv:2605.21746](https://arxiv.org/abs/2605.21746))
-never publishes its per-instance acceptance settings. `../gross_code_gauging/genecs.py
---fit-published` pins them from the published outcome: in mono-layer gauging
-accounting, generic checks = E+1, so their gross-code Full-Opt result
-(24 ancilla qubits, 25 checks, degrees 7/8) forces **E = 24 exactly** — and
-the β-scan reproduces E=24 on every seed precisely when the acceptance is
+## The v1 star loophole (why v2 exists)
 
-```
-λ₂(graph Laplacian) ≥ 2.0        (spectral proxy: certified Cheeger ≥ 1 —
-                                  the full Williamson–Yoder expansion bar)
-```
+Run `spectral_v1` ($29.25, 90 programs) produced **two** results:
 
-Their qubits+checks objective equals **2E+1 regardless of dummies**, so the
-race objective is purely: **minimize the edge count E subject to λ₂ ≥ 2**
-(degree ≤ 12, their stated bound; congestion as a gentle tiebreak).
+- a genuine discovery: a **certified E=20 graph** (λ₂ = 2 exactly, degrees
+  3⁸4⁴, integral Laplacian spectrum {0, 2⁵, 4³, 6³}) — independently
+  re-verified, unreachable by 300-restart simulated annealing, beating the
+  documented SA record (21), all circulants (24) and the constructor (24);
+- a champion that was junk: an **E=11 port-star** (λ₂ = 1.0, uncertified,
+  the worst possible expander) scoring **+11.67** and out-ranking the real
+  discovery (+6.96).
 
-## The baseline to beat
+The hole: v1 paid "frontier credit" for reaching intermediate λ₂ levels
+with few edges, interpolating the constructor's measured curve — but that
+curve lives on G0-containing graphs (E ≥ 18) while sparse hubs reach
+mid-band λ₂ trivially (a star has λ₂ = 1 *exactly*), so the credit at low
+λ₂ was wildly over-generous and the degenerate corner became the global
+maximum. Same failure class as the gcg1 spanning tree: **any region where
+score improves while the certifying quantity degrades will become the
+champion.** v2 deletes the mechanism:
 
-Their Algorithm 1 (add-only deficit-weighted random edge addition over the
-fixed 18-edge path-matching graph, first-passage acceptance, 100 restarts —
-all verified from the paper) reaches **E = 24 on every measured seed**, with
-λ₂ landing at exactly 2.000; this matches their published 24/25. Certified
-E = 24 scores ~0 here; **any certified E ≤ 23 beats the published compiler
-at its own game** (+1 per edge below 24).
+1. **Edges are only rewarded after certification.** Below λ₂ = 2, edge
+   count earns nothing; the only way up is λ₂.
+2. **Certified always dominates**: uncertified scores are capped below 5.0
+   (analytically: 2.5·λ₂ < 5); every certified graph with E ≤ 24 scores
+   ≥ ~6.
+3. **Leaves are priced as certification-blockers** (Fiedler: λ₂ ≤ vertex
+   connectivity ≤ min degree, so any degree-1 vertex caps λ₂ at 1). The
+   port-star now scores ≈ **−8.6**.
+4. **Simple graphs only** (parallel edges invalid): the minimum-edge claim
+   stays a clean simple-graph statement.
+5. [test_spectral.py](test_spectral.py) locks it in — landmark
+   regressions (star, dummy-star, WY, ring, record) **plus a
+   certified-dominance fuzz property test**, the test class that would
+   have caught v1.
+6. **Independently red-teamed before shipping**: a 3-agent adversarial
+   exploit-hunt (every claim numerically verified) found **no
+   breaks-intent exploit** — the uncertified cap (< 5.0) and the certified
+   E ≤ 24 floor (≥ ~5.7) hold analytically and empirically; the 1e-9
+   certification epsilon is load-bearing (the record's λ₂ computes 1.3e-15
+   below 2) but uninhabited by genuinely sub-2 graphs (closest found:
+   1.7e-4 below); dummies, hubs and parse tricks all fail. Its four minor
+   findings are fixed: strict integral parsing (no silent float/string
+   coercion), canonical edge sort (graph-level determinism of the
+   congestion tiebreak), an uncertified oversize penalty (removes the
+   λ₂→2⁻ plateau above E=24), and disclosure of **K₂,₁₀** — the *second*
+   known certified E=20 graph, maximally degenerate (vertex connectivity
+   2, congestion 9), scoring **9.80**, correctly ranked below the record's
+   9.96 by the tiebreaks. Don't waste budget rediscovering it.
 
-## Why there is room (evolution's structural moves)
-
-1. **Their search is add-only with first-passage acceptance** — it never
-   removes a redundant earlier addition, never swaps, never re-checks.
-2. **Their graphs must contain the path-matching motif** — but the theory
-   only needs *paths* (T-join routing), so dropping matching edges is fair
-   game and outside their reachable set.
-3. **No dummy vertices** — free in their accounting (+1 A_v, −1 cycle
-   check), and they change which topologies exist.
-4. **No parallel edges** — the gauging double-gross motif.
-5. Measured wall in their family: E=23 caps at λ₂ ≈ 1.72, jumping to
-   exactly 2.000 at E=24 — a property of their reachable set, not of all
-   12-port multigraphs (degree ≥ 2 only forces E ≥ 12, so E ∈ [12, 23] is
-   formally open). Structured graphs over the BB monomial labels may have
-   better λ₂-per-edge than random matchings.
-
-## The seed — and a fact worth knowing
-
-The seed is the **hand-crafted WY/IBM 22-edge graph** (18 matching + 4
-expansion edges; the graph of the 41-element paper gadget). **The GeneCS
-certificate rejects it**: λ₂ = 0.925, certified Cheeger 0.46 < 1 — even
-though its deformed distance 12 is proven by integer programming
-(WY App. B). The spectral criterion cannot see actual distance; the
-certificate-driven compiler would discard the hand-crafted optimum. From
-this seed, evolution must first *cross* the certificate boundary (the
-evaluator reports the weakest Fiedler cut and its crossing count every
-eval — edges across it buy the most λ₂; their compiler needs 24 edges to
-get there), then *shrink* below 24 with the moves above.
-
-## Score — the frontier race
-
-`E_theirs(λ₂)` = edges **their compiler needs** to reach a given expansion
-level (measured anchors, best over seeds: (0.438, 18=G0), (0.70, 19),
-(1.105, 20), (1.202, 21), (1.438, 22), (1.722, 23), (2.0, 24); piecewise
-linear; capped at 24 above the acceptance threshold — overshoot earns
-nothing, matching their first-passage semantics).
+## Score (v2)
 
 ```
-λ₂ ≥ 0.438 (their G0 level):  3.0 + E_theirs(λ₂) − E − 0.02·max(0,ρ−2) − 0.01·max(0,Δmax−4)
-λ₂ < 0.438:                   −4 − 6·(0.438 − λ₂) − 0.05·E   (no frontier credit
-                              below their own start graph)
+CERTIFIED  (λ₂ ≥ 2.0 − 1e-9):  6.0 + (24 − E) − 0.02·max(0,ρ−2) − 0.01·max(0,Δmax−4)
+UNCERTIFIED:                   2.5·λ₂ − 1.0·(#degree-1 vertices) − tiebreaks
 invalid spec: −100;  crash: −1000
 ```
 
-The +3.0 offset makes the scale read naturally for evolution (the seed
-boots modestly positive instead of the GeneCS optimum sitting at the
-origin — kinder to the mutation LLM's prompt framing and to the
-stagnation logic's relative thresholds, with every gradient unchanged):
-the **seed ≈ +0.5**; **+3.0 = GeneCS-compiler parity** (their measured
-outputs land there); anything above +3 beats the published pipeline at
-its own β knob; a **certified** (λ₂ ≥ 2) graph earns +1 more per edge
-below 24. Measured smoke: WY seed **+0.52**, their E=24 output **+2.98**,
-an annealed certified E=23 graph **+3.95** (known annealing best,
-certified E=21, would score **+6**), a 12-ring **−5.62**.
+Landmarks: constructor E=24 → **+6** · SA record E=21 → **+9** · the known
+record E=20 (**the seed**) → **+10** · certified E ≤ 19 → **+11 and up**
+(the open jackpot). Uncertified: WY 22-edge ≈ +2.3, 12-cycle ≈ +0.7,
+port-star ≈ −8.6.
 
-**Measured headroom (the reward is dense and the jackpot reachable):**
-plain simulated annealing over edge swaps already finds a **certified
-E=21** graph (λ₂ = 2.000 exactly; score +3) and λ₂ = 2.28 at E=23 — the
-Alg-1 frontier is beatable by +0.34–0.80 at every size. Beating their
-compiler is therefore the *easy* part; the discovery target is the **true
-minimum certified E**: the Fiedler bound (λ₂ ≤ vertex connectivity ≤ min
-degree) only forces E ≥ 12, and where in [12, 21] the boundary lies is an
-open combinatorial question. (E.g. no 12-vertex 3-regular graph can reach
-λ₂ ≥ 2 — provable by an adjacency-trace argument — so E = 18 all-cubic is
-out; mixed-degree graphs below 21 are the frontier.)
+## State of knowledge (verified — a re-run must go *beyond* this)
 
-Deterministic, < 1 s per candidate (12–36-vertex eigensolve + Horton cycle
-basis) — this task is built for very high candidate throughput; the race is
-about search moves, not evaluation cost. `SPECTRAL_LAM2_MIN` moves the
-certification bar.
+| fact | status |
+|---|---|
+| certified **E=20** exists (integral graph, seed of this task) | verified from raw edge list; edge-minimal (removing any edge drops λ₂ < 2) |
+| SA (300 restarts × 6000 steps) ceiling | certified E=21; cannot reproduce E=20 |
+| circulants C₁₂(S); dummy/bipartite (K₂,₁₂, cones) | E=24; dummies **dilute** λ₂ |
+| λ₂ ceilings found: E=19 → ~1.59, E=18 → ~1.47 | no certified E ≤ 19 known |
+| 12-vertex 3-regular | provably cannot certify (trace argument) |
+| Fiedler floor | E ≥ 12 |
 
-Any certified winner should be cross-scored on the real protocol by
-`../gross_code_gauging/` (its `calibrate.py --compare` machinery) — the
-certificate is loose in both directions there (measured: λ₂-certified 5.6
-can mean real dressed distance 10, and certified 4.2 can hide a weight-9
-operator), which is exactly why the two tasks are kept separate.
+**Honest expectations for a re-run:** the headline question left is
+*certified E ≤ 19* — strong evidence says it does not exist, so treat a
+re-run as a long-shot structured hunt (integral graphs, algebraic
+constructions over the port labels — blind swap-SA is known to stall at
+21), plus E=20-diversity (is the record unique?) and tiebreak refinements.
+The higher-value next step for the *physics* program is cross-scoring the
+E=20 record on the real protocol in
+[../gross_code_gauging/](../gross_code_gauging/) — does λ₂ = 2 correspond
+to real dressed distance? That is a `calibrate.py --compare`-style run,
+not an evolution run.
 
 ## How to run
 
@@ -120,27 +110,29 @@ conda activate shinka
 cd "$(git rev-parse --show-toplevel)"
 python tasks/gross_code_spectral_synth/evaluate.py \
     --program_path tasks/gross_code_spectral_synth/initial.py \
-    --results_dir /tmp/spectral_smoke
+    --results_dir /tmp/spectral_smoke        # seed = the record: +9.96
+python tasks/gross_code_spectral_synth/test_spectral.py
 ```
 
-Expected seed result: `valid=1`, `certified=0`, `lam2=0.9248`,
-`combined_score ≈ −14.5`, weak cut `[0,1,2,3,8,9]` with 6 crossing edges.
-For evolution, set `eval_time ~ 00:02:00` and a high parallel-eval count —
-throughput is the whole point.
+For evolution: `eval_time ~ 00:02:00`, favor cheap models (throughput is
+the constraint; the previous run measured codex ≈ $0.19/call as the best
+value, with a stronger model worth pulling in only to break stalls).
+`SPECTRAL_LAM2_MIN` moves the certification bar.
 
 ## Files
 
 | File | Role |
 |---|---|
-| [initial.py](initial.py) | Fixed data + λ₂/Fiedler/preview tools + EVOLVE-BLOCK (the certificate-rejected WY/IBM 22-edge seed). |
-| [evaluate.py](evaluate.py) | Deterministic certifier/scorer: multigraph λ₂, Fiedler weak cut, exact congestion, GeneCS accounting. |
+| [initial.py](initial.py) | Fixed data + λ₂/Fiedler/preview tools + EVOLVE-BLOCK seeded with the verified E=20 record. |
+| [evaluate.py](evaluate.py) | Deterministic v2 certifier/scorer (lexicographic: certification, then edges; leaf penalty; simple graphs). |
+| [test_spectral.py](test_spectral.py) | Landmark regressions + certified-dominance fuzz property. |
 
-## Provenance
+## Provenance of the numbers
 
-- Criteria fit + baseline measurement: `../gross_code_gauging/genecs.py
-  --fit-published` (β ∈ [0.9, 1.0] all reproduce 24/25; λ₂ = 2.000 exactly).
-- GeneCS algorithm details (Algorithm 1, degree bound 12, 100 restarts,
-  congestion ρ): arXiv:2605.21746, verified extraction.
-- WY seed graph + IP-proven distance: arXiv:2410.02213 App. B.
-- Scheduler/decoder ambiguity (why LER is NOT scored here): GeneCS publishes
-  no protocol details; see `../gross_code_gauging/calibrate.py --ablate`.
+- v1 run + postmortem: `spectral_v1` results (run archive; RUN_SUMMARY
+  includes the independent verification appendix).
+- GeneCS facts (λ₂ ≥ 2β gate, β ≈ 0.34; degree-driven 24/25; no minimality
+  claim): full-text verification of arXiv:2605.21746 post-run.
+- WY expansion bar (Cheeger ≥ 1): arXiv:2410.02213 Theorem 2.
+- E=20 record: independently recomputed from the raw edge list (λ₂ =
+  2.000000, spectrum {0, 2⁵, 4³, 6³}).

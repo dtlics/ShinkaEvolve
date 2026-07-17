@@ -40,7 +40,7 @@ window cap; the budget is hard-capped in code via `budget_usd`. Per-task
 * [bb_syndrome_sched/](bb_syndrome_sched/) — syndrome-extraction circuit scheduling for a BB (bivariate-bicycle) code (AlphaSyndrome-style), scored by an error-budget evaluator.
 * [pbb_code_discovery/](pbb_code_discovery/) — discovery of non-CSS perturbed bivariate-bicycle (PBB) codes (Campaign-5 port of arXiv:2606.02418), scored by trust-adjusted FOM = k·d²/n.
 * [gross_code_gauging/](gross_code_gauging/) — end-to-end gauging-gadget design on the [[144,12,12]] gross code (Williamson & Yoder, arXiv:2410.02213): smallest cycle-bearing gadget whose tail-priced measured protocol LER stays within 1.1× of the paper reference (probe-found fault sets priced into the effective LER, not gated); includes a GeneCS (arXiv:2605.21746) reimplementation for apple-to-apple baselines + config reverse-engineering.
-* [gross_code_spectral_synth/](gross_code_spectral_synth/) — the GeneCS-criteria optimizer race on the same instance: minimize edges subject to their fitted spectral acceptance (λ₂ ≥ 2); deterministic sub-second eval; baseline = their compiler's E=24; seeded with the certificate-rejected hand-crafted WY/IBM 22-edge graph.
+* [gross_code_spectral_synth/](gross_code_spectral_synth/) — minimum-edge spectral certification on the same instance (v2): smallest simple graph with λ₂ ≥ 2 (the WY Cheeger ≥ 1 bar — stricter than GeneCS's real λ₂ ≥ 2β gate, honestly framed as context not head-to-head); deterministic sub-second eval; lexicographic score (certification first, then edges; leaf penalty) after the v1 star-loophole postmortem; seeded with the verified certified-E=20 record; open jackpot: certified E ≤ 19.
 
 ## Reference example
 

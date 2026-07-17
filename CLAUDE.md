@@ -19,10 +19,12 @@ before the first / after the last). You are not in the path of every mutation.
     **R1** (Azure deep research, `deep_research.py` — the ONLY route you may fire autonomously)
     or **R2** (the `archive-analyst` subagent — STEERING-ONLY: it runs solely on a recorded user
     steer, never on your own initiative). A technique you merely brainstormed is NOT discovery.
-    Fire R1 on the WHOLE task or on a declared SUB-TASK (a recurring bottleneck subroutine /
-    separable core); either way the DR prompt is ONE self-contained research task drafted in its
-    own terms, with main-task context added only when it helps — the `subtask` payload on
-    `deep_research.py` is stub PROVENANCE, never prompt plumbing.
+    Fire R1 on the WHOLE task or on a declared SUB-TASK — sub-tasks are FOUND in the archive by
+    reading islands as structural families (same-island programs share a skeleton, so their
+    shared, load-bearing subroutines surface there), never brainstormed; either way the DR
+    prompt is ONE self-contained research task drafted in its own terms, with main-task context
+    added only when it helps — the `subtask` payload on `deep_research.py` is stub PROVENANCE,
+    never prompt plumbing.
   - **Triage — trust and ground, never kill an idea by reading its name:** novel → its own
     island (`spawn_island.py`); similar-to-existing → combine into the closest program
     (`archive_record` `parent_id`=closest, no new island, the existing program kept — never a

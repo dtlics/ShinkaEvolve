@@ -123,10 +123,11 @@ This is the single source of truth; the rest of this doc expands each step.
 4. **WHEN CONTROL RETURNS you make two checks and then look at the steering queue:** (a) the
    **framework-audit check** (rewrite a mutable strategy file if a flaw is found), (b) the
    **discovery check** — if the archive looks short on fruitful directions and the stall looks
-   algorithmic, run a discovery round (R1 — the only autonomous route — whole-task or sub-task
-   scoped), and (c) the **pending-steering check** — if (b) did NOT fire and the return's
-   `pending_steering` count is non-zero, run ONE steered round for the oldest queued user steer
-   (see "Human steering"). Only act on a check when it is actually warranted; for
+   algorithmic, run a discovery round (R1 — the only autonomous route), choosing its SCOPE from
+   the same read: the whole task, or a sub-task the islands' shared structure surfaces (see
+   "Sub-task discovery"), and (c) the **pending-steering check** — if (b) did NOT fire and the
+   return's `pending_steering` count is non-zero, run ONE steered round for the oldest queued
+   user steer (see "Human steering"). Only act on a check when it is actually warranted; for
    a framework-code change, reason to a deeper level first to be sure the change is sound.
    **Grounding gate: a grounding (or any `spawn_island`) is only valid if a fresh, usable discovery
    from THIS control-return interval exists** — a discovery from a prior interval does not count, and
@@ -628,21 +629,26 @@ harder to dismiss) counteracts that. INCLINE TO TRUST discovery and INITIATE gro
 triage toward novel→ground / similar→combine, use useless→ignore sparingly, and **never kill an
 idea by its name** or for being "similar / renamed."
 
-**When.** When the search is stuck and the gap looks *algorithmic* (a technique the search
-won't invent) — normally after a meta round and at least one cheaper move haven't moved
-the best score. You DECIDE by reading the logs/history yourself (there is no automated
-similarity helper — DR returns a text idea, the archive holds code, so only you judge
-whether the idea already exists). Examine `journal.read_calls`, `archive_query`
-`top_n`/`recent_failures`, and the directions already recorded. Always
-pass BOTH `results_dir` AND `budget_usd`: `results_dir` makes the call self-log the
-machine-readable **discovery stub** — a `kind=dr` pointer `{query, brief, timestamp, usable}`
-in `calls.jsonl` (full detail under `journal/calls/`) — and fold cost into the ledger; this is
-the R1 stub the recency gate reads. `usable = bool(brief)` (true iff ≥1 direction returned); a
-refused / empty-brief DR logs `usable:false` and does NOT unlock grounding. `budget_usd` arms
-the pre-flight that SKIPS the spend when the remaining budget can't cover
-`dr_estimated_cost_usd` (~$5). Passing `results_dir` alone does NOT bound DR by the budget —
-without `budget_usd` there is no pre-flight and DR (the single most expensive action) can
-overshoot the cap.
+**When — and at what SCOPE.** The discovery check answers TWO questions with one archive read:
+is a DR warranted, and on WHAT. A DR is warranted when the search is stuck and the gap looks
+*algorithmic* (a technique the search won't invent) — normally after a meta round and at least
+one cheaper move haven't moved the best score. You DECIDE by reading the logs/history yourself
+(there is no automated similarity helper — DR returns a text idea, the archive holds code, so
+only you judge whether the idea already exists): `journal.read_calls` and the directions
+already recorded, `archive_query` `top_n`/`recent_failures` — and read at the ISLAND level too,
+because the same read that says a DR is needed usually also says WHERE the gap lives. A gap
+every family shares is a WHOLE-task question; a gap concentrated in one recurring subroutine is
+a SUB-TASK question — see "Sub-task discovery" below for how those surface.
+
+**Every R1 call passes BOTH `results_dir` AND `budget_usd`.** `results_dir` makes the call
+self-log the machine-readable **discovery stub** — a `kind=dr` pointer `{query, brief,
+timestamp, usable}` in `calls.jsonl` (full detail under `journal/calls/`) — and fold cost into
+the ledger; this is the R1 stub the recency gate reads. `usable = bool(brief)` (true iff ≥1
+direction returned); a refused / empty-brief DR logs `usable:false` and does NOT unlock
+grounding. `budget_usd` arms the pre-flight that SKIPS the spend when the remaining budget
+can't cover `dr_estimated_cost_usd` (~$5). Passing `results_dir` alone does NOT bound DR by the
+budget — without `budget_usd` there is no pre-flight and DR (the single most expensive action)
+can overshoot the cap.
 
 **How to write the DR query (you write this).** Ask for the *general SOTA techniques for
 the task* — or for a well-defined sub-problem — in the model's OWN words with a citation
@@ -665,14 +671,19 @@ verbatim, STOP and reshape it. A refused/failed DR call returns `refused:true` +
 a reproduce-paper framing, so RESHAPE the query; never re-fire the same shape.
 
 **Sub-task discovery (scoped DR).** DR is fireable not only on the whole task but on a
-SUB-PROBLEM of it. YOU decide which sub-problems are worth a round; the signals that one is:
-- a recurring **bottleneck subroutine** visible across the elite set (the same routine dominating
-  runtime/score in program after program);
+SUB-PROBLEM of it — and sub-problems are FOUND in the archive, not brainstormed. The
+highest-yield read is PER-ISLAND: an island is a structural FAMILY (one lineage, no cross-island
+gene flow by default), so its programs share a skeleton — put an island's best few programs
+side by side (`island_health` + its meta brief name the family; `archive_query`
+`top_n`/`by_generation` fetch the code) and the SHARED subroutines stand out in a way no single
+program shows. A shared subroutine is worth its own DR round when it is:
+- a recurring **bottleneck** — the same kernel dominating score/runtime across one or more
+  islands' elites;
 - a **well-separable core** with its own literature (a routing/decoding/scheduling/synthesis
   kernel the field studies in isolation);
-- an evaluator-visible **sub-metric lagging** while the others saturate;
-- whole-task DRs repeatedly returning **too-generic directions** — a scoped question gets
-  specific answers.
+- the owner of an evaluator-visible **sub-metric that lags** while the others saturate;
+- the concrete thing whole-task DRs keep MISSING — repeatedly too-generic directions mean the
+  question needs scoping down.
 
 **Draft the prompt as if the sub-problem WERE the task.** The DR model never needs to know
 whether it is researching your main task or a sub-task — every DR call is ONE self-contained
@@ -771,7 +782,9 @@ integrated child lands in the base's island as a lineage child), so choose delib
   scaffold around the touched subroutine is strongest, on the island whose family most
   prominently CONTAINS the sub-problem (its programs lean on that subroutine) or most stands to
   gain from it. A weak host wastes the technique; the global best is only the right base when
-  the sub-problem is load-bearing there too.
+  the sub-problem is load-bearing there too. (This usually closes the loop: a sub-task surfaced
+  by reading ONE island's shared structure grounds back into that island — its programs are, by
+  construction, hosts of the subroutine.)
 - One sub-task direction MAY be integrated into different bases on different islands as
   SEPARATE groundings (each with its own `archive_record`) — this competes against grounding
   other directions under the same ≤3-groundings-per-round cap, so spend the slots where the

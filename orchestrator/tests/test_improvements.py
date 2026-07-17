@@ -1616,8 +1616,9 @@ def test_skill_doc_teaches_run_loop_and_roles():
               "steering.jsonl", "pending_steering", "STEERING-ONLY",
               "Human steering", "steer_id", "sub-task", "A-INTEGRATE",
               "init_program_paths", "round-robin",
-              # context hygiene: the scout firewall + journal-as-memory re-orientation
-              "archive-scout", "context firewall", "not your conversation",
+              # context hygiene: the reader firewall + journal-as-memory re-orientation
+              "archive-reader", "steered-analyst", "context firewall",
+              "the TRIGGER decides", "not your conversation",
               "journal first, memory never"):
         assert s in skill_flat, f"SKILL.md missing behavioral teaching: {s!r}"
 
@@ -1632,7 +1633,7 @@ def test_skill_doc_teaches_run_loop_and_roles():
     assert "FRAMEWORK-AUDIT" in claude_flat and "ORCHESTRATOR" in claude_flat, "CLAUDE.md roles missing"
     assert "run_archive" in claude_flat and "prior run's archive" in claude_flat, "CLAUDE.md do-not-read missing"
     for s in ("steer", "STEERING-ONLY", "user_quote", "stop_evidence",
-              "init_program_paths", "VERIFIED FROM CODE ARTIFACTS", "archive-scout"):
+              "init_program_paths", "VERIFIED FROM CODE ARTIFACTS", "archive-reader"):
         assert s in claude_flat, f"CLAUDE.md missing behavioral teaching: {s!r}"
     return None
 
@@ -2656,7 +2657,7 @@ def test_discovery_in_interval():
     fail-closed recency gate that spawn_island (primary) reads (and grounding-engineer
     refuses without). Boundary = timestamp of the most-recent type=='control_return' interventions
     row (0.0 if none → first interval). It returns the in-interval USABLE discovery
-    stubs of kind {dr, archive_analyst}: stub.timestamp STRICTLY-GREATER than the
+    stubs of kind {dr, steered_analyst}: stub.timestamp STRICTLY-GREATER than the
     boundary AND usable (response.usable True). Empty list ⇒ the caller fails closed."""
     import tempfile
     import time as _time
@@ -2665,7 +2666,7 @@ def test_discovery_in_interval():
     import journal
 
     def _stub(td, kind, usable, brief, summary):
-        # A discovery stub is exactly a calls.jsonl pointer (kind in {dr, archive_analyst})
+        # A discovery stub is exactly a calls.jsonl pointer (kind in {dr, steered_analyst})
         # written by log_call; the detail blob's response carries the `usable` bool
         # (usable == bool(brief)). cost 0.0 keeps the ledger untouched in the test.
         return journal.log_call(
@@ -2713,7 +2714,7 @@ def test_discovery_in_interval():
         _stub(td, "dr", False, [], "DR REFUSED: no usable direction")  # usable:false
         assert journal.discovery_in_interval(td) == []
 
-    # (e) archive_analyst is STEERING-ONLY: an unsteered stub is IGNORED; a stub whose
+    # (e) steered_analyst is STEERING-ONLY: an unsteered stub is IGNORED; a stub whose
     # request.steer_id resolves to a recorded user_steer row is returned; a steer already
     # consumed by a DIFFERENT stub (or resolved declined) no longer validates (no replay).
     with tempfile.TemporaryDirectory() as td:
@@ -2721,28 +2722,28 @@ def test_discovery_in_interval():
         journal.append_intervention(td, {"type": "control_return", "stagnation_flag": True,
                                          "work_audit": 1, "timestamp": 1000.0})
         # (e1) no steer_id in the request → excluded (fail closed for this kind)
-        _stub(td, "archive_analyst", True, ["combine islands 2 and 4"],
-              "archive-analyst: 1 direction")
+        _stub(td, "steered_analyst", True, ["combine islands 2 and 4"],
+              "steered-analyst: 1 direction")
         assert journal.discovery_in_interval(td) == []
         # (e2) a recorded steer + a stub carrying its steer_id → returned. The steer may
         # be OLDER than the interval boundary (steering queues across intervals).
         steer = journal.log_steering(td, {"quoted_user_text": "look at island 2's collapse",
                                           "timestamp": 500.0})
-        journal.log_call(td, "archive_analyst",
+        journal.log_call(td, "steered_analyst",
                          request={"question": "why is island 2 dead",
                                   "steer_id": steer["steer_id"],
                                   "quoted_user_text": "look at island 2's collapse"},
                          response={"usable": True, "techniques": ["x"]},
                          cost=0.0, summary="analyst: 1 direction")
         got = journal.discovery_in_interval(td)
-        assert len(got) == 1 and got[0]["kind"] == "archive_analyst", got
+        assert len(got) == 1 and got[0]["kind"] == "steered_analyst", got
         steered_file = got[0]["file"]
         # (e3) consuming the steer WITH this stub's file keeps it valid (bound pair) …
-        journal.consume_steering(td, steer["steer_id"], "archive_analyst",
+        journal.consume_steering(td, steer["steer_id"], "steered_analyst",
                                  stub_file=steered_file)
         assert len(journal.discovery_in_interval(td)) == 1
         # … but a SECOND stub reusing the same steer_id is a replay → ignored.
-        journal.log_call(td, "archive_analyst",
+        journal.log_call(td, "steered_analyst",
                          request={"question": "again", "steer_id": steer["steer_id"]},
                          response={"usable": True, "techniques": ["y"]},
                          cost=0.0, summary="analyst: 1 direction")
@@ -2751,7 +2752,7 @@ def test_discovery_in_interval():
         # (e4) a steer resolved as DECLINED (no stub_file) validates nothing.
         steer2 = journal.log_steering(td, {"quoted_user_text": "skip the budget cap"})
         journal.consume_steering(td, steer2["steer_id"], "declined", note="railguard")
-        journal.log_call(td, "archive_analyst",
+        journal.log_call(td, "steered_analyst",
                          request={"question": "q", "steer_id": steer2["steer_id"]},
                          response={"usable": True, "techniques": ["z"]},
                          cost=0.0, summary="analyst: 1 direction")
@@ -3815,7 +3816,7 @@ def test_discovery_usable_flag_authoritative():
         assert len(got) == 1 and got[0]["summary"] == "DR: 1 direction", got
 
     # (d) detail present but WITHOUT a usable key → summary screen decides (dr kind;
-    # an archive_analyst stub can never ride the summary fallback — its steering check
+    # an steered_analyst stub can never ride the summary fallback — its steering check
     # needs a READABLE detail with request.steer_id, so R2 fails CLOSED on a lost detail)
     with tempfile.TemporaryDirectory() as td:
         _fresh(td)
@@ -3827,7 +3828,7 @@ def test_discovery_usable_flag_authoritative():
         assert len(got) == 1 and got[0]["summary"] == "DR: 1 direction", got
         # and the R2 fail-closed side: a steered-looking stub with its detail REMOVED
         # is excluded even with a clean summary.
-        p = journal.log_call(td, "archive_analyst", {"query": "q", "steer_id": "s1"},
+        p = journal.log_call(td, "steered_analyst", {"query": "q", "steer_id": "s1"},
                              {"techniques": ["d"], "usable": True},
                              cost=0.0, summary="analyst: 1 direction")
         os.remove(p)

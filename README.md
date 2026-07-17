@@ -32,7 +32,7 @@ user stop requires the quoted user turn as evidence). See
 ```
 .claude/skills/       Claude Code skills (real files):
   shinka-orchestrator/  SKILL.md (the outer-loop playbook — start here) +
-                        subagents/ (archive-scout, archive-analyst, grounding-engineer,
+                        subagents/ (archive-reader, steered-analyst, grounding-engineer,
                         debug-agent)
   shinka-setup / shinka-convert / shinka-inspect   task authoring + inspection
 orchestrator/         the outer-loop framework code

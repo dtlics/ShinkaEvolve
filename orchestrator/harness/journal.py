@@ -23,8 +23,8 @@ so it can be read with grep/Read (no unpickling, no query layer):
   journal/steering.jsonl      human-steering ledger: one `user_steer` row per LITERAL user
                               direction the orchestrator transcribes from the live chat, and
                               one `steer_consumed` row when a steer is acted on (a steered
-                              DR / archive-analyst round, or surfaced-and-declined). The
-                              steering evidence that makes a kind="archive_analyst" discovery
+                              DR / steered-analyst round, or surfaced-and-declined). The
+                              steering evidence that makes a kind="steered_analyst" discovery
                               stub gate-valid (R2 is steering-only). Folds no cost.
 
 `strategy_history/` (separate) holds the per-strategy-version snapshots. Together
@@ -740,10 +740,10 @@ def work_low_streak(results_dir: str, low_threshold: float = 1.0) -> int:
 # The user may text a direction into the live session mid-run. The orchestrator
 # transcribes it VERBATIM the moment it arrives (same anti-confabulation bar as
 # stopped_by_user's stop_evidence), queues it across clusters, and consumes it at a
-# control-return. A recorded steer is what authorizes a kind="archive_analyst"
+# control-return. A recorded steer is what authorizes a kind="steered_analyst"
 # discovery stub (R2 is STEERING-ONLY — never autonomous); kind="dr" stubs need none.
 
-_STEER_ACTIONS = {"dr", "archive_analyst", "declined", "merged"}
+_STEER_ACTIONS = {"dr", "steered_analyst", "declined", "merged"}
 
 
 def _steering_path(results_dir: str) -> str:
@@ -796,7 +796,7 @@ def consume_steering(
     note: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Mark a recorded steer as acted on. ``action``: "dr" (steered external DR) /
-    "archive_analyst" (steered R2 round — pass the stub's calls.jsonl ``file`` as
+    "steered_analyst" (steered R2 round — pass the stub's calls.jsonl ``file`` as
     ``stub_file`` so the gate can bind steer↔stub) / "declined" (surfaced to the user,
     not actionable) / "merged" (duplicate of another steer). Refuses an unknown
     steer_id or action."""
@@ -822,7 +822,7 @@ def _steer_validates_stub(
     stub: Dict[str, Any],
     steering_rows: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
-    """Does recorded steering evidence authorize this kind="archive_analyst" stub?
+    """Does recorded steering evidence authorize this kind="steered_analyst" stub?
     FAIL CLOSED for this kind (the steer↔stub linkage is the point of the R2
     demotion): requires (i) a readable detail blob whose ``request.steer_id`` is a
     non-empty string; (ii) a ``user_steer`` row with that id, recorded at or before
@@ -1012,7 +1012,7 @@ def _termination_intervals(results_dir: str) -> List[Dict[str, Any]]:
     verified.intervened = OR of the three code-verified artifact classes:
                           a strategy deploy attributed to this run, a usable
                           in-interval discovery stub (dr unconditional;
-                          archive_analyst only with steering evidence), or a
+                          steered_analyst only with steering evidence), or a
                           config_lever_hash flip. Meta rounds and groundings are
                           naturally excluded (wrong kind / no artifact class).
     Rows missing window_index/timestamp verify as non-stagnant/non-intervened —
@@ -1086,7 +1086,7 @@ def termination_streak(results_dir: str) -> int:
     Stagnation truth: the foundation recompute over windows.jsonl best-score deltas
     with boot-frozen thresholds (see foundation_stagnation_flags). Intervention truth:
     a strategy deploy attributed to this run, a usable in-interval discovery stub
-    (kind="dr" unconditional; kind="archive_analyst" only with recorded steering
+    (kind="dr" unconditional; kind="steered_analyst" only with recorded steering
     evidence — R2 is steering-only), or a config_lever_hash flip. The automatic meta
     round has no artifact class and never counts; a grounding alone (kind="grounding")
     is not a discovery-stub kind and never counts — it rides the discovery that
@@ -1123,9 +1123,9 @@ def termination_streak(results_dir: str) -> int:
 
 def read_calls(results_dir: str, kind: Optional[str] = None) -> List[Dict[str, Any]]:
     """The compact external-call pointer index (no big prompts). Optionally
-    filter by kind ('meta' / 'dr' / 'archive_analyst' / 'grounding'). The two DISCOVERY-stub
-    kinds the recency gate recognizes are {dr, archive_analyst} (R1 Azure deep research — the
-    only AUTONOMOUS route — and the human-STEERED R2 archive-analyst subagent, valid only with
+    filter by kind ('meta' / 'dr' / 'steered_analyst' / 'grounding'). The two DISCOVERY-stub
+    kinds the recency gate recognizes are {dr, steered_analyst} (R1 Azure deep research — the
+    only AUTONOMOUS route — and the human-STEERED R2 steered-analyst subagent, valid only with
     recorded steering evidence); 'meta' is the automatic per-window round (not a discovery
     stub). Open a specific call's full detail with ``read_call(results_dir, row['file'])``."""
     rows = _read_jsonl(os.path.join(journal_dir(results_dir), "calls.jsonl"))
@@ -1171,7 +1171,7 @@ def discovery_stubs_between(
     termination intervals (lo/hi = consecutive control_return timestamps).
 
     A stub qualifies iff ALL of:
-      - kind ∈ {"dr", "archive_analyst"} ('meta' is the automatic per-window round;
+      - kind ∈ {"dr", "steered_analyst"} ('meta' is the automatic per-window round;
         'grounding' is a mutate.py self-log — neither is a discovery stub);
       - ``lo_ts < timestamp`` (STRICTLY greater) and, when hi_ts is given,
         ``timestamp <= hi_ts``;
@@ -1182,11 +1182,11 @@ def discovery_stubs_between(
         'unusable') is only the FALLBACK for a stub whose detail is missing/unreadable
         or has no usable key; a stub with neither signal is treated as usable (fail
         OPEN — a legitimate stub is never silently dropped);
-      - kind="archive_analyst" ONLY: recorded steering evidence must authorize it
+      - kind="steered_analyst" ONLY: recorded steering evidence must authorize it
         (R2 is STEERING-ONLY) — see _steer_validates_stub; this leg FAILS CLOSED
         (missing detail / no request.steer_id / no matching user_steer row / steer
         already consumed by a different stub ⇒ disqualified)."""
-    stubs = read_calls(results_dir, kind="dr") + read_calls(results_dir, kind="archive_analyst")
+    stubs = read_calls(results_dir, kind="dr") + read_calls(results_dir, kind="steered_analyst")
     rows = steering_rows
     out: List[Dict[str, Any]] = []
     for s in stubs:
@@ -1212,7 +1212,7 @@ def discovery_stubs_between(
                                        or "unusable" in summary))
         if not usable:
             continue
-        if s.get("kind") == "archive_analyst":
+        if s.get("kind") == "steered_analyst":
             if rows is None:
                 rows = read_steering(results_dir)
             if not _steer_validates_stub(results_dir, s, rows):
@@ -1227,7 +1227,7 @@ def discovery_in_interval(results_dir: str) -> List[Dict[str, Any]]:
 
     A *discovery round* (== "DR round") is a discovery pass via EXACTLY ONE OF R1 (Azure
     deep research, kind="dr" — the ONLY autonomous route, whole-task or sub-task scoped)
-    OR a human-STEERED R2 (the archive-analyst subagent, kind="archive_analyst" — valid
+    OR a human-STEERED R2 (the steered-analyst subagent, kind="steered_analyst" — valid
     only with recorded, unreplayed steering evidence; see discovery_stubs_between).
     This returns the in-interval, USABLE discovery stubs; the caller (the PRIMARY
     spawn_island.py gate; the grounding-engineer subagent likewise refuses without it)

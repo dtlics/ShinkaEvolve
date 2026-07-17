@@ -38,7 +38,7 @@ search ON so you can read the reference.
 ## Input validation — REFUSE a discovery grounding (uses A / A-INTEGRATE) with no in-interval provenance
 For **uses A and A-INTEGRATE**, before writing a line, check the spawn prompt for a reference to the
 in-interval R1/R2 discovery this grounding came from — an Azure DR (`kind=dr`) or a human-STEERED
-archive-analyst (`kind=archive_analyst`, itself valid only with recorded steering evidence) stub
+steered-analyst (`kind=steered_analyst`, itself valid only with recorded steering evidence) stub
 logged THIS control-return interval. If the prompt asks you to ground a
 brainstormed / own-hypothesis technique, or only a stale prior-interval discovery, **REFUSE**: hand
 back a one-line report "refused — no in-interval R1/R2 discovery provenance; run a discovery round
@@ -53,7 +53,7 @@ discovery and is exempt: it does not spawn an island, so this gate does not appl
 
 ## What you are given (in the spawn prompt)
 - The **verified-missing technique** + reference pointers (from an IN-INTERVAL discovery pass — Azure
-  DR `kind=dr` OR the steered `subagents/archive-analyst.md` `kind=archive_analyst`), triaged as
+  DR `kind=dr` OR the steered `subagents/steered-analyst.md` `kind=steered_analyst`), triaged as
   path (i) NOVEL or path (ii) SIMILAR-TO-EXISTING. (If this provenance is absent, REFUSE — see above.)
 - **A-INTEGRATE only:** the **sub-task triple** `{name, statement, relation_to_task}` (matching the
   stub's `request.subtask`), the DR direction(s) + citations for the sub-problem, and the **BASE

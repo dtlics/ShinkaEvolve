@@ -25,7 +25,7 @@ declared SUB-TASK — see "Sub-task discovery"), triage each returned direction,
 ground EACH triaged direction (up to 3), seed/ground islands, fold results in. (Terminology: a
 **discovery round** == a **DR round** == one discovery pass via EXACTLY ONE OF **R1** = Azure deep
 research (`deep_research.py`) — the ONLY route you may fire autonomously — OR **R2** = the
-`subagents/archive-analyst.md` read, which is STEERING-ONLY: it runs solely to execute a recorded
+`subagents/steered-analyst.md` read, which is STEERING-ONLY: it runs solely to execute a recorded
 user steer (see "Human steering"), never on your own initiative.
 Simple naming rule: if a term says "Azure" it means R1 specifically; otherwise "discovery round /
 DR round" is the umbrella over both.)
@@ -499,7 +499,7 @@ stay compatible.
 | **Memory** | `record_policy.py` (now persists `runtime_sec`/`timed_out` for the runtime caution — read via `include_metadata`) | sampler / novelty / diagnostics / prompt readers | which metadata fields exist |
 | **Island structure** | `island_policy.py` (+ per-island briefs auto-written by meta) | the foundation DB | `island_health` per-island trajectory |
 | **New directions (meta)** | `meta_summarize.py` (automatic per-window) | the harness records its per-island briefs; you don't author them | persistently flat progress after rewrites |
-| **New directions (discovery round / DR)** | `deep_research.py` (R1, web-grounded, whole-task or sub-task scoped — the ONLY autonomous route) or `subagents/archive-analyst.md` (R2, STEERING-ONLY — runs solely on a recorded user steer) | you TRIAGE each direction (novel → ground in a new island; similar → combine; useless → ignore), grounding EACH triaged direction up to 3 | flat progress that meta can't lift; a queued user steer |
+| **New directions (discovery round / DR)** | `deep_research.py` (R1, web-grounded, whole-task or sub-task scoped — the ONLY autonomous route) or `subagents/steered-analyst.md` (R2, STEERING-ONLY — runs solely on a recorded user steer) | you TRIAGE each direction (novel → ground in a new island; similar → combine; useless → ignore), grounding EACH triaged direction up to 3 | flat progress that meta can't lift; a queued user steer |
 
 ## The automatic meta round (not yours to trigger)
 
@@ -611,7 +611,7 @@ check. Discovery is valid via EXACTLY ONE OF two routes (and nothing else):
 - **R1 — Azure deep research (`deep_research.py`): the ONLY route you may fire autonomously.**
   Web-grounded, web-cited, external — it surfaces techniques absent from your archive that the
   search cannot invent. Fireable on the WHOLE task or on a declared SUB-TASK (below).
-- **R2 — the `subagents/archive-analyst.md` read: STEERING-ONLY.** You may NEVER spawn it on
+- **R2 — the `subagents/steered-analyst.md` read: STEERING-ONLY.** You may NEVER spawn it on
   your own initiative — it runs solely to execute a RECORDED user steer (the user texted a
   direction; you transcribed it verbatim into `journal/steering.jsonl` — see "Human steering"),
   and its discovery stub is gate-valid ONLY with that steering evidence (`request.steer_id`
@@ -677,7 +677,7 @@ gene flow by default), so its programs share a skeleton — put an island's best
 side by side (`island_health` + its meta brief name the family; `archive_query`
 `top_n`/`by_generation` fetch the code) and the SHARED subroutines stand out in a way no single
 program shows. (When that read would drag several programs' code into your context, delegate it
-to `subagents/archive-scout.md` — a read-only context firewall that returns the candidates in
+to `subagents/archive-reader.md` — a read-only context firewall that returns the candidates in
 ≤300 words; it is NOT a discovery route and emits no stub.) A shared subroutine is worth its own
 DR round when it is:
 - a recurring **bottleneck** — the same kernel dominating score/runtime across one or more
@@ -716,12 +716,12 @@ for a full job. **There is NO autonomous fallback route when R1 keeps failing** 
 steering-only, not an R1 substitute. Reshape/rescope the query (a sub-task scope often clears a
 filter that the whole-task framing tripped), fix the transport cause, or carry the question to
 the next control-return; only a queued user steer can open the R2 route (see "Human steering" —
-its stub emission and gate rules live there and in `subagents/archive-analyst.md`). Whichever
+its stub emission and gate rules live there and in `subagents/steered-analyst.md`). Whichever
 route a discovery ran by, its output is triaged identically (below) and counts identically for
 the termination streak.
 
 **Triage discovery output by the THREE PATHS — per idea, one by one, identically whether the
-ideas came from an R1 (Azure DR) brief OR an R2 (archive-analyst) analysis. Only R1/R2 ideas are
+ideas came from an R1 (Azure DR) brief OR an R2 (steered-analyst) analysis. Only R1/R2 ideas are
 triageable (a self-invented hypothesis fails provenance and is dropped). A discovery round returns
 one or more (direction, citation) pairs; do NOT take only the single "best" one — decide a path for
 EACH, and GROUND each triaged direction, up to a MAX of 3 per round. Lean toward acting:**
@@ -757,8 +757,8 @@ directions go to grounding anyway.
 
 **PRECONDITION (HARD GATE, both executors):** grounding may act ONLY on a technique from an
 in-interval triaged R1/R2 discovery stub. Before authoring a grounding prompt, confirm a usable
-`kind∈{dr,archive_analyst}` stub exists for the CURRENT control-return interval (strictly newer
-than the prior control-return); a stale stub does NOT satisfy it, and an `archive_analyst` stub
+`kind∈{dr,steered_analyst}` stub exists for the CURRENT control-return interval (strictly newer
+than the prior control-return); a stale stub does NOT satisfy it, and an `steered_analyst` stub
 satisfies it ONLY when tied to recorded steering evidence (`request.steer_id` → an unconsumed
 `user_steer` row — the gate checks this; `dr` stubs need none). `spawn_island.py` enforces
 this in code: it refuses to seed an island when no in-interval stub exists, and
@@ -781,7 +781,7 @@ program hosts the sub-solution decides which island receives it (`parent_id` = t
 integrated child lands in the base's island as a lineage child), so choose deliberately:
 - Read the archive first: `island_health` + each island's meta brief tell you which FAMILY each
   island is exploring; `archive_query` `top_n` / per-island bests show the candidate hosts (or
-  reuse the archive-scout report that surfaced the sub-task — it doubles as the host shortlist).
+  reuse the archive-reader report that surfaced the sub-task — it doubles as the host shortlist).
 - The default base is the **strongest host, not blindly the global best**: the program whose
   scaffold around the touched subroutine is strongest, on the island whose family most
   prominently CONTAINS the sub-problem (its programs lean on that subroutine) or most stands to
@@ -895,8 +895,8 @@ the next one — the one-R1-per-stagnation-cluster bound is shared.)
   validity, but the stub then records what steered it).
 - The steer asks about the RUN'S OWN history/population/islands/archive structure ("why is island
   2 dead", "are we stuck in one lineage") → the **steered R2**: spawn
-  `subagents/archive-analyst.md` with the `steer_id` + the quoted text + recent diagnostics in the
-  spawn prompt. Its `kind=archive_analyst` stub is gate-valid ONLY through that steering evidence.
+  `subagents/steered-analyst.md` with the `steer_id` + the quoted text + recent diagnostics in the
+  spawn prompt. Its `kind=steered_analyst` stub is gate-valid ONLY through that steering evidence.
 
 **Then proceed exactly like any discovery:** triage the returned directions by the three paths,
 ground each (up to 3), and score `work_discovery` normally — a steered round is a real discovery
@@ -905,9 +905,9 @@ gate exactly like your own R1 stub, AND it carries the responsibility — if the
 verified-stagnant despite it, that interval counts toward the termination streak like any other
 intervention that failed to break the stall. Immediately after the round's
 stub lands (or the steer is resolved without one), mark it consumed:
-`{"view": "consume_steering", "steer_id": "<id>", "action": "dr" | "archive_analyst" |
+`{"view": "consume_steering", "steer_id": "<id>", "action": "dr" | "steered_analyst" |
 "declined" | "merged", "stub_file": "<the stub's calls.jsonl file — REQUIRED for
-archive_analyst>"}`. Consume promptly — an unconsumed steer keeps validating stubs.
+steered_analyst>"}`. Consume promptly — an unconsumed steer keeps validating stubs.
 
 **Edge rules:**
 - **Multiple queued steers** → one per control-return, oldest first. A duplicate of an
@@ -1010,7 +1010,7 @@ Escalate to `subagents/debug-agent.md` only when the SAME failure signature recu
 DIFFERENT parents in a window (each having exhausted its in-loop repair budget, matching
 the subagent's own precondition); write its report to `strategy_history/debug_<w>.md`, act on its one
 recommendation, forget the detail. For a heavy archive read (the per-island sub-task scan, a
-base-host shortlist), spawn the read-only `subagents/archive-scout.md` — the archive-analyst is
+base-host shortlist), spawn the read-only `subagents/archive-reader.md` — the steered-analyst is
 steering-only and is never the tool for your own reads.
 
 ## Termination + end of run
@@ -1040,7 +1040,7 @@ with budget): your `control_return` rows only DELIMIT the intervals and carry th
 - **verified intervened** = at least one of the three artifact classes in the interval: a
   strategy deploy ATTRIBUTED TO THIS RUN in `strategy_history/index.json` (any status — a
   rejected rewrite is still "intervened but failed"); a USABLE in-interval discovery stub
-  (`kind=dr` unconditional; `kind=archive_analyst` only with steering evidence — STEERED
+  (`kind=dr` unconditional; `kind=steered_analyst` only with steering evidence — STEERED
   rounds included and equal: a user-steered discovery that fails to break the stall advances
   the streak like your own); or a
   `config_lever_hash` change across the interval's windows (the harness stamps the hash into
@@ -1104,16 +1104,16 @@ later reference.
   (the `termination_report` view shows claimed-vs-verified per interval).
 - `journal/steering.jsonl` — the human-steering ledger: `user_steer` rows (verbatim
   `quoted_user_text` + `steer_id`) and `steer_consumed` rows. CLI views: `log_steering`,
-  `pending_steering`, `consume_steering`, `steering`. A `kind=archive_analyst` discovery stub is
+  `pending_steering`, `consume_steering`, `steering`. A `kind=steered_analyst` discovery stub is
   gate-valid ONLY via a `request.steer_id` resolving here.
 - `journal/calls.jsonl` — compact POINTER index of every external LLM call (`kind` ∈
-  `meta / dr / archive_analyst / grounding`): `{kind, timestamp, file, cost, summary}`. Full
+  `meta / dr / steered_analyst / grounding`): `{kind, timestamp, file, cost, summary}`. Full
   prompt + raw output live in `journal/calls/<kind>_<ts>_<rand>.json` (a `kind=dr` detail's
   `request.subtask` carries the sub-task scope when one was declared). A standalone grounding
   `mutate.py` call self-logs `kind=grounding` when you pass `results_dir` +
   `purpose:"grounding"`. The discovery kinds the recency gate
-  recognizes are `{dr, archive_analyst}` (each is a **discovery stub**, carrying `usable`;
-  `archive_analyst` additionally needs steering evidence);
+  recognizes are `{dr, steered_analyst}` (each is a **discovery stub**, carrying `usable`;
+  `steered_analyst` additionally needs steering evidence);
   `journal.discovery_in_interval(results_dir)` returns the in-interval usable ones (the single
   source of truth for the recency rule — if empty, grounding is refused), and
   `journal.recent_work_axes` exposes the three work axes (`work_audit`/`work_discovery`/
@@ -1190,6 +1190,14 @@ hung request so a wedged socket on one status GET can't ride the whole wall. The
 (mutate → `applied:false`; DR → a degraded brief whose billed cost is captured). Don't rewrite the
 transport in a strategy rewrite.
 
+**And never manually kill a slow in-flight Azure bg call** (TaskStop / bash-kill) to end it sooner —
+cost books only on a TERMINAL status, so a kill leaks unlogged-but-billed spend; let it ride to the
+3600s wall, deciding for yourself with the knobs you own (reasoning effort, `@medium` vs `@high`,
+prompt scope) how to handle a pathologically slow call. (This is the Azure CALL only. To stop or pause
+a `run_window` cluster, write `<results_dir>/.stop` — honored between candidates, worst wait ≈ one
+candidate's mutate+eval; the stopped window skips its auto-meta round and still writes its window row —
+then `--resume` — never `Stop-Process`/`Get-Process` a run by PID; see "Run identity, stopping, recovery".)
+
 ## The subagents (your context firewalls)
 
 Each subagent exists to keep something OUT of your context: it does the heavy reading or
@@ -1199,19 +1207,17 @@ spawn with a self-contained prompt, receive the report, ACT on it, save it to
 never let subagent output linger in your context). All four spend Claude tokens (off-ledger,
 $0 in the run ledger); none makes an Azure call.
 
+**Two of them read the archive; the TRIGGER decides which** (their names say it): a read YOU
+need → `archive-reader`, spawned freely, no stub, no authority; a recorded USER STEER at the
+run's own history → `steered-analyst`, the R2 discovery route, stub-emitting and gate-relevant.
+Reading is free; discovery is not.
+
 | Subagent | Spawn when | Returns (cap) | Never |
 |---|---|---|---|
-| `archive-scout` | a heavy archive read — the per-island sub-task scan, or a base-host shortlist — would drag several programs' code into your context | candidate sub-tasks / host shortlist with evidence (≤300 words) | emits a stub or counts as discovery — its report is YOUR reading; the R1 it informs produces the stub |
-| `archive-analyst` (R2) | ONLY on a recorded user steer aimed at the run's own history (see "Human steering") | steer-scoped structural read + triaged recommendation (<500 words) + its `kind=archive_analyst` stub | runs autonomously; edits anything |
+| `archive-reader` | a heavy archive read — the per-island sub-task scan, or a base-host shortlist — would drag several programs' code into your context | candidate sub-tasks / host shortlist with evidence (≤300 words) | emits a stub or counts as discovery — its report is YOUR reading; the R1 it informs produces the stub |
+| `steered-analyst` (R2) | ONLY on a recorded user steer aimed at the run's own history (see "Human steering") | steer → evidence → triaged directions (<500 words) + its `kind=steered_analyst` stub | runs autonomously; edits anything |
 | `grounding-engineer` | grounding a technique Azure refused (A), a sub-task integration (A-INTEGRATE — the default for `subtask` stubs), or the rare mutation rescue (B) | scratch program path + verification report (<400 words) | archives/spawns itself; touches `initial.py`; grounds without in-interval provenance (A/A-INTEGRATE) |
 | `debug-agent` | the same failure signature recurs across two DIFFERENT parents in a window | root-cause read + ONE recommendation (<400 words) | edits code |
-**And never manually kill a slow in-flight Azure bg call** (TaskStop / bash-kill) to end it sooner —
-cost books only on a TERMINAL status, so a kill leaks unlogged-but-billed spend; let it ride to the
-3600s wall, deciding for yourself with the knobs you own (reasoning effort, `@medium` vs `@high`,
-prompt scope) how to handle a pathologically slow call. (This is the Azure CALL only. To stop or pause
-a `run_window` cluster, write `<results_dir>/.stop` — honored between candidates, worst wait ≈ one
-candidate's mutate+eval; the stopped window skips its auto-meta round and still writes its window row —
-then `--resume` — never `Stop-Process`/`Get-Process` a run by PID; see "Run identity, stopping, recovery".)
 
 ## The run config (you author this)
 
@@ -1390,12 +1396,12 @@ not a code rewrite; the next relaunched cluster reads it.
   into an existing island is ordinary `archive_record` insertion with `parent_id`=closest — no
   `spawn_island`, not separately gated; the `work_discovery`/`work_grounding` split keeps it from
   padding the termination streak.)
-- **Never fire `archive-analyst` (R2) without a recorded user steer.** R2 is steering-only: it
+- **Never fire `steered-analyst` (R2) without a recorded user steer.** R2 is steering-only: it
   needs a `user_steer` row in `journal/steering.jsonl` and its stub must carry that
   `request.steer_id` — the gate ignores an unsteered stub, and the subagent itself refuses a
   spawn prompt with no steer. R1 is the only autonomous discovery route.
 - **Never treat a tournament / sort over your OWN hypotheses as discovery.** The only sanctioned
-  Claude-native discovery is the STEERED `subagents/archive-analyst.md` (R2); the only sanctioned
+  Claude-native discovery is `subagents/steered-analyst.md` (R2); the only sanctioned
   multi-agent grounding is `subagents/grounding-engineer.md`. A bracket over self-invented ideas
   surfaces no new knowledge and produces no discovery stub.
 - **Never call `finalize_run` outside the contract.** Only the three terminal statuses exist; the
@@ -1409,7 +1415,7 @@ not a code rewrite; the next relaunched cluster reads it.
   `grounding-engineer` rather than firing more Azure mutate calls.
 - Never run the **per-window** inner mutation/fix loop in your own context — always call
   `mutate.py`. The ONLY exceptions are the two rare Claude powers: a Claude-native DISCOVERY pass
-  (`archive-analyst`) and a hand-authored grounding (`grounding-engineer` / a hand-authored
+  (`steered-analyst`) and a hand-authored grounding (`grounding-engineer` / a hand-authored
   `patch_sys`/`patch_msg`) when the Azure model refuses a verified pivot.
 - Never make two rewrites in one control-return. Never call the paid Azure deep research (R1) twice
   per stagnation cluster (and at most ONE steered round per control-return — the steered R1 shares
@@ -1422,7 +1428,7 @@ not a code rewrite; the next relaunched cluster reads it.
 Do less — but "do less" applies to **interventions** (framework rewrites, config flips), NOT to
 **discovery**. Your value is the rare code change the inner loop's hand-coded policies cannot
 make, and the DISCOVERY round — R1 (Azure deep research, whole-task or sub-task scoped, the only
-autonomous route) or a human-steered R2 (`subagents/archive-analyst.md`) — that brings in
+autonomous route) or a human-steered R2 (`subagents/steered-analyst.md`) — that brings in
 knowledge the search can't
 invent. Discovery is exactly R1 or a steered R2; never an ad-hoc tournament over your own
 hypotheses (introspection cannot surface a technique absent from the archive — that needs R1).

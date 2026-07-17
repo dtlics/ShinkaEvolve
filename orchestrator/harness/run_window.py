@@ -598,7 +598,7 @@ def _attempt_immediate_fixes(
         check prevents *starting* an attempt we can't afford (overshoot ≤ 0).
       * ``fix_budget`` is THE lever: 1 for ordinary gens (``evo.fix_retry_budget``),
         3 when grounding a TRIAGED discovery direction (R1 Azure deep research or
-        R2 archive-analyst) as a new island's first member.
+        R2 steered-analyst) as a new island's first member.
       * ``enable_web_search`` is OFF for ordinary fixes; it is turned on only
         when the repair is nailing a DISCOVERY reference. Left mutable for future
         outer-loops (one of the framework's policy switches, like novelty/bandit).

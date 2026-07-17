@@ -18,7 +18,7 @@ overwritten, evicted, or replaced.
 The technique seeded here MUST originate from an in-interval discovery round (DR
 round) — EXACTLY ONE OF R1 (Azure deep research, ``deep_research.py``, stub
 ``kind="dr"``, whole-task or sub-task scoped — the ONLY autonomous route) OR a
-human-STEERED R2 (archive-analyst subagent, stub ``kind="archive_analyst"``, valid
+human-STEERED R2 (steered-analyst subagent, stub ``kind="steered_analyst"``, valid
 only with recorded steering evidence: the stub's ``request.steer_id`` must resolve
 to a ``user_steer`` row in journal/steering.jsonl not consumed by a different stub)
 — logged THIS control-return interval. The PRIMARY fail-closed gate at the top
@@ -69,7 +69,7 @@ def main(payload: Dict[str, Any]) -> Dict[str, Any]:
     # ------------------------------------------------------------------
     # PRIMARY fail-closed gate. Run BEFORE opening the DB so a
     # refused grounding seeds NO island. The technique must come from an
-    # in-interval R1/R2 discovery stub (kind in {dr, archive_analyst});
+    # in-interval R1/R2 discovery stub (kind in {dr, steered_analyst});
     # journal.discovery_in_interval is the single source of truth for the
     # recency rule. Fail CLOSED on a missing results_dir, an unavailable
     # journal bridge, or an empty in-interval stub list.

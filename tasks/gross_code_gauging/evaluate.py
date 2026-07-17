@@ -88,18 +88,22 @@ stays within RATIO_LIMIT of the reference at the benchmark rates):
       the candidate's EFFECTIVE LER at each scored point — but only when the
       Monte Carlo could NOT have seen it (expected occurrences below
       TAIL_MIN_EXPECT in the shot budget; visible sets are already inside
-      the measured number). A healthy design pays ~0; the gcg1 tree at R=5
-      pays ~1e-6 at the gate point (negligible — it becomes FEASIBLE, as the
-      run owner intends, but now with its tail on the record); an R=1 design
-      pays its silent outcome-flip rate ~n_av*p (and MC measures it too).
+      the measured number). A healthy design pays ~0; a near-tree at R=5
+      pays ~1e-6 at the gate point (negligible — allowed through with its
+      tail on the record); an R=1 design pays its silent outcome-flip rate
+      ~n_av*p (and MC measures it too).
   (c) the reported tail_crossover_p diagnostic: the physical rate below
       which the found tails overtake the reference's extrapolated curve —
-      i.e. how far down in p the candidate's advantage claim survives. This
-      is the "story" metric: a Q=23 tree that wins at today's hardware rates
-      (p ~ 1e-3..3e-3) and dies below p ~ 1e-5 is reported exactly that way.
-  Optional: set GAUGE_DTARGET > 0 to restore a hard fault-distance gate for
-  a distance-preserving campaign (10 = the gross code's own circuit-level
-  ceiling, Bravyi et al. Nature 2024; Cross et al. Sec 4.2).
+      i.e. how far down in p the candidate's advantage claim survives
+      ("valid down to p ~ ..."), the same role d_circ plays in Bravyi et
+      al.'s own extrapolation formula p_L = p^(d_circ/2)*exp(...).
+  SCOPE: spanning trees/forests (cycle rank 0 — no flux checks, no gauge
+  structure; the corner the field abandoned and run gcg1 trivially found)
+  are INVALID by the run owner's decision; the cheapest valid cycle is a
+  doubled edge, so the size floor is Q ~ 25. Optional: set GAUGE_DTARGET > 0
+  to restore a hard fault-distance gate for a distance-preserving campaign
+  (10 = the gross code's own circuit-level ceiling, Bravyi et al. Nature
+  2024; Cross et al. Sec 4.2).
 
 ================  SCORING (Shinka MAXIMISES combined_score)  ===================
   Q  = total added elements = edge qubits + A_v checks + B_p checks
@@ -148,7 +152,7 @@ stays within RATIO_LIMIT of the reference at the benchmark rates):
        the SMALLEST gadget whose tail-priced curve stays within RATIO_LIMIT of
        the reference — with every light fault set it carries priced and
        reported, so the result is a defensible LER-vs-size Pareto front over
-       Q in [23, 41], not a sampling artifact.
+       Q in [~25, 41], not a sampling artifact.
 
 ================  ANTI-GAMING  ================================================
 The candidate returns only the gadget spec. The code, the deformation, the
@@ -461,6 +465,15 @@ def parse_spec(spec):
         raise SpecError(f"graph disconnected: vertices {sorted(missing)} unreachable from "
                         f"vertex 0 — all 12 support vertices and every used dummy must lie "
                         f"in ONE connected component (Theorem 1 hypothesis)")
+    cycle_rank = len(edges) - len(verts) + 1
+    if cycle_rank < 1:
+        raise SpecError(
+            f"spanning-tree/forest gadget (cycle rank {cycle_rank}: {len(edges)} edges on "
+            f"{len(verts)} vertices) is OUT OF SCOPE: with no independent cycle there are "
+            f"no flux checks B_p and no gauge structure — the degenerate no-flux limit of "
+            f"gauging (incl. the unverified Shor-star via a dummy hub) is the known-trivial "
+            f"corner this task does not study. Add at least one cycle (a doubled edge is "
+            f"the paper's own double-gross motif); the size floor is Q ~ 25.")
     return edges, dummies, rounds
 
 def _shortest_paths(verts, edges):

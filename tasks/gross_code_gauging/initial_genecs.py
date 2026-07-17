@@ -1,6 +1,14 @@
 """
-ShinkaEvolve INITIAL PROGRAM -- end-to-end gauging measurement of the logical
-X_alpha on the gross code (Williamson & Yoder, arXiv:2410.02213).
+ShinkaEvolve INITIAL PROGRAM (GeneCS-rooted seed) -- end-to-end gauging
+measurement of the logical X_alpha on the gross code (Williamson & Yoder,
+arXiv:2410.02213). Identical fixed tools and rules as initial.py; only the
+EVOLVE-BLOCK differs: it starts from the GeneCS-style conditioned-expander
+graph (genecs.py, arXiv:2605.21746 Algorithm 1 at beta=0.46 -- the spectral
+level the paper reference itself certifies), Q=37, instead of the
+matching+greedy Q=45 seed. Use as a SECOND boot seed via the run config's
+task.init_program_paths (seed i roots island i), so one island explores from
+the spectral-synthesis lineage while another explores from the matching
+motif.
 
 GOAL. Design the complete GAUGING GADGET that measures the weight-12 logical
 X_alpha of the [[144,12,12]] gross code, evaluated END-TO-END: the evaluator
@@ -396,34 +404,27 @@ def preview_gadget(edges, rounds=12):
 def propose_gadget():
     """Return the gauging gadget spec: {"edges": [(u,v), ...], "rounds": R}.
 
-    SEED: the 18 matching edges (weight-1 deformation motif) + sparsest-cut
-    greedy expansion edges, no dummies, R=12. This is a feasible flat graph
-    at Q=45 (score ~ -4 + bonus); the reference reaches Q=41 with only 4
-    expansion edges, a GeneCS-style synthesis reaches Q=37/35, the bare
-    matching graph is Q=33, and the scope floor (one cycle minimum) is
-    Q ~ 25 -- NOTHING says a flat, dummy-free, R=12 graph is optimal
-    anywhere in that range. Use preview_gadget() to screen structure
-    cheaply; the evaluator's feedback names every light fault set it finds
-    (support + price + the crossover rate where it would start to matter),
-    so cut boldly and read what the price was. Feasibility is the
-    tail-priced total error staying within 1.1x of the reference at both
-    scored points; spanning trees/forests (no cycle) are invalid by scope.
+    SEED: the GeneCS-style conditioned-expander graph (arXiv:2605.21746
+    Algorithm 1 run at beta=0.46 over the 18-edge path-matching motif;
+    computed offline by genecs.py, hardcoded here for determinism): 20
+    edges, Q=37, feasible at R=12 with dressed distance 10 -- already 4
+    elements below the hand-crafted reference. Only 12 of the 18 matching
+    edges survive in it, so it is NOT matching+extras; it is a different
+    lineage. Directions to explore from here: prune further (each removed
+    element is +1 while the tail-priced curve stays within 1.1x of the
+    reference at both scored points), retune R (silent outcome flips are
+    measured/priced; every extra round adds exposure -- likely optimum
+    R ~ 4..8), dummy-vertex structure, and re-adding cheap matching edges
+    where the attack reports a light dressed logical (feedback names its
+    support). Spanning trees/forests (no cycle) are invalid by scope; the
+    floor is Q ~ 25.
     """
-    NUM_EXTRA = 6
-    edges = list(MATCHING_EDGES)
-    for _ in range(NUM_EXTRA):
-        side, _cond, _ncross = sparsest_cut(edges)
-        adj = graph_adjacency(edges)
-        deg = vertex_degrees(edges)
-        side_set = set(side)
-        outside = [w for w in _verts_of(edges) if w not in side_set]
-        cands = sorted((deg[u] + deg[w], u, w)
-                       for u in side for w in outside if w not in adj[u])
-        if not cands:
-            break
-        _, u, w = cands[0]
-        edges.append((min(u, w), max(u, w)))
-    return {"edges": edges, "rounds": 12}
+    GENECS_B46_EDGES = [
+        (0, 1), (0, 4), (0, 8), (0, 11), (1, 2), (1, 11), (2, 3), (2, 8),
+        (3, 6), (3, 8), (3, 9), (4, 5), (4, 9), (4, 10), (5, 6), (5, 9),
+        (6, 7), (6, 10), (7, 10), (7, 11),
+    ]
+    return {"edges": list(GENECS_B46_EDGES), "rounds": 12}
 # EVOLVE-BLOCK-END
 
 

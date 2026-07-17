@@ -172,6 +172,76 @@ def compare(args):
             print(f"{name:<22} {score:>7.2f}  INVALID: {pub.get('reason', '?')[:60]}")
 
 
+def ablate(args):
+    """Scheduler-sensitivity ablation: score the paper reference and the
+    GeneCS beta=0.46 gadget under the evaluator's Konig exact minimum edge
+    coloring AND a greedy first-fit coloring (the two common generic
+    choices; greedy can exceed the Tanner max degree Delta, deepening every
+    round). Purpose: neither GeneCS nor Cross et al. publish their merged-
+    circuit scheduler in reusable form, so this brackets how much the
+    unpublished choice could move the comparison — if the ranking and
+    margins are stable across schedulers, the story does not depend on
+    guessing theirs."""
+    import numpy as np
+    import evaluate as ev
+
+    def greedy_color_schedule(H_rows, anc_ids):
+        H = np.asarray(H_rows) % 2
+        check_used = [set() for _ in range(H.shape[0])]
+        qubit_used = [set() for _ in range(H.shape[1])]
+        color = {}
+        for r in range(H.shape[0]):
+            for q in np.flatnonzero(H[r]):
+                q = int(q)
+                c = 0
+                while c in check_used[r] or c in qubit_used[q]:
+                    c += 1
+                color[(r, q)] = c
+                check_used[r].add(c); qubit_used[q].add(c)
+        delta = max(color.values()) + 1 if color else 0
+        ticks = [[] for _ in range(delta)]
+        for (r, q), c in sorted(color.items()):
+            ticks[c].append((int(q), int(anc_ids[r])))
+        return ticks
+
+    if args.budget_scale != 1.0:
+        ev.P_BUDGET = tuple((max(10, int(e * args.budget_scale)),
+                             max(400, int(s * args.budget_scale)))
+                            for (e, s) in ev.P_BUDGET)
+        print(f"(budgets scaled x{args.budget_scale}: {ev.P_BUDGET})")
+
+    import genecs
+    spec_g, _ = genecs.genecs_spec(beta=0.46, seed=1, restarts=150)
+    cases = [("paper-41", _reference_spec(ev)), ("genecs b=.46", spec_g)]
+    konig = ev.color_schedule
+    rows = []
+    for sched_name, sched in (("konig", konig),
+                              ("greedy", greedy_color_schedule)):
+        ev.color_schedule = sched
+        for name, spec in cases:
+            t0 = time.time()
+            res = ev.aggregate_fn([lambda spec=spec: spec])
+            pub = res.get("public", {})
+            rows.append((sched_name, name, res["combined_score"], pub))
+            print(f"[{time.strftime('%H:%M:%S')}] {sched_name}/{name}: "
+                  f"score={res['combined_score']:.2f} depths="
+                  f"{pub.get('depth_x')}/{pub.get('depth_z')} "
+                  f"({time.time() - t0:.0f} s)", flush=True)
+    ev.color_schedule = konig
+    print("\n=== scheduler ablation ===")
+    hdr = (f"{'sched':<7} {'gadget':<13} {'score':>7} {'dX/dZ':>6} "
+           f"{'m_lo':>6} {'m_gate':>6} {'LER_gate':>9}")
+    print(hdr); print("-" * len(hdr))
+    for sched_name, name, score, pub in rows:
+        if pub.get("valid"):
+            print(f"{sched_name:<7} {name:<13} {score:>7.2f} "
+                  f"{pub['depth_x']}/{pub['depth_z']:>4} {pub['margin_lo']:>6.2f} "
+                  f"{pub['margin_gate']:>6.2f} {pub['overall_ler']:>9.2e}")
+    print("NOTE: greedy margins are computed against the KONIG-calibrated "
+          "LER_REFS, so within one scheduler compare candidates to the "
+          "paper row of the SAME scheduler, not to the absolute margins.")
+
+
 def main():
     ap = argparse.ArgumentParser(description="calibrate LER_REFS / compare benchmark gadgets")
     ap.add_argument("--errors", type=int, default=300, help="max errors per circuit per point")
@@ -181,15 +251,20 @@ def main():
     ap.add_argument("--compare", action="store_true",
                     help="score the benchmark set (paper/tree/genecs/matching/seed) "
                          "through the full v4 pipeline and print a table")
+    ap.add_argument("--ablate", action="store_true",
+                    help="scheduler-sensitivity ablation (Konig vs greedy "
+                         "first-fit) on the paper + GeneCS gadgets")
     ap.add_argument("--only", type=str, default="",
                     help="comma-separated substrings selecting compare cases "
                          "(e.g. --only paper,tree)")
     ap.add_argument("--budget-scale", type=float, default=1.0,
-                    help="scale the sampling budgets in --compare (0.5 halves "
-                         "shots/errors — coarser margins, faster table)")
+                    help="scale the sampling budgets in --compare/--ablate "
+                         "(0.5 halves shots/errors — coarser margins, faster)")
     args = ap.parse_args()
     if args.compare:
         compare(args)
+    elif args.ablate:
+        ablate(args)
     else:
         calibrate(args)
 

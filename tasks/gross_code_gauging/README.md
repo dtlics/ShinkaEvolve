@@ -9,9 +9,11 @@ feasibility is purely the measured LER of the actual measurement protocol
 staying within **1.1×** of the hand-crafted 41-element reference, made honest
 by **pricing** the probe-found fault tails Monte Carlo cannot see (not by
 gating on a distance target); the score is the ancilla saving plus a
-worst-case LER-dominance bonus. The goal: map the **LER-vs-size Pareto
-between Q=23 (the trivial spanning tree) and Q=41 (the hand-crafted
-reference)**.
+worst-case LER-dominance bonus. Spanning trees/forests (cycle rank 0 — no
+flux checks, no gauge structure; the known-trivial corner run gcg1 found)
+are **out of scope by construction**, so the goal is the **LER-vs-size
+Pareto between the Q ≈ 25 scope floor and Q = 41 (the hand-crafted
+reference)** — the genuinely open middle region.
 
 ## Why v4 (how run gcg1 beat the v2/v3 evaluator)
 
@@ -54,12 +56,16 @@ negligible at the benchmark rates" is allowed through — which is the run
 owner's stated criterion. A v4.0 draft instead hard-gated a fault-distance
 target d̂ ≥ 10; that walls off the whole 23–35-element region (and forces
 R ≥ 10), so it was demoted to an optional campaign mode (`GAUGE_DTARGET`).
-The tree at R=5 pays only ~10⁻⁶ at the gate point and **becomes feasible**
-— but now with its tail on the record: the feedback names each found
-operator's support and the **crossover rate** below which the tails would
-dominate ("valid down to p ~ …"). Static graph proxies (Fiedler,
-sparsest-cut conductance) stay **out of the metrics** (they misled gcg1's
-inner loop into optimizing conductance *among trees*).
+The spanning-tree corner itself is excluded by **scope** (cycle rank ≥ 1
+validity), not by punishment: a tuned tree is numerically defensible at the
+benchmark rates (measured: R=5 tree beats the reference 1.6× at the gate
+point, floor at p ≈ 8×10⁻⁶), but it is the degenerate no-flux limit the
+field has already explored and abandoned — there is no discovery in
+re-finding it. Every valid design's found fault sets go on the record: the
+feedback names each operator's support and the **crossover rate** below
+which the tails would dominate ("valid down to p ~ …"). Static graph
+proxies (Fiedler, sparsest-cut conductance) stay **out of the metrics**
+(they misled gcg1's inner loop into optimizing conductance *among trees*).
 
 ## The design space (unchanged — the paper's, in full)
 
@@ -248,13 +254,14 @@ genecs b=.35 (Q=35)   6.00  35  12    9    9.4e-12    none     -0.01  +0.08   4.
 seed (Q=45)          -3.99  45  12   12    1.5e-11    none      0.00   0.00   5.53e-02
 ```
 
-All seven feasible — the Pareto story in one table: the R=5 tree beats the
-reference by 1.6× at the gate point but carries a floor at p ≈ 8×10⁻⁶ (its
-weight-5 timelike chains); the R=12 tree gives that floor back for a worse
-measured level; every Q in between trades measured level against nothing
-(their tails are ≤10⁻⁹). The open question for evolution is whether any
-structure in Q ∈ [23, 33] beats the tree's curve or any Q < 33 design earns
-a real dominance bonus. Structural checks:
+(Measured before the tree scope-exclusion landed — the tree rows are kept
+as the diagnostic that motivated it: a tuned tree wins the benchmark
+numerically, floor at p ≈ 8×10⁻⁶, which is exactly the known-trivial result
+the scope rule now removes from the search. Under the current evaluator the
+two tree rows score −100 INVALID; everything else is unchanged.) The open
+question for evolution is the Q ∈ [25, 33] region: whether cycle-bearing
+structure can approach the tree-level curves, and whether any Q < 33 design
+earns a real dominance bonus. Structural checks:
 `python tasks/gross_code_gauging/test_coloring.py` (König coloring proper +
 Δ-optimal, preview ↔ evaluator consistency, protocol determinism, probe
 regression on the known gadgets).
@@ -312,11 +319,12 @@ python orchestrator/harness/run_window.py --config <run>/run.json --until-decisi
 
 | File | Role |
 |---|---|
-| [initial.py](initial.py) | Fixed problem data + graph/preview tools + EVOLVE-BLOCK (matching + greedy seed). |
-| [evaluate.py](evaluate.py) | Deformed-code builder, König scheduler, protocol circuits, fault-distance probes, BP+OSD-0/sinter multi-p sampling, scorer. |
+| [initial.py](initial.py) | Fixed problem data + graph/preview tools + EVOLVE-BLOCK (matching + greedy seed, Q=45). |
+| [initial_genecs.py](initial_genecs.py) | Second boot seed: same fixed tools, EVOLVE-BLOCK rooted at the GeneCS β=0.46 graph (Q=37). Use both via `task.init_program_paths` so one island explores the spectral lineage. |
+| [evaluate.py](evaluate.py) | Deformed-code builder, König scheduler, protocol circuits, fault-set probes + tail pricing, BP+OSD-0/sinter multi-p sampling, scorer. |
 | [genecs.py](genecs.py) | GeneCS-style (arXiv:2605.21746 Alg. 1) spectral baseline synthesizer. |
-| [calibrate.py](calibrate.py) | Re-measures `LER_REFS` + reference d̂; `--compare` scores the benchmark set. |
-| [test_coloring.py](test_coloring.py) | Property tests: coloring, preview consistency, determinism, probe regression. |
+| [calibrate.py](calibrate.py) | Re-measures `LER_REFS` + reference probes; `--compare` scores the benchmark set; `--ablate` runs the scheduler-sensitivity study (König vs. greedy first-fit). |
+| [test_coloring.py](test_coloring.py) | Property tests: coloring, preview consistency, determinism, probe/pricing regression, scope rule. |
 
 ## Sources the redesign is grounded in
 

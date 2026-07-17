@@ -117,12 +117,24 @@ def test_fault_set_probes_and_pricing():
             (4, 5), (5, 9), (9, 10), (10, 7), (7, 6)]
 
     def probe(edge_list, rounds, seed):
-        edges, dummies, r = ev.parse_spec({"edges": edge_list, "rounds": rounds})
-        g = ev.build_gauged(edges, dummies)
-        cx, _ = ev.build_protocol_circuit(g, r, "X", ev.P_GATE)
-        cz, _ = ev.build_protocol_circuit(g, r, "Z", ev.P_GATE)
+        # build_gauged directly (bypassing parse_spec) so the probe suite can
+        # be exercised on OUT-OF-SCOPE diagnostics like the spanning tree
+        edges = sorted((min(int(u), int(v)), max(int(u), int(v)))
+                       for (u, v) in edge_list)
+        g = ev.build_gauged(edges, [])
+        cx, _ = ev.build_protocol_circuit(g, rounds, "X", ev.P_GATE)
+        cz, _ = ev.build_protocol_circuit(g, rounds, "Z", ev.P_GATE)
         rng = np.random.default_rng(seed)
-        return g, ev.estimate_fault_distance(g, r, cx, cz, rng)
+        return g, ev.estimate_fault_distance(g, rounds, cx, cz, rng)
+
+    # scope: spanning trees/forests are invalid (the known-trivial corner)
+    try:
+        ev.parse_spec({"edges": tree, "rounds": 5})
+        raise AssertionError("parse_spec should reject a spanning tree (cycle rank 0)")
+    except ev.SpecError as e:
+        assert "OUT OF SCOPE" in str(e), ("tree rejection reason", str(e))
+    # ... and a doubled edge (the paper's double-gross motif) restores validity
+    ev.parse_spec({"edges": tree + [tree[0]], "rounds": 12})
 
     for seed in (0, 1):
         g, (d_hat, parts, counts, weakest, attack) = probe(

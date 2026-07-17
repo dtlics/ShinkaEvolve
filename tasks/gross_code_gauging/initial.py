@@ -79,26 +79,27 @@ WHAT THE EVALUATOR DERIVES FOR YOU (deterministic, same for every candidate):
   schedule; the protocol circuit, detectors and byproduct corrections.
 
 SCORE (higher is better; Q = edge_qubits + A_v checks + B_p checks):
-  eff(p)    = measured_error(p) + priced_tail(p)   [see above]
-  margin(p) = log10(reference_error(p) / eff(p)) -- TRUE headroom vs the
-      calibrated paper-reference gadget at the same noise rate.
-  FEASIBLE := at BOTH the low and gate points, the tail-priced error is not
-      DEMONSTRABLY worse than 1.1x the reference: margin >= -(0.041 +
-      2*sigma), sigma = the point's sampling std (so ~0.12-0.17 decades at
-      the default budgets -- the allowance shrinks as budgets grow).
-  feasible:    score = (41 - Q) + 3 * min(2, max(0, min(margin_lo, margin_gate)))
-  infeasible:  score = -8 + min(0, margin_gate+allow) + min(0, margin_lo+allow)
-                                                       [clamped to >= -30]
+  eff       = measured_gate_error + priced_tail(p_gate)   [see above; the
+      loop samples ONLY the gate point -- pricing at the gate is
+      conservative for every lower p since fault-set tails shrink with p;
+      full curves are the certification tier the run owner executes on
+      elites between windows]
+  margin    = log10(reference_gate_error / eff) -- TRUE headroom vs the
+      calibrated paper-reference gadget.
+  FEASIBLE := the tail-priced error is not DEMONSTRABLY worse than 1.1x the
+      reference: margin >= -(0.041 + 2*sigma), sigma = the sampling std
+      (~0.15 decades allowance at the loop budget).
+  feasible:    score = (41 - Q) + 3 * min(2, max(0, margin))
+  infeasible:  score = -8 + (margin + allow)         [clamped to >= -30]
   invalid spec: -100;  crash: -1000.
   The reference design (the paper's 22-edge graph, Q=41, R=12) scores ~0.
   Saving an element while staying FEASIBLE is +1 per element. The LER bonus
-  is WORST-CASE over the low+gate points and only pays for TRUE dominance
-  (matching the reference earns 0; 0.33 decades better everywhere = +1
-  element; capped at +6), so genuinely better error can outweigh 1-2
-  elements of size. The frontier is the LER-vs-size Pareto over Q in
-  [23, 41]: the smallest gadgets whose TOTAL (tail-priced) error stays
-  within 1.1x of the hand-crafted reference. Everything is measured or
-  attacked on the real protocol -- nothing is a static graph proxy.
+  only pays for TRUE dominance (matching the reference earns 0; 0.33
+  decades better = +1 element; capped at +6), so genuinely better error can
+  outweigh 1-2 elements of size. The frontier is the LER-vs-size Pareto
+  over Q in [~25, 41]: the smallest gadgets whose TOTAL (tail-priced) error
+  stays within 1.1x of the hand-crafted reference. Everything is measured
+  or attacked on the real protocol -- nothing is a static graph proxy.
 
 LEVERS THAT ACTUALLY MOVE THE SCORE (all reported in feedback):
   * raw size: every edge/check is an element of Q AND another noise

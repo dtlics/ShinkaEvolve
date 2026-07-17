@@ -138,56 +138,61 @@ reported for orientation.
    upper bounds: a miss under-prices a bad design (bounded by the tail's
    true size at benchmark p, and re-attacked with a fresh seed every eval);
    it never over-prices a good one.
-5. **Noise — three-point curve**: uniform circuit-level depolarizing at
-   **p ∈ {1.4, 2.0, 2.8}×10⁻³** (0.7×, 1×, 1.4× `GAUGE_PHYS_P`): DEPOLARIZE2
-   after each CNOT, measure/reset flips, per-phase aggregated idle noise
-   (p/10 per idle tick) so **schedule depth is priced**.
-6. **Decode + sample**: BP+OSD-0 (stimbposd/ldpc; 12 BP iterations, `osd0`)
-   via one sinter fan-out over all six circuits (~20 workers), per-point
-   error budgets `P_BUDGET = (55,2600),(70,2800),(25,700)` errors/shot-cap
-   per circuit, fresh seed per eval. Deliberately fast-but-weak: absolute
-   LERs are **not** paper-comparable (Bravyi et al. ran min-sum/10k
-   iterations/OSD-CS-7), but candidates and the reference are decoded
-   identically, so the relative comparison is self-consistent. The
-   methodology otherwise follows the IBM line: Cross et al. §3.2/§4.2
-   protocol shape (merge window + ideal brackets), Bravyi-style error-budget
-   stopping (~100+ observed failures at the gate point), identical decoder
-   both arms. (GeneCS's own LER methodology is unpublished beyond
-   "circuit-level depolarizing, 10⁶ samples/point" — no scheduler, decoder,
-   rounds or protocol details, no code release — so IBM's is the concrete
-   anchor.)
+5. **Noise**: uniform circuit-level depolarizing (DEPOLARIZE2 after each
+   CNOT, measure/reset flips, per-phase aggregated idle noise — p/10 per
+   idle tick — so **schedule depth is priced**). The benchmark gate rate is
+   `GAUGE_PHYS_P` = 2×10⁻³; the certification tier also measures 0.7× and
+   1.4× that.
+6. **Decode + sample — v5 two-tier** (the QEC-tasks memo's structure,
+   adapted): the **loop samples the GATE point only** at
+   `LOOP_BUDGET = (60 errors, 1000 shots)` per circuit — one sinter fan-out
+   over the two gate circuits, BP+OSD-0 (12 BP iters, `osd0`), fresh seed
+   per eval, ~2–4 min. Gate-only is sound because the low-p side is carried
+   deterministically: fault-set tails *shrink* with p, so gate-point pricing
+   is conservative for every lower p. The **full three-point curves** (and
+   d_eff) are the certification tier — `calibrate.py --certify [--only …]`,
+   run by the orchestrator on elites between windows, where strict 1.1×
+   claims are established. A fully deterministic loop was tested and
+   **rejected on measurement**: the DEM expected-fault-count λ separates the
+   benchmark gadgets by only ±1.5% while their measured LERs differ by
+   ±0.10 decades — candidate quality here lives in *decodability*, which
+   only decoding samples can see (λ is reported as a diagnostic).
+   Absolute LERs are **not** paper-comparable (Bravyi et al. ran
+   min-sum/10k iterations/OSD-CS-7), but candidates and the reference are
+   decoded identically, so the relative comparison is self-consistent; the
+   methodology otherwise follows the IBM line (Cross et al. §3.2/§4.2
+   protocol shape, error-budget stopping, identical decoder both arms).
 
 ## Score
 
 ```
 Q          = edge qubits + A_v checks + B_p checks     (paper gadget: 22+12+7 = 41)
-eff(p)     = overall(p) + priced_tail(p)               (tail pricing, step 4)
-margin(p)  = log10( LER_REF(p) / eff(p) )              (TRUE headroom, resolution-clamped)
-allow(pt)  = log10(1.1) + 2·sqrt(σ_pt² + σ_ref²)       (noise-aware allowance,
-                                                        ~0.12–0.17 decades at default budgets)
+eff        = overall(gate) + priced_tail(gate)         (tail pricing, step 4;
+                                                        conservative for all p below)
+margin     = log10( LER_REF(gate) / eff )              (TRUE headroom, resolution-clamped)
+allow      = log10(1.1) + 2·sqrt(σ² + σ_ref²)          (noise-aware allowance,
+                                                        ~0.15 decades at LOOP_BUDGET)
 
-FEASIBLE   := margin(gate) ≥ −allow(gate)  AND  margin(lo) ≥ −allow(lo)
-              (i.e. tail-priced LER not DEMONSTRABLY worse than 1.1× the reference)
+FEASIBLE   := margin ≥ −allow   (tail-priced LER not DEMONSTRABLY worse
+                                 than 1.1× the reference at the gate point)
 
 crash / garbage return               →  −1000  (correct=False)
 invalid spec                         →  −100   (+ named reason)
-valid, infeasible                    →  −8 + min(0, margin_gate+allow)
-                                             + min(0, margin_lo+allow)      (≥ −30)
-FEASIBLE                             →  (41 − Q) + 3·min(2, max(0, min(margin_lo, margin_gate)))
+valid, infeasible                    →  −8 + (margin + allow)               (≥ −30)
+FEASIBLE                             →  (41 − Q) + 3·min(2, max(0, margin))
 ```
 
 The reference scores ~0. Every element saved while staying feasible is +1.
-The LER bonus is **worst-case** over the scored points and pays only for
-**true dominance** (matching the reference earns 0; a third of a decade of
-across-the-board improvement = one element; cap +6) — so genuinely better
-error can outweigh 1–2 elements of size, and the outcome is a defensible
-LER-vs-size Pareto front over Q ∈ [23, 41].
+The LER bonus pays only for **true dominance** (matching the reference earns
+0; a third of a decade of improvement = one element; cap +6) — so genuinely
+better error can outweigh 1–2 elements of size, and the outcome is a
+defensible LER-vs-size Pareto front over Q ∈ [~25, 41].
 
-Why 1.1× needs the noise allowance: 1.1× is 0.041 decades, and the per-point
-sampling std at the ~10-minute budgets is 0.04–0.07 decades — the same size.
-The in-loop gate therefore rejects only what is *demonstrably* beyond 1.1×
-at 2σ; the strict 1.1× verdict belongs to the offline high-budget
-certification of finalists (`calibrate.py --compare` with raised budgets).
+Why 1.1× needs the noise allowance: 1.1× is 0.041 decades, and the gate
+sampling std at the ~3-minute loop budget is ~0.06 decades. The in-loop gate
+therefore rejects only what is *demonstrably* beyond 1.1× at 2σ; the strict
+1.1× verdict and the full curves belong to the certification tier
+(`calibrate.py --certify`, run on elites between windows).
 `GAUGE_RATIO_LIMIT` moves the bar; `GAUGE_DTARGET` (default off) restores
 the v4.0 hard fault-distance gate for a distance-preserving campaign.
 
@@ -308,17 +313,16 @@ python tasks/gross_code_gauging/evaluate.py \
 
 Expected: `correct=True`, `valid=1`, `elements=45`, `rounds=12`,
 `fault_dist_est=12`, `tail_gate≈0`, `tail_crossover_p=None`,
-`combined_score ≈ -4 + bonus`, plus the measured curve
-(`ler_lo`/`overall_ler`/`ler_hi`, margins ≈ −0.15..+0.1), `d_eff_est` ≈
-7–10, depths `depth_x=6`, `depth_z=7`. Runtime ~12–16 min (probes ~10–30 s;
-BP+OSD-0 sampling dominates; worst case ~18 min at the shot caps). Set the
-harness `eval_time >= 00:20:00`.
+`combined_score ≈ -4 + bonus` (measured: −3.78), `margin_gate ≈ 0±0.1`,
+`lam_bulk ≈ 77.1`, depths `depth_x=6`, `depth_z=7`. Runtime **~3–5 min**
+(v5 loop: probes ~10–30 s + gate-point sampling). Set the harness
+`eval_time >= 00:07:00`. Full curves: `calibrate.py --certify`.
 
 ### Full evolution (as the orchestrator)
 
 Author a run config (copy `configs/orchestrator_run.default.json`), point
 `task.eval_program_path` / `task.init_program_path` at this task's files, set
-the Azure `evo.llm_models` + `budget_usd`, and `eval_time >= 00:20:00`, then:
+the Azure `evo.llm_models` + `budget_usd`, and `eval_time >= 00:07:00`, then:
 
 ```bash
 python orchestrator/harness/run_window.py --config <run>/run.json --until-decision
@@ -336,7 +340,7 @@ python orchestrator/harness/run_window.py --config <run>/run.json --until-decisi
 | [initial.py](initial.py) | Fixed problem data + graph/preview tools + EVOLVE-BLOCK (matching + greedy seed, Q=45). |
 | [evaluate.py](evaluate.py) | Deformed-code builder, König scheduler, protocol circuits, fault-set probes + tail pricing, BP+OSD-0/sinter multi-p sampling, scorer. |
 | [genecs.py](genecs.py) | GeneCS-style (arXiv:2605.21746 Alg. 1) reimplementation: baseline synthesizer + `--fit-published` (reverse-engineer their unpublished β from the published gross-code outcome). |
-| [calibrate.py](calibrate.py) | Re-measures `LER_REFS` + reference probes; `--compare` scores the benchmark set; `--ablate` runs the scheduler-sensitivity study (König vs. greedy first-fit). |
+| [calibrate.py](calibrate.py) | Re-measures `LER_REFS` + reference probes; `--compare` scores the benchmark set through the in-loop view; `--certify` measures full three-point curves (the certification tier for elites); `--ablate` runs the scheduler-sensitivity study (König vs. greedy first-fit). |
 | [test_coloring.py](test_coloring.py) | Property tests: coloring, preview consistency, determinism, probe/pricing regression, scope rule. |
 
 ## Sources the redesign is grounded in

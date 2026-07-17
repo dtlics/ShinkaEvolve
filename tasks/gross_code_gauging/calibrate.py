@@ -154,10 +154,10 @@ def compare(args):
         print(f"[{time.strftime('%H:%M:%S')}] {name}: score={res['combined_score']:.2f} "
               f"({rows[-1][3]:.0f} s)", flush=True)
 
-    print("\n=== v4.1 comparison table ===")
+    print("\n=== v5 in-loop comparison table (gate point; curves: --certify) ===")
     hdr = (f"{'gadget':<22} {'score':>7} {'Q':>3} {'R':>3} {'w_min':>5} "
-           f"{'tail@gate':>9} {'cross_p':>8} {'m_lo':>6} {'m_gate':>6} "
-           f"{'LER_gate':>9} {'feasible':>8}")
+           f"{'tail@gate':>9} {'cross_p':>8} {'m_gate':>6} "
+           f"{'LER_gate':>9} {'lam':>6} {'feasible':>8}")
     print(hdr); print("-" * len(hdr))
     for name, score, pub, dt in rows:
         if pub.get("valid"):
@@ -166,8 +166,8 @@ def compare(args):
             cps = f"{cp:.0e}" if cp is not None else "none"
             print(f"{name:<22} {score:>7.2f} {pub['elements']:>3} {pub['rounds']:>3} "
                   f"{pub['fault_dist_est']:>5} {pub['tail_gate']:>9.1e} {cps:>8} "
-                  f"{pub['margin_lo']:>6.2f} {pub['margin_gate']:>6.2f} "
-                  f"{pub['overall_ler']:>9.2e} {feas:>8}")
+                  f"{pub['margin_gate']:>6.2f} {pub['overall_ler']:>9.2e} "
+                  f"{pub.get('lam_bulk', 0):>6.1f} {feas:>8}")
         else:
             print(f"{name:<22} {score:>7.2f}  INVALID: {pub.get('reason', '?')[:60]}")
 
@@ -242,6 +242,68 @@ def ablate(args):
           "paper row of the SAME scheduler, not to the absolute margins.")
 
 
+def certify(args):
+    """CERTIFICATION tier (v5): the full three-point measured curve at real
+    budgets for the benchmark set (or --only selected cases, e.g. run
+    elites through this between windows). This is where strict 1.1x claims
+    and curve shapes (d_eff) are established — the in-loop evaluator
+    samples only the gate point at a reduced budget."""
+    import numpy as np
+    import evaluate as ev
+
+    if args.budget_scale != 1.0:
+        ev.P_BUDGET = tuple((max(10, int(e * args.budget_scale)),
+                             max(400, int(s * args.budget_scale)))
+                            for (e, s) in ev.P_BUDGET)
+        print(f"(certify budgets scaled x{args.budget_scale}: {ev.P_BUDGET})")
+
+    cases = [("paper-41 (R=12)", _reference_spec(ev)),
+             ("matching-18 (R=12)", {"edges": _matching(ev), "rounds": 12})]
+    try:
+        import genecs
+        spec_g, info = genecs.genecs_spec(beta=0.46, seed=1, restarts=150)
+        cases.append((f"genecs b=.46 E={info['edges']}", spec_g))
+    except Exception as e:
+        print(f"(genecs skipped: {e})")
+    try:
+        import importlib.util as iu
+        s = iu.spec_from_file_location("gauge_init", os.path.join(_TASK_DIR, "initial.py"))
+        init = iu.module_from_spec(s); s.loader.exec_module(s and init)
+        cases.append(("seed (initial.py)", init.run_experiment()()))
+    except Exception as e:
+        print(f"(seed skipped: {e})")
+    if args.only:
+        keys = [k.strip().lower() for k in args.only.split(",") if k.strip()]
+        cases = [(n, sp) for (n, sp) in cases if any(k in n.lower() for k in keys)]
+        print(f"(--only filter -> {[n for n, _ in cases]})")
+
+    for name, spec in cases:
+        t0 = time.time()
+        try:
+            edges, dummies, rounds = ev.parse_spec(spec)
+            g = ev.build_gauged(edges, dummies)
+        except ev.SpecError as e:
+            print(f"{name}: INVALID ({e})")
+            continue
+        circs = []
+        for p in ev.P_GRID:
+            cx, _ = ev.build_protocol_circuit(g, rounds, "X", p)
+            cz, _ = ev.build_protocol_circuit(g, rounds, "Z", p)
+            circs.append((p, cx, cz))
+        curve = ev.sample_curve(circs)
+        margins = [float(np.log10(ev.LER_REFS[i] / c["overall_eff"]))
+                   for i, c in enumerate(curve)]
+        fit = [(np.log10(ev.P_GRID[i]), np.log10(curve[i]["overall_eff"]))
+               for i in range(3) if curve[i]["ex"] + curve[i]["ez"] >= 5]
+        d_eff = (2.0 * np.polyfit(*zip(*fit), 1)[0]) if len(fit) >= 2 else None
+        curve_str = "/".join(f"{c['overall_eff']:.2e}" for c in curve)
+        margin_str = "/".join(f"{m:+.2f}" for m in margins)
+        print(f"[{time.strftime('%H:%M:%S')}] {name} (Q={g['overhead']}, R={rounds}): "
+              f"curve={curve_str} margins={margin_str} "
+              f"d_eff={d_eff if d_eff is None else round(d_eff, 1)} "
+              f"({time.time() - t0:.0f} s)", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description="calibrate LER_REFS / compare benchmark gadgets")
     ap.add_argument("--errors", type=int, default=300, help="max errors per circuit per point")
@@ -254,6 +316,9 @@ def main():
     ap.add_argument("--ablate", action="store_true",
                     help="scheduler-sensitivity ablation (Konig vs greedy "
                          "first-fit) on the paper + GeneCS gadgets")
+    ap.add_argument("--certify", action="store_true",
+                    help="CERTIFICATION tier: full three-point measured curves "
+                         "at real budgets (elites / benchmark set)")
     ap.add_argument("--only", type=str, default="",
                     help="comma-separated substrings selecting compare cases "
                          "(e.g. --only paper,tree)")
@@ -265,6 +330,8 @@ def main():
         compare(args)
     elif args.ablate:
         ablate(args)
+    elif args.certify:
+        certify(args)
     else:
         calibrate(args)
 

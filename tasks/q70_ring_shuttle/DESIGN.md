@@ -1,5 +1,16 @@
 # DESIGN v2 — three-ring memory: hardware mapping + shuttle schedule for a fixed code
 
+> **v3 changelog (post-run q70ring_v1, 2026-07-27):** the run confirmed the design's
+> machinery (zero evaluator pathologies, all gains real) and falsified the v1 score
+> weights. Applied fixes: (1) score v2 — plan-dependent exposure only, core time,
+> zone weight raised to parity (the honest LER shift stays a public metric +
+> certification claim); (2) second seed `initial_folded.py` — the folded 2D
+> embedding the run's discovery round found, with a correct parallel router (700
+> rounds / 51.05 POC / 1074 zones, boots +1.32, already above the run's best
+> evolved plan); (3) per-gap transport floors in text_feedback (used/floor slack
+> map); (4) a binding run playbook in the README (multi-seed, migration, early DR
+> at 1.5× cost estimate, guidance scoping, model arms). See README for details.
+
 **Status: IMPLEMENTED (see README.md for the as-built contract).** One deliberate
 deviation from §2.4/§2.5 below, forced by measured facts during the build's
 adversarial review: the **in-loop score is now fully deterministic** — reliability

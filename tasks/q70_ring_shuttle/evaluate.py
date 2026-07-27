@@ -16,19 +16,23 @@ This evaluator:
      with p factored out (2q gate weight 1, prep/measure 1/10, idle 1/100 per
      POC, transport or merge/split round 1/2000 on ALL simulated qubits);
   3. verifies the assembled stim circuit is noiseless-deterministic;
-  4. scores DETERMINISTICALLY against the seed plan:
+  4. scores DETERMINISTICALLY on the PLAN-DEPENDENT costs only (v2 score,
+     re-shaped after run q70ring_v1 measured the v1 headline term 85%-saturated
+     by the frozen 490-point gate cost and the v1 zone weight too weak to keep
+     genuine footprint discoveries alive in the archive):
 
-        score = W_D    * log10(SEED_EXPOSURE / exposure)
-              + LAMBDA_T * log2(SEED_T_POC   / t_sec_poc)
-              + LAMBDA_Z * log2(SEED_ZONES   / zones)
+        score = W_E * log2(SEED_VAR_EXPOSURE / (exposure - 504))
+              + W_T * log2(SEED_T_CORE / t_core_poc)
+              + W_Z * log2(SEED_ZONES / zones)
 
-     with W_D = ceil(d_circ/2) = 5: at the p = 1e-4 operating point the paper's
-     own extrapolation ansatz gives LER ~ p_eff^ceil(d_circ/2) with the fault
-     structure frozen (the schedule is frozen, candidates only move ions), so
-     log10(LER) shifts by ~W_D * log10(exposure ratio). Real Monte-Carlo LER
-     is measured OUT OF LOOP by certify.py — BP-OSD on this circuit costs
-     seconds per shot, far too slow for the inner loop, and at sampleable p
-     the frozen gate noise drowns the plan-dependent signal.
+     The honest physical reliability readout — the p = 1e-4 operating-point
+     LER shift, ceil(d_circ/2) * log10(total exposure ratio) per the paper's
+     own extrapolation ansatz — is reported as the public metric
+     `ler_shift_log10` and verified at certification; it is deliberately NOT
+     the fitness, because its frozen part carries no search gradient. Real
+     Monte-Carlo LER is measured OUT OF LOOP by certify.py — BP-OSD on this
+     circuit costs seconds per shot, far too slow for the inner loop, and at
+     sampleable p the frozen gate noise drowns the plan-dependent signal.
 
 The candidate can ONLY move ions. Gates, observables, noise, decoding, and all
 cost accounting are owned by this file; scoring runs through a pristine
@@ -36,9 +40,9 @@ re-import of this module from disk, so rebinding names in the running module
 does not alter the score. Invalid plans are archived at the sentinel score
 with text_feedback naming the exact broken rule.
 
-PROVISIONAL CONSTANTS (revisit after the first evolution run — see README):
-score weights W_D / LAMBDA_T / LAMBDA_Z, and the certification operating
-points / budgets in certify-mode ler_sample.
+PROVISIONAL CONSTANTS v2 (re-checked after each run — see README "Score"):
+score weights W_E / W_T / W_Z, and the certification operating points /
+budgets in certify-mode ler_sample.
 """
 
 import argparse
@@ -55,9 +59,12 @@ from shinka.core import run_shinka_eval
 # ----------------------------------------------------------------------------
 INVALID_SCORE = -2.0
 LL_OVERHEAD_POC = 7.05  # loss/leakage checks, charged as fixed time (Table XI)
-W_D = 5.0              # PROVISIONAL reliability weight = ceil(d_circ/2)
-LAMBDA_T = 0.5         # PROVISIONAL score weight: SEC time
-LAMBDA_Z = 0.25        # PROVISIONAL score weight: zones (trap footprint)
+# Score weights, v2 (re-shaped after run q70ring_v1 — see README "Score"):
+# all three inputs are PLAN-DEPENDENT parts only, so no term is saturated by
+# frozen costs. Weights re-checked between runs, never mid-run.
+W_E = 1.0              # plan-dependent noise exposure (transport+ms+idle)
+W_T = 0.5              # core SEC time (transport/20 + op phases, no LL overhead)
+W_Z = 1.0              # zones (trap footprint) — raised from 0.25 after v1
 GRID_MAX_ROWS = 24
 GRID_MAX_COLS = 96
 
@@ -69,11 +76,15 @@ MIN_SHOTS = 256
 MAX_SHOTS = 100_000
 NC_SECS = 9            # number of SECs simulated (= d, paper convention)
 
-# Seed anchors, calibrated against the shipped initial.py under THIS evaluator
-# (selfcheck.py prints all three; the seed scores 0.0 by construction).
-SEED_EXPOSURE = 577.22
-SEED_T_POC = 66.65
+# Seed anchors, calibrated against the shipped initial.py (the UNFOLDED seed)
+# under THIS evaluator (selfcheck.py prints all; that seed scores 0.0 by
+# construction; the folded seed initial_folded.py boots positive).
+FROZEN_EXPOSURE = 70.0 * 7 + 14.0   # 504: gates + prep/meas, identical for all
+SEED_VAR_EXPOSURE = 73.22           # unfolded seed's exposure - FROZEN_EXPOSURE
+SEED_T_CORE = 59.60                 # unfolded seed's t_core_poc (no LL overhead)
 SEED_ZONES = 1612
+SEED_EXPOSURE_TOTAL = FROZEN_EXPOSURE + SEED_VAR_EXPOSURE   # for the public
+                                                            # LER-shift readout
 
 # Moving-qubit noise model (Table III of the paper)
 def _p_gate(p):
@@ -265,6 +276,8 @@ def compile_plan(plan):
                          #          ("prep", [ancs]) | ("measure", [ancs])
     per_gap_rounds = []  # transport rounds between consecutive gate layers
     gap_count = 0
+    gate_snapshots = [{q: (pos[q][1], pos[q][2]) for q in range(N_SIM)}]
+    # snapshot 0 = layout; one more appended at every gate phase
 
     def seg_add(kind, k=1):
         if segments and segments[-1][0] == kind:
@@ -463,6 +476,8 @@ def compile_plan(plan):
                     f"{SCHEDULE[rnd][2]}{SCHEDULE[rnd][3]+1}^T)")
             gates_done += 1
             per_gap_rounds.append(gap_count)
+            gate_snapshots.append({q: (pos[q][1], pos[q][2])
+                                   for q in range(N_SIM)})
             segments.append(("gate", rnd))
             gap_count = 0
             merge_used = set()
@@ -522,6 +537,30 @@ def compile_plan(plan):
     t_core = transport_rounds / 20.0 + N_ROUNDS + prep_phases + measure_phases
     t_sec = t_core + LL_OVERHEAD_POC
 
+    # Per-gap transport-round floors: max over ions of a sound graph-distance
+    # lower bound between consecutive gate-time positions (all ions rest on S
+    # sites at gate time), minus 2 for the POC-free merge+split edges an ion
+    # may use per interval. Parallel rounds >= the longest single-ion journey.
+    def _dist_lb(a, b):
+        dr = abs(a[0] - b[0])
+        dc = abs(a[1] - b[1])
+        if dr == 0:
+            return 2 * dc
+        return 3 * dr + (2 * dc if dc >= 1 else 2)
+
+    def _gap_floor(snap_a, snap_b):
+        best = 0
+        for q in range(N_SIM):
+            lb = _dist_lb(snap_a[q], snap_b[q]) - 2
+            if lb > best:
+                best = lb
+        return best
+
+    per_gap_floors = [
+        _gap_floor(gate_snapshots[g], gate_snapshots[g + 1])
+        for g in range(N_ROUNDS)]
+    wrap_floor = _gap_floor(gate_snapshots[N_ROUNDS], gate_snapshots[0])
+
     # Noise exposure per SEC (expected fault events, with p factored out):
     #   2q gates: 70 pairs x N_ROUNDS layers x weight 1
     #   prep + measure flips: 140 x 1/10
@@ -540,6 +579,8 @@ def compile_plan(plan):
         "prep_phases": prep_phases,
         "measure_phases": measure_phases,
         "per_gap_rounds": per_gap_rounds,
+        "per_gap_floors": per_gap_floors,
+        "wrap_floor": wrap_floor,
         "zones": len(zones),
         "t_core_poc": t_core,
         "t_sec_poc": t_sec,
@@ -751,31 +792,40 @@ def _aggregate_impl(results):
         }
 
     t_sec = compiled["t_sec_poc"]
+    t_core = compiled["t_core_poc"]
     zones = compiled["zones"]
     exposure = compiled["exposure"]
-    score = (W_D * math.log10(SEED_EXPOSURE / exposure)
-             + LAMBDA_T * math.log2(SEED_T_POC / t_sec)
-             + LAMBDA_Z * math.log2(SEED_ZONES / zones))
+    var_exp = exposure - FROZEN_EXPOSURE
+    score = (W_E * math.log2(SEED_VAR_EXPOSURE / var_exp)
+             + W_T * math.log2(SEED_T_CORE / t_core)
+             + W_Z * math.log2(SEED_ZONES / zones))
+    # honest operating-point reliability readout (NOT the fitness): the paper's
+    # ansatz gives log10(LER) shift = ceil(d_circ/2) * log10(exposure ratio)
+    ler_shift = 5.0 * math.log10(exposure / SEED_EXPOSURE_TOTAL)
 
-    var_exp = exposure - (70.0 * N_ROUNDS + 14.0)
+    gaps_used_floor = ", ".join(
+        f"r{t}:{u}/{f}" for t, (u, f) in enumerate(
+            zip(compiled["per_gap_rounds"], compiled["per_gap_floors"])))
     feedback = (
         f"Valid plan. SEC = {t_sec:.2f} POC "
         f"(transport {compiled['transport_rounds']} rounds = "
         f"{compiled['transport_rounds']/20.0:.2f} POC, {N_ROUNDS} gate layers, "
         f"{compiled['prep_phases']} prep + {compiled['measure_phases']} measure "
         f"phases, +{LL_OVERHEAD_POC} POC fixed loss/leakage checks). "
-        f"Noise exposure {exposure:.2f} (frozen gate/prep/meas part "
-        f"{70.0 * N_ROUNDS + 14.0:.0f}, plan-dependent transport+merge/split+idle "
-        f"part {var_exp:.2f}). Zones used: {zones}. "
+        f"Plan-dependent noise exposure {var_exp:.2f} (frozen part "
+        f"{FROZEN_EXPOSURE:.0f} excluded from the score). Zones: {zones}. "
         f"Merge/split rounds: {compiled['merge_rounds']}. "
-        f"Transport rounds before each gate layer: "
-        f"[{_fmt_gaps(compiled['per_gap_rounds'])}] "
-        f"(post-layer-{N_ROUNDS-1} wrap rounds are counted in the total only). "
-        f"Score = {W_D:.0f}*log10(seed_exposure/exposure) "
-        f"+ {LAMBDA_T}*log2(seed_T/T) + {LAMBDA_Z}*log2(seed_zones/zones); "
-        f"every transport or merge/split round adds noise exposure AND time, so "
-        f"fewer/smarter rounds improve both terms; smaller footprints improve "
-        f"the zone term. Prefer strategies parametric in (l, m, schedule) over "
+        f"TRANSPORT ROUNDS USED / DISTANCE-FLOOR per gap before each gate "
+        f"layer: [{gaps_used_floor}] and wrap-back after measurement: "
+        f"{compiled['wrap_floor']} floor (wrap rounds are in the total only). "
+        f"A gap far above its floor is parallelism or routing waste — the floor "
+        f"is the longest single-ion journey, so it IS achievable transport if "
+        f"every ion moves every round without detours. "
+        f"Score = {W_E}*log2(seed_var_exposure/var_exposure) "
+        f"+ {W_T}*log2(seed_T_core/T_core) + {W_Z}*log2(seed_zones/zones); "
+        f"transport and merge/split rounds feed both the exposure and time "
+        f"terms; a compact layout feeds the zone term AND shortens every "
+        f"journey. Prefer strategies parametric in (l, m, schedule) over "
         f"hard-coded positions — plans are re-run on other three-ring codes "
         f"after evolution.")
 
@@ -783,8 +833,11 @@ def _aggregate_impl(results):
         "combined_score": float(score),
         "public": {
             "valid": True,
+            "var_exposure": float(var_exp),
             "exposure": float(exposure),
+            "ler_shift_log10": float(ler_shift),
             "sec_poc": float(t_sec),
+            "t_core_poc": float(t_core),
             "transport_rounds": int(compiled["transport_rounds"]),
             "zones": int(zones),
             "merge_rounds": int(compiled["merge_rounds"]),
@@ -792,10 +845,11 @@ def _aggregate_impl(results):
             "measure_phases": int(compiled["measure_phases"]),
         },
         "private": {
-            "seed_exposure": SEED_EXPOSURE,
-            "seed_t_poc": SEED_T_POC,
+            "seed_var_exposure": SEED_VAR_EXPOSURE,
+            "seed_t_core": SEED_T_CORE,
             "seed_zones": SEED_ZONES,
             "per_gap_rounds": list(compiled["per_gap_rounds"]),
+            "per_gap_floors": list(compiled["per_gap_floors"]),
         },
         "extra_data": {},
         "text_feedback": feedback,

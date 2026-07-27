@@ -17,7 +17,8 @@ See [DESIGN.md](DESIGN.md) for the design rationale and background primer.
 
 | File | Role |
 |---|---|
-| `initial.py` | Seed plan generator (EVOLVE-BLOCK). Paper-faithful but deliberately *unfolded* realization of the Fig.-60 strategy: block swaps for the long ring, conveyor+rail-wrap medium shifts, Fig.-61 embedded short shifts, vertical data hops for gating, in-place prep/measure on optical rows. Written parametrically in `(l, m, schedule)`. Self-verifies with the evaluator's own move rules while building. |
+| `initial.py` | Seed A (EVOLVE-BLOCK): the *unfolded* realization of the Fig.-60 strategy — block swaps for the long ring, conveyor+rail-wrap medium shifts, Fig.-61 embedded short shifts, vertical data hops for gating, in-place prep/measure on optical rows. Score anchor (0.0). Parametric in `(l, m, schedule)`; self-verifies while building. |
+| `initial_folded.py` | Seed B (EVOLVE-BLOCK): the *folded* 2D embedding — the layout family run `q70ring_v1`'s discovery round found, given the parallel router that candidate lacked. Cells of 3 rows (data-L / ancillas / data-R), family change = ±2-column side flip (no block swaps), per-column vertical conveyors with lane-column wraps, Fig.-61 embedded shifts per row. Boots at **+1.32**. Run BOTH seeds via `task.init_program_paths`. |
 | `evaluate.py` | Immutable oracle: exact plan compiler/validator, POC + noise-exposure accounting, stim noiseless-determinism check, deterministic seed-anchored score. Also hosts the certification-only circuit builder + BP-OSD sampler. |
 | `certify.py` | Out-of-loop head-to-head: re-runs a candidate in a fresh process and measures real Monte-Carlo LER at chosen p (BP-OSD), tabled against the paper's published Q70 numbers. |
 | `qecc/q70.json` | Pinned code assets (Hx/Hz supports, symplectic logical pairs, schedule), generated + verified by `make_code_assets.py`. |
@@ -72,53 +73,60 @@ and the head-to-head uses their Pauli-only *reference* curves). Physical qubits 
 constant by construction: 70 data + 70 ancilla + 70 beacons + 10 reservoir = 220
 (matches Table XI).
 
-## Score (deterministic — no sampling in the loop)
+## Score (v2 — deterministic, plan-dependent parts only; re-shaped after run q70ring_v1)
 
 ```
-exposure = 490 (gates) + 14 (prep/meas) + idle_slots/100
-         + 140·(transport_rounds + merge_rounds)/2000     # fault events per SEC, p factored out
+exposure  = 490 (gates) + 14 (prep/meas) + idle_slots/100
+          + 140·(transport_rounds + merge_rounds)/2000    # fault events per SEC, p factored out
+var_exp   = exposure − 504                                # the part a plan can move
+T_core    = transport_rounds/20 + 7 + prep_phases + measure_phases
 
-score = 5   * log10(SEED_EXPOSURE / exposure)     # reliability at the operating point
-      + 0.5 * log2(SEED_T_POC / T_SEC_POC)        # SEC wall time
-      + 0.25* log2(SEED_ZONES / zones)            # trap footprint
+score = 1.0 * log2(73.22 / var_exp)      # plan-dependent noise exposure
+      + 0.5 * log2(59.60 / T_core)       # core SEC time (no frozen 7.05 overhead)
+      + 1.0 * log2(1612  / zones)        # trap footprint
 ```
 
-Why deterministic: with the schedule frozen, the circuit's fault *structure* is
-identical for every candidate — only noise strengths move — so at the p = 1e-4
-operating point the paper's own extrapolation ansatz gives
-`log10(LER) ≈ ⌈d_circ/2⌉·log10(exposure) + const`, i.e. the exposure term IS the
-LER term to leading order. Measured facts forced this (adversarial review, live
-timing): BP-OSD costs ~0.1–4 s/shot on this 700-detector/31k-mechanism DEM, and at
-any p where LER is sampleable in minutes the circuit sits near threshold where the
-frozen gate noise drowns the plan signal 7:1. Real LER lives in `certify.py`,
-where hours are acceptable. Consequences: eval ≈ 1–2 s, zero score noise (no
-winner's curse), and `eval_time: 00:05:00` is ample in the run config.
+Anchors = the unfolded seed (scores exactly 0). The honest operating-point
+reliability readout — `ler_shift_log10 = 5·log10(total exposure ratio)`, the
+paper's extrapolation-ansatz LER shift — is a **public metric and the
+certification claim, deliberately not the fitness**: run `q70ring_v1` measured
+the v1 headline term (5·log10 of *total* exposure) 85%-saturated by the frozen
+490-point gate cost (it contributed +0.045 of the best +0.1445 while the time
+term gave +0.098), and the v1 zone weight (0.25) let a genuine −57% footprint
+discovery score −4.9, killing the stepping stone toward the paper's folded
+design. v2 scores only what a plan can move, and prices footprint at parity.
 
-> **PROVISIONAL, revisit after the first evolution run** (note for the
-> orchestrator — do not surface mutable-rules talk to the mutation LLM): the
-> weights (5 / 0.5 / 0.25) and the certification budgets (p list, target errors,
-> shot caps, osd_order) are first-pass choices. Watch for: the zone term
-> dominating via degenerate compact layouts; time-term saturation; exposure and
-> time being near-collinear (they differ only through idle slots and the /20 vs
-> /2000 denominators — if candidates stop differentiating, re-weigh). Changing
-> weights or anchors mid-run invalidates archive ordering; do it between runs.
+Why deterministic (unchanged from v1, validated by the run): the fault structure
+is frozen, BP-OSD costs ~0.1–4 s/shot (certification-only), eval ≈ 1–2 s with
+zero score noise. Score ladder measured under v2: **unfolded seed 0 → folded
+seed +1.32 → paper-grade (~424 rounds, ~288 zones) ≈ +4.2**. Beyond +4.2 beats
+IonQ's hand design.
 
-## Seed calibration (measured under this evaluator; seed scores 0.0 exactly)
+> **PROVISIONAL v2, revisit after the next run** (orchestrator note — do not
+> surface mutable-rules talk to the mutation LLM): weights (1.0 / 0.5 / 1.0)
+> and certification budgets are second-pass choices informed by one run. Watch
+> next: zone-term farming via layouts that shrink footprint by serializing
+> transport (the exposure+time terms must stay strong enough to veto it), and
+> whether the folded island simply dominates (fine) or cross-breeds with
+> unfolded routing tricks (better). Changing weights or anchors mid-run
+> invalidates archive ordering; do it between runs only.
 
-| quantity | seed value | paper Q70 reference |
-|---|---|---|
-| transport rounds / SEC | 1012 | ~424 (Table XXVI, folded Fig.-62 embedding) |
-| T_SEC | 66.65 POC | 27.70 POC abstract (Table XI) / ~34.2 micro-counted |
-| noise exposure | 577.22 (504 frozen + 73.22 plan-dependent) | ~534 at 424 rounds |
-| zones | 1612 sites | ~288 sections (Fig. 62, ~12×24) |
+## Seed calibration (measured under this evaluator, score v2)
 
-The seed is *intentionally* the simple unfolded realization: the paper's folded
-embedding (~424 rounds) is discoverable by evolution — folding, smarter wrap
-routing, overlapping realignment with gating, and measurement batching are all
-inside the design space. Beating ~34 POC = beating the paper's hand design; the
-score reachable-box analysis (review) caps the time term at ~+0.75 and zone term
-at ~+0.33, with the exposure term worth ~+0.29 for a paper-grade plan — so a
-score near +1.0 ≈ paper-level, and beyond that is novel territory.
+| quantity | unfolded seed (anchor, 0.0) | folded seed (+1.32) | best of run v1 | paper Q70 |
+|---|---|---|---|---|
+| transport rounds / SEC | 1012 | **700** | 842 | ~424 (Table XXVI) |
+| T_SEC | 66.65 POC | **51.05** | 58.15 | 27.70 abstract / ~34.2 micro |
+| plan-dependent exposure | 73.22 | **51.38** | 61.32 | ~32 at 424 rounds |
+| zones | 1612 | **1074** | 1608 | ~288 sections (Fig. 62) |
+
+The unfolded seed keeps the score anchor stable across runs; the folded seed
+already beats everything run `q70ring_v1` evolved in 7 windows, and its per-gap
+floors (printed in every text_feedback as `used/floor`) show the remaining
+router slack — e.g. its gap r2 uses 102 rounds against a 46-round distance
+floor. Folding further, tightening wraps, overlapping realignment with gating,
+and measurement batching all remain open. The paper's ~424-round embedding
+(score ≈ +4.2) is the head-to-head bar.
 
 ## Head-to-head protocol
 
@@ -179,22 +187,56 @@ score near +1.0 ≈ paper-level, and beyond that is novel territory.
 - Official smoke test `python evaluate.py --program_path initial.py
   --results_dir ...` → combined_score 0.0, correct = true, ~1 s.
 
-## Running
+## Run playbook (binding lessons from run q70ring_v1, $30, 2026-07)
+
+The next orchestrator should treat this section as the default run recipe —
+each item traces to a measured failure or win of run v1 (postmortem archived in
+`orchestrator/run_archive/q70ring_v1__*/RUN_SUMMARY.md`; do NOT read that
+archive mid-run — everything actionable is already folded in here and into the
+seeds/score).
+
+1. **Config**: copy `configs/orchestrator_run.default.json`;
+   `task.eval_program_path` = this task's `evaluate.py`;
+   **`task.init_program_paths` = [`initial.py`, `initial_folded.py`]** (NOT the
+   single-seed key — v1 ran single-seed and needed 5 of 7 windows to re-derive
+   what the folded seed now ships); `task.language: "python"`;
+   `eval_time: 00:05:00`; `db_config.num_islands: 4-6` (≥ 2, seeds fill
+   round-robin); **`db_config.migration_rate: 0.05`** with a finite
+   `migration_interval` — v1 ran migration 0 and islands 0/3 starved all run
+   (+0.039/+0.064 while leaders hit +0.14).
+2. **Model arms**: v1's bandit worked with
+   `["azure-gpt-5.4-mini@low", "azure-gpt-5.3-codex@medium", "azure-gpt-5.5@medium"]`
+   after the warmup demoted mini from @medium (23.7 min/$0.37 for zero gain at
+   @medium; at @low it delivered a +0.100 candidate for $0.067). Start there.
+3. **Discovery round: EARLY, and budget it honestly.** v1 fired its (excellent)
+   DR at 71% of budget — three sound grounded families got ~2 windows to live.
+   If stagnation appears, spend DR by ~window 2-3, and reserve **1.5× the
+   estimate** (the real o3-DR call billed $7.51 vs the $5.0 default estimate).
+4. **Guidance scoping**: v1's routing-discipline `extra_guidance` halved
+   self-check failures (0.40 → 0.22) but measurably made grounded
+   implementations timid (all three fell back to conservative mechanics).
+   Scope legality reminders to fix/repair flows; keep fresh-mutation prompts
+   bold.
+5. **`task_sys_msg` authoring** (the v1 text produced ZERO
+   contract-misunderstanding invalids all warmup — reuse its shape): goal =
+   jointly minimize plan-dependent exposure, core SEC time, and zones for the
+   frozen Q70 SEC; hard constraints = quote the validator highlights above
+   (all 9 rules, the 5 edge types, odd-rows-optical, cyclicity); building
+   blocks = layout/folding choice, per-ring shift realization (conveyor +
+   rail-wrap vs embedded Fig.-61 vs lane-column vertical conveyors vs side
+   flips), gating approach paths, measurement batching; point at the per-gap
+   `used/floor` feedback as the slack map; runtime caution = deterministic
+   pure-Python `run_experiment`, comfortably under 30 s.
+6. **Budget**: $30 bought 7 windows / 68 programs and recovered ~25% of the
+   seed→paper gap from a cold single-seed start. With both seeds and v2
+   scoring, $30 is a meaningful run; $50 is a realistic shot at the paper-grade
+   +4.2 ladder rung. The certification tier (`certify.py`) runs on elites
+   between windows or at run end — in-loop scores must reproduce there.
 
 ```bash
 python tasks/q70_ring_shuttle/selfcheck.py
 ```
 
 ```bash
-python tasks/q70_ring_shuttle/certify.py --program_path tasks/q70_ring_shuttle/initial.py --p 2e-3 --target_errors 50 --max_shots 20000
+python tasks/q70_ring_shuttle/certify.py --program_path tasks/q70_ring_shuttle/initial_folded.py --p 2e-3 --target_errors 50 --max_shots 20000
 ```
-
-Evolution: copy `configs/orchestrator_run.default.json`, point
-`task.eval_program_path` / `task.init_program_path` at this task, set
-`task.language: "python"`, `eval_time: 00:05:00`. Orchestrator notes for
-`task_sys_msg` authoring: goal = minimize noise exposure, SEC time, and trap
-footprint jointly for the frozen Q70 SEC; hard constraints = the plan-legality
-rules above (quote the validator highlights); building blocks = layout choice,
-per-ring shift realization (conveyor/rail-wrap vs embedded vs block swap vs
-folded layouts), gating approach paths, measurement batching; runtime caution =
-run_experiment must stay deterministic, pure-Python, and comfortably under 30 s.

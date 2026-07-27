@@ -15,6 +15,7 @@ for pth in (_ROOT, _TASK):
 
 import evaluate as ev          # noqa: E402
 import initial as seed         # noqa: E402
+import initial_folded as seed_folded  # noqa: E402
 
 
 def check_probes(plan):
@@ -73,37 +74,46 @@ def check_probes(plan):
         print(f"[ok] probe '{name}' -> sentinel ({out['text_feedback'][:72]}...)")
 
 
-def main():
-    spec = ev.get_kwargs(0)["spec"]
+def check_seed(name, builder, spec, expect_zero):
     t0 = time.time()
-    plan = seed.build_embedding_and_shuttle(spec)
+    plan = builder(spec)
     t1 = time.time()
-    print(f"[ok] seed plan built in {t1-t0:.2f}s "
-          f"({len(plan['timeline'])} timeline phases)")
-
+    print(f"\n=== {name} seed ===")
+    print(f"[ok] plan built in {t1-t0:.2f}s ({len(plan['timeline'])} phases)")
     compiled = ev.compile_plan(plan)
     t2 = time.time()
-    print(f"[ok] plan compiled+validated in {t2-t1:.2f}s")
+    print(f"[ok] compiled+validated in {t2-t1:.2f}s")
     print(f"     transport rounds : {compiled['transport_rounds']}")
     print(f"     merge/split rnds : {compiled['merge_rounds']}")
-    print(f"     prep/measure     : {compiled['prep_phases']}/{compiled['measure_phases']} phases")
-    print(f"     per-gap rounds   : {compiled['per_gap_rounds']}")
+    print(f"     per-gap used     : {compiled['per_gap_rounds']}")
+    print(f"     per-gap floors   : {compiled['per_gap_floors']} (wrap floor "
+          f"{compiled['wrap_floor']})")
     print(f"     zones            : {compiled['zones']}")
-    print(f"     exposure         : {compiled['exposure']:.2f}")
-    print(f"     T_core / T_SEC   : {compiled['t_core_poc']:.2f} / {compiled['t_sec_poc']:.2f} POC "
+    print(f"     exposure         : {compiled['exposure']:.2f} "
+          f"(plan-dependent {compiled['exposure'] - ev.FROZEN_EXPOSURE:.2f})")
+    print(f"     T_core / T_SEC   : {compiled['t_core_poc']:.2f} / "
+          f"{compiled['t_sec_poc']:.2f} POC "
           f"(paper Q70: 27.70 abstract, ~34.2 micro-counted)")
-
     ok, which = ev.noiseless_ok(compiled)
     t3 = time.time()
     assert ok, f"noiseless determinism FAILED on {which}-observable circuit"
     print(f"[ok] noiseless determinism (both observables) in {t3-t2:.2f}s")
-
     out = ev._aggregate_impl([plan])
-    t4 = time.time()
-    print(f"[ok] full scoring path in {t4-t3:.2f}s: seed combined_score = "
-          f"{out['combined_score']:+.4f} (target 0.0000)")
-    assert abs(out["combined_score"]) < 5e-3, "seed anchors need recalibration!"
+    print(f"[ok] scoring path in {time.time()-t3:.2f}s: combined_score = "
+          f"{out['combined_score']:+.4f}"
+          + ("  (target 0.0000)" if expect_zero else ""))
+    if expect_zero:
+        assert abs(out["combined_score"]) < 5e-3, "seed anchors need recalibration!"
+    return plan
 
+
+def main():
+    spec = ev.get_kwargs(0)["spec"]
+    plan = check_seed("unfolded (anchor)", seed.build_embedding_and_shuttle,
+                      spec, expect_zero=True)
+    check_seed("folded", seed_folded.build_embedding_and_shuttle,
+               spec, expect_zero=False)
+    print()
     check_probes(plan)
 
     if "--ler" in sys.argv:

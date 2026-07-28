@@ -105,8 +105,37 @@ wrap lanes onto shared columns and forcing an X-then-Z sequential fallback for
 half its rounds. v3 counts rail sections only, so transit detours are free in
 the footprint term and are priced (correctly) in time and exposure instead.
 
-Why deterministic (validated by both runs): the fault structure is frozen,
-BP-OSD costs ~0.1–4 s/shot (certification-only), eval ≈ 1–2 s, zero score noise.
+Why deterministic: the fault structure is frozen, BP-OSD costs ~0.1–4 s/shot
+(certification-only), and the score carries zero sampling noise.
+
+### The exposure-for-LER substitution is measured, not assumed
+
+Neither earlier run validated it (run v2 certified a single plan, which only
+tested anti-gaming). Direct test — real BP-OSD LER for three plans spanning a
+6% exposure spread, p = 2e-3, 9 SECs, X observable, ~420 logical errors each,
+identical decoder config (`osd_order=0`), ~1.9 h total:
+
+| plan | exposure | transport rounds | measured LER/shot |
+|---|---|---|---|
+| unfolded | 577.22 | 1012 | 4.891e-2 ± 2.4e-3 |
+| folded | 555.38 | 700 | 4.148e-2 ± 2.1e-3 |
+| evolved | 546.00 | 566 | 3.898e-2 ± 1.9e-3 |
+
+- **Ordering: exact agreement.** Ranking by exposure and by measured LER give
+  the same order — which is all that selection consumes.
+- **Magnitude: right to within one unit of exponent.** unfolded-vs-evolved
+  predicted 1.321x, measured 1.255x (3.7σ from unity, so the effect is real);
+  folded-vs-evolved predicted 1.089x, measured 1.064x (0.9σ, direction right,
+  stats thin). The implied effective exponent is **~3.6–4.1 rather than the
+  ansatz's ⌈d_circ/2⌉ = 5**, i.e. the reliability term is mildly optimistic
+  about what a given exposure cut buys. Caveat: measured at p = 2e-3 with a
+  weak decoder, which is nearer threshold than the p = 1e-4 operating point —
+  the exponent should steepen toward 5 further below threshold, so this is a
+  lower bound on the true sensitivity, and it errs conservative.
+
+Verdict: the substitution is sound for ranking and roughly calibrated in
+magnitude. Reproduce with `scratchpad/metric_validation.py` after any change to
+the noise model or the score.
 
 > **PROVISIONAL v3, revisit after the next run** (orchestrator note — do not
 > surface mutable-rules talk to the mutation LLM): weights are 1.0 / 0.5 / 1.0.

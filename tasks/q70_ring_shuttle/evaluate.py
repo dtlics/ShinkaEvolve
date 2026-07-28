@@ -88,6 +88,10 @@ SEED_ZONES = 428                    # v3: distinct RAIL SECTIONS (S sites) of
                                     # mis-compared against the paper's ~288
                                     # sections by ~3.7x and paid the search to
                                     # funnel traffic through few corridors.
+SHIPPED_SEED_SCORE = 2.2028  # best seed handed to the run (initial_evolved).
+                             # Reported per candidate as `gain_over_seed` so a
+                             # run's own contribution is separable from what it
+                             # was given. Update whenever the seeds change.
 SEED_EXPOSURE_TOTAL = FROZEN_EXPOSURE + SEED_VAR_EXPOSURE   # for the public
                                                             # LER-shift readout
 
@@ -869,7 +873,9 @@ def _aggregate_impl(results):
         f"round is allowed, and a full closed-loop rotation can advance every "
         f"ion simultaneously.\n"
         f"Score = {W_E}*log2(seed_var_exposure/var_exposure) "
-        f"+ {W_T}*log2(seed_T_core/T_core) + {W_Z}*log2(seed_zones/zones). "
+        f"+ {W_T}*log2(seed_T_core/T_core) + {W_Z}*log2(seed_zones/zones) "
+        f"= {score:+.4f}, which is {score - SHIPPED_SEED_SCORE:+.4f} against the "
+        f"best plan this run started from. "
         f"Prefer strategies parametric in (l, m, schedule) over hard-coded "
         f"positions — plans are re-run on other three-ring codes after "
         f"evolution.")
@@ -878,6 +884,7 @@ def _aggregate_impl(results):
         "combined_score": float(score),
         "public": {
             "valid": True,
+            "gain_over_seed": float(score - SHIPPED_SEED_SCORE),
             "var_exposure": float(var_exp),
             "exposure": float(exposure),
             "ler_shift_log10": float(ler_shift),

@@ -18,10 +18,10 @@ See [DESIGN.md](DESIGN.md) for the design rationale and background primer.
 | File | Role |
 |---|---|
 | `initial.py` | Seed A (EVOLVE-BLOCK): the *unfolded* realization of the Fig.-60 strategy — block swaps for the long ring, conveyor+rail-wrap medium shifts, Fig.-61 embedded short shifts, vertical data hops for gating, in-place prep/measure on optical rows. Score anchor (0.0). Parametric in `(l, m, schedule)`; self-verifies while building. |
-| `initial_folded.py` | Seed B (EVOLVE-BLOCK): the *folded* 2D embedding — cells of 3 rows (data-L / ancillas / data-R), family change = ±2-column side flip (no block swaps), per-column vertical conveyors with lane-column wraps, Fig.-61 embedded shifts per row. Boots at **+1.296**. |
-| `initial_evolved.py` | Seed C (EVOLVE-BLOCK): run `q70ring_v2`'s best evolved program with its cell pitch repaired 3→4 (evolution had compressed it to win the then-broken zone term, which aliased the X/Z wrap lanes and forced an X-then-Z sequential fallback). 676 → **566 rounds**, boots at **+1.711** — above anything either run produced. Carries a hard assert on wrap-lane disjointness. |
+| `initial_folded.py` | Seed B (EVOLVE-BLOCK): the *folded* 2D embedding — cells of 3 rows (data-L / ancillas / data-R), family change = ±2-column side flip (no block swaps), per-column vertical conveyors with lane-column wraps, Fig.-61 embedded shifts per row. **446 rounds / +2.1649** at 287 rail sections. |
+| `initial_evolved.py` | Seed C (EVOLVE-BLOCK): run `q70ring_v2`'s best evolved program with its cell pitch repaired 3→4 (evolution had compressed it to win the then-broken zone term, which aliased the X/Z wrap lanes and forced an X-then-Z sequential fallback). 676 → 566 → **421 rounds / +2.2028**. |
 | `evaluate.py` | Immutable oracle: exact plan compiler/validator, POC + noise-exposure accounting, stim noiseless-determinism check, deterministic seed-anchored score. Also hosts the certification-only circuit builder + BP-OSD sampler. |
-| `routing.py` | **Shared, NON-evolved parallel round packer** — the plumbing every candidate gets for free. `plan_moves(starts, targets, blocked, ...)` finds routes and packs them into near-minimal collision-free rounds (prioritised planning, per-ion stalls, cycle rotation in one round, shove-aside, soft site costs); `route()` schedules caller-supplied paths; `to_timeline`/`emit_moves` emit the evaluator's phase format; `check_rounds` re-validates. `python routing.py` runs its self-test. Two runs and 175 evolved programs never escaped serial routing on their own — this removes that failure mode so the search can spend itself on geometry. |
+| `routing.py` | **FROZEN REFERENCE ONLY — no seed imports it.** It *was* the shared, non-evolved round packer; the router now lives INSIDE each seed's EVOLVE-BLOCK (SECTION 2), so a mutation can improve the packing algorithm as well as the geometry. Kept on disk unchanged as a regression baseline: given the same `DEFAULT_ATTEMPTS`, the inlined copy reproduces its schedules exactly (419/301 and 455/292). `python routing.py` still runs its self-test. |
 | `certify.py` | Out-of-loop head-to-head: re-runs a candidate in a fresh process and measures real Monte-Carlo LER at chosen p (BP-OSD), tabled against the paper's published Q70 numbers. |
 | `qecc/q70.json` | Pinned code assets (Hx/Hz supports, symplectic logical pairs, schedule), generated + verified by `make_code_assets.py`. |
 | `selfcheck.py` | Dev driver: seed build → compile → determinism → scoring-path → invalid-plan probe battery → optional `--ler`. |
@@ -151,8 +151,8 @@ the noise model or the score.
 | plan | rounds | rail sections | T_SEC | rounds/floor | score |
 |---|---|---|---|---|---|
 | `initial.py` unfolded (anchor) | 1012 | 428 | 66.65 | 1.36x | **0.000** |
-| `initial_folded.py` (routed) | 455 | 292 | 38.80 | 1.37x | **+2.103** |
-| **`initial_evolved.py` (routed, best)** | **419** | **301** | **37.00** | **1.27x** | **+2.212** |
+| `initial_folded.py` (inlined router) | 446 | 287 | 38.35 | 1.34x | **+2.165** |
+| **`initial_evolved.py` (inlined router, best)** | **421** | **301** | **37.10** | **1.28x** | **+2.203** |
 | paper Q70 + our cyclicity tax | 502 | ~288 | — | — | +1.939 |
 | paper Q70 as published (Table XXVI) | 424 | ~288 | 34.2 micro | — | +2.253 |
 | evolved layout floor-perfect | 329 | 301 | — | 1.00x | +2.65 |
@@ -160,7 +160,13 @@ the noise model or the score.
 
 Pre-router history for reference: the same two layouts cost 700 and 566 rounds
 when each seed emitted its own movement rounds (+1.296 / +1.711), and run
-q70ring_v2's best evolved plan was 676 (+1.651).
+q70ring_v2's best evolved plan was 676 (+1.651). With the shared `routing.py`
+they were 455 and 419; the seeds now carry their own trimmed copy of that
+router INSIDE the evolve block (see "The router is evolvable now" below).
+
+Every candidate's public metrics carry **`gain_over_seed` = score − 2.2028**, so
+a run's own contribution is always separable from what it was handed. Report it
+alongside the absolute score in any write-up.
 
 **Read the bar as +1.94, not +2.25.** Two documented asymmetries, both audited
 against the paper (Sec. XIX–XX, Tables XI/XXVI):
@@ -182,10 +188,54 @@ against the paper (Sec. XIX–XX, Tables XI/XXVI):
   hop; the paper's only numeric vertical statement (p. 85) implies ~3. Untested,
   so not corrected for — it makes our bar, if anything, more conservative.
 
-**Both races against the paper are now won by the shipped seed** — 419 rounds
-vs 424 as-published (352 vs 424 like-for-like), at 301 rail sections vs ~288.
-The open problem has moved: routing slack is down to 1.27x floor, so the next
-gains must come from a layout whose *floor* is lower (see the CRT row).
+**What we do and do NOT beat the paper on — state this carefully.**
+
+- *Transport rounds and SEC time: parity, edging ahead.* 421 vs 424
+  as-published; 354 vs 424 like-for-like (removing our wrap-back tax). This is
+  a **speed** result — it shortens the logical clock cycle, hence algorithm
+  wall-clock.
+- *Logical error rate: a tie, not a win.* Our exposure is 535.85 against the
+  paper's ~536.20 for its own 424-round plan — a **0.1%** difference, i.e. a
+  ~0.4% LER change at the measured exponent. Do not claim an LER improvement.
+  The reason is structural and worth internalising: a transport round costs
+  `p/2000` on each qubit while a two-qubit gate layer costs `p` on 70 pairs, so
+  the entire plan-dependent budget is only ~6% of total exposure. Even
+  **free** transport would buy just ~21% LER versus the paper. Fidelity is
+  dominated by the frozen circuit; what a plan actually buys is time and area.
+
+The open problem has moved: routing slack is down to 1.28x floor, so the next
+gains must come from a layout whose *floor* is lower (see the CRT row) — or
+from a better packer, which is now also inside the evolve block.
+
+## The router is evolvable now (was `routing.py`, shared and frozen)
+
+`routing.py` used to be imported by both routed seeds and did the parallel
+round packing for every candidate — worth 566 → 419 rounds on the best seed,
+but NOT evolvable. It is now a **frozen reference file that nothing imports**,
+and a trimmed copy of the packer lives inside each seed's EVOLVE-BLOCK, so a
+mutation can improve the packing algorithm as well as the geometry.
+
+Each seed's evolve block is three labelled sections, each with a banner saying
+what it owns and what a mutation could try, so one can be rewritten without
+reading the others:
+
+| section | owns | key handle |
+|---|---|---|
+| 1 GEOMETRY | grid dims, every ion's rest site, the per-gate ion→site tables | `CELL_BASE` / `CELL_PITCH`; the layout's distance **floor** is set here and nowhere else |
+| 2 ROUTER | `site_dist`, A* with soft site costs + directed-edge congestion pricing, BFS field, the round packer (per-ion stalls, ≥3-cycle rotation in one round, cascading shove-aside, bounded replanning) | `ROUTER_POLICY` + `ROUTER_ATTEMPTS`, one block at the top of the section |
+| 3 ASSEMBLY | prep, the 7 merge/gate/split rounds, measure, wrap-back, phase emission | the gap>0 "duck out and come back" overlap |
+
+What the inlined copy drops from `routing.py` (~39% of it): the 6-config
+attempt portfolio (now 2 configs — measured better, see below), `route()`,
+`check_rounds`, `ShuttleRouter`, `to_timeline`, `apply_rounds`' occupancy
+bookkeeping, `avoid`/`soft_cost`, `_infer_grid`, the `field_cache` (dead on the
+path-planning code path the seeds use), the whole field-plan engine mode with
+its `_descend`/`override` machinery, and the self-test. Given the same
+`DEFAULT_ATTEMPTS` the trimmed copy reproduces `routing.py`'s schedules
+**exactly** (419 rounds / 301 sections and 455 / 292), so the removal is
+verified lossless; the shipped 2-config portfolio then trades 2 rounds on the
+evolved seed for 5 fewer on the folded one, 5 fewer rail sections, and a third
+of the build time (~6 s per plan).
 
 ## Head-to-head protocol
 
@@ -252,14 +302,16 @@ gains must come from a layout whose *floor* is lower (see the CRT row).
 ## THE OBJECTIVE, IN ONE LINE
 
 **The shipped seed already beats the published design — now push past it by
-changing the GEOMETRY.** `initial_evolved.py` runs the SEC in **419 transport
-rounds** vs IonQ's 424 (352 vs 424 like-for-like, see below), at 1.27x its own
-distance floor. Routing plumbing is solved and shared (`routing.py`), so the
-open problem is the *layout*: the floor itself is a property of the embedding,
-and a CRT/sheared-torus geometry (l=7, m=5 coprime ⇒ the ring torus is Z₃₅, so
-every realignment becomes ONE 1-D rotation instead of two per-axis passes) has
-an analytic rotation cost near **194 rounds**. Move the floor, and the router
-will follow it down.
+changing the GEOMETRY.** `initial_evolved.py` runs the SEC in **421 transport
+rounds** vs IonQ's 424 (354 vs 424 like-for-like, see below), at 1.28x its own
+distance floor. The primary open problem is the *layout*: the floor itself is a
+property of the embedding, and a CRT/sheared-torus geometry (l=7, m=5 coprime ⇒
+the ring torus is Z₃₅, so every realignment becomes ONE 1-D rotation instead of
+two per-axis passes) has an analytic rotation cost near **194 rounds**. Move
+the floor, and the router will follow it down. Secondary, and now in scope for
+the first time: the ~92 rounds of slack ABOVE that floor, because the round
+packer lives inside the evolve block too (SECTION 2) rather than in a shared
+frozen module.
 
 ## Run playbook (binding lessons from runs q70ring_v1 $30 and q70ring_v2 $50)
 

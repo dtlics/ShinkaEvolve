@@ -130,6 +130,7 @@ def main():
     if "--ler" in sys.argv:
         import numpy as np
         rng = np.random.default_rng(12345)
+        compiled = ev.compile_plan(plan)     # the anchor seed's compiled plan
         for obs in ("X", "Z"):
             circ = ev.build_circuit(compiled, obs, ev.P_CERT_DEFAULT)
             t5 = time.time()

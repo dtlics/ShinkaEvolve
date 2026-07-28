@@ -1,5 +1,13 @@
-"""routing.py -- shared, NON-EVOLVED parallel-transport router for
-``q70_ring_shuttle``.  Import it; do not copy it into an EVOLVE-BLOCK.
+"""routing.py -- FROZEN REFERENCE IMPLEMENTATION ONLY, kept for regression
+checks; NO SEED IMPORTS THIS ANY MORE -- the live router now lives inside each
+seed's EVOLVE-BLOCK (SECTION 2), so evolution owns the round packing too.
+
+Everything below describes this module as it was when it was the shared,
+non-evolved router.  It is unchanged so that a candidate's round counts can
+still be diffed against a fixed baseline; the trimmed copy inside each seed
+drops ``route``, ``check_rounds``, ``ShuttleRouter``, the field-plan mode and
+the self-test, and reproduces this module's schedules exactly on the shipped
+layouts when given the same ``DEFAULT_ATTEMPTS``.
 
 WHY THIS EXISTS
 ---------------

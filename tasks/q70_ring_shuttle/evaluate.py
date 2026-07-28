@@ -82,7 +82,12 @@ NC_SECS = 9            # number of SECs simulated (= d, paper convention)
 FROZEN_EXPOSURE = 70.0 * 7 + 14.0   # 504: gates + prep/meas, identical for all
 SEED_VAR_EXPOSURE = 73.22           # unfolded seed's exposure - FROZEN_EXPOSURE
 SEED_T_CORE = 59.60                 # unfolded seed's t_core_poc (no LL overhead)
-SEED_ZONES = 1612
+SEED_ZONES = 428                    # v3: distinct RAIL SECTIONS (S sites) of
+                                    # the anchor seed. Was 1612 when transit
+                                    # vertices were counted too — that both
+                                    # mis-compared against the paper's ~288
+                                    # sections by ~3.7x and paid the search to
+                                    # funnel traffic through few corridors.
 SEED_EXPOSURE_TOTAL = FROZEN_EXPOSURE + SEED_VAR_EXPOSURE   # for the public
                                                             # LER-shift readout
 
@@ -271,7 +276,14 @@ def compile_plan(plan):
     prep_phases = 0
     measure_phases = 0
     idle_slots = 0.0     # sum over prep/measure phases of (N_SIM - batch size)
-    zones = set(pos.values())
+    # FOOTPRINT (v3): count distinct RAIL SECTIONS (S sites) only — that is the
+    # unit the paper reports (~288 sections for the Q70 block). Counting J/U/D
+    # transit vertices too (the v2 definition) both mis-compared against the
+    # paper by ~3.7x AND rewarded funnelling all traffic through one corridor,
+    # i.e. it paid for serialization. Vertices are still reported as a
+    # diagnostic.
+    zones = {s for s in pos.values() if s[0] == "S"}
+    vertices = set(pos.values())
     segments = []        # ordered: ("transport", k) | ("ms", k) | ("gate", t) |
                          #          ("prep", [ancs]) | ("measure", [ancs])
     per_gap_rounds = []  # transport rounds between consecutive gate layers
@@ -294,6 +306,12 @@ def compile_plan(plan):
     # takes 50-100us (Table XXV).
     merge_used = set()
     split_used = set()
+    ion_steps = 0          # total (ion, round) movements — parallelism numerator
+    low_occ_rounds = 0     # move phases in which fewer than 20 ions move
+    wrap_rounds = 0        # transport rounds AFTER the first measure phase:
+                           # the cyclicity buy-back the paper does not pay
+                           # (it pipelines a second ancilla batch instead)
+    measured_started = False
 
     def check_site(obj, what, pi):
         if not _site_ok(obj, rows, cols):
@@ -357,9 +375,16 @@ def compile_plan(plan):
                         f"timeline[{pi}]: target {to} still occupied after round")
                 occupied[to] = q
                 pos[q] = to
-                zones.add(to)
+                vertices.add(to)
+                if to[0] == "S":
+                    zones.add(to)
             transport_rounds += 1
             gap_count += 1
+            ion_steps += len(seen_q)
+            if len(seen_q) < 20:
+                low_occ_rounds += 1
+            if measured_started:
+                wrap_rounds += 1
             seg_add("transport")
 
         elif t == "merge":
@@ -447,7 +472,9 @@ def compile_plan(plan):
                 del merged_hosts[host]
                 pos[mob] = to
                 occupied[to] = mob
-                zones.add(to)
+                vertices.add(to)
+                if to[0] == "S":
+                    zones.add(to)
             merge_rounds += 1
             seg_add("ms")
 
@@ -508,6 +535,7 @@ def compile_plan(plan):
                 book.add(a)
                 if t == "measure":
                     measure_order.append(a)
+                    measured_started = True
             idle_slots += N_SIM - len(ancs)
             if t == "prep":
                 prep_phases += 1
@@ -581,7 +609,12 @@ def compile_plan(plan):
         "per_gap_rounds": per_gap_rounds,
         "per_gap_floors": per_gap_floors,
         "wrap_floor": wrap_floor,
+        "floor_total": sum(per_gap_floors) + wrap_floor,
+        "wrap_rounds": wrap_rounds,
+        "ions_per_round": (ion_steps / transport_rounds) if transport_rounds else 0.0,
+        "low_occ_rounds": low_occ_rounds,
         "zones": len(zones),
+        "vertices": len(vertices),
         "t_core_poc": t_core,
         "t_sec_poc": t_sec,
         "exposure": exposure,
@@ -806,28 +839,40 @@ def _aggregate_impl(results):
     gaps_used_floor = ", ".join(
         f"r{t}:{u}/{f}" for t, (u, f) in enumerate(
             zip(compiled["per_gap_rounds"], compiled["per_gap_floors"])))
+    ftot = compiled["floor_total"]
+    rounds = compiled["transport_rounds"]
+    ratio = rounds / max(ftot, 1)
     feedback = (
         f"Valid plan. SEC = {t_sec:.2f} POC "
-        f"(transport {compiled['transport_rounds']} rounds = "
-        f"{compiled['transport_rounds']/20.0:.2f} POC, {N_ROUNDS} gate layers, "
-        f"{compiled['prep_phases']} prep + {compiled['measure_phases']} measure "
-        f"phases, +{LL_OVERHEAD_POC} POC fixed loss/leakage checks). "
+        f"(transport {rounds} rounds = {rounds/20.0:.2f} POC, {N_ROUNDS} gate "
+        f"layers, {compiled['prep_phases']} prep + {compiled['measure_phases']} "
+        f"measure phases, +{LL_OVERHEAD_POC} POC fixed loss/leakage checks). "
         f"Plan-dependent noise exposure {var_exp:.2f} (frozen part "
-        f"{FROZEN_EXPOSURE:.0f} excluded from the score). Zones: {zones}. "
-        f"Merge/split rounds: {compiled['merge_rounds']}. "
-        f"TRANSPORT ROUNDS USED / DISTANCE-FLOOR per gap before each gate "
-        f"layer: [{gaps_used_floor}] and wrap-back after measurement: "
-        f"{compiled['wrap_floor']} floor (wrap rounds are in the total only). "
-        f"A gap far above its floor is parallelism or routing waste — the floor "
-        f"is the longest single-ion journey, so it IS achievable transport if "
-        f"every ion moves every round without detours. "
+        f"{FROZEN_EXPOSURE:.0f} excluded from the score). Rail sections used: "
+        f"{zones} (transit vertices {compiled['vertices']} — NOT scored, so "
+        f"spreading traffic over separate corridors is free). "
+        f"Merge/split rounds: {compiled['merge_rounds']}.\n"
+        f"SLACK MAP — transport rounds USED/DISTANCE-FLOOR per gap: "
+        f"[{gaps_used_floor}], wrap-back after measurement "
+        f"{compiled['wrap_rounds']}/{compiled['wrap_floor']}. YOUR LAYOUT "
+        f"ADMITS {ftot} ROUNDS IN TOTAL AND YOU USE {rounds} ({ratio:.2f}x "
+        f"floor). The floor is the longest single-ion journey per gap: it is "
+        f"achievable when every ion moves every round without detours or "
+        f"waiting, so the whole excess is parallelism loss.\n"
+        f"PARALLELISM — mean {compiled['ions_per_round']:.1f} of 140 ions move "
+        f"per transport round; {compiled['low_occ_rounds']} rounds move fewer "
+        f"than 20 ions. A round costs the same whether 1 ion moves or 140, so "
+        f"low-occupancy rounds are pure waste: routing one group to completion "
+        f"before starting another (per-axis passes, X-then-Z, hide/slide/emerge "
+        f"barriers) is the usual cause. Interleaving groups into shared rounds "
+        f"is legal — a target vacated by another ion that moves in the SAME "
+        f"round is allowed, and a full closed-loop rotation can advance every "
+        f"ion simultaneously.\n"
         f"Score = {W_E}*log2(seed_var_exposure/var_exposure) "
-        f"+ {W_T}*log2(seed_T_core/T_core) + {W_Z}*log2(seed_zones/zones); "
-        f"transport and merge/split rounds feed both the exposure and time "
-        f"terms; a compact layout feeds the zone term AND shortens every "
-        f"journey. Prefer strategies parametric in (l, m, schedule) over "
-        f"hard-coded positions — plans are re-run on other three-ring codes "
-        f"after evolution.")
+        f"+ {W_T}*log2(seed_T_core/T_core) + {W_Z}*log2(seed_zones/zones). "
+        f"Prefer strategies parametric in (l, m, schedule) over hard-coded "
+        f"positions — plans are re-run on other three-ring codes after "
+        f"evolution.")
 
     return {
         "combined_score": float(score),
@@ -838,8 +883,14 @@ def _aggregate_impl(results):
             "ler_shift_log10": float(ler_shift),
             "sec_poc": float(t_sec),
             "t_core_poc": float(t_core),
-            "transport_rounds": int(compiled["transport_rounds"]),
+            "transport_rounds": int(rounds),
+            "floor_total": int(ftot),
+            "rounds_over_floor": float(ratio),
+            "ions_per_round": float(compiled["ions_per_round"]),
+            "low_occ_rounds": int(compiled["low_occ_rounds"]),
             "zones": int(zones),
+            "vertices": int(compiled["vertices"]),
+            "wrap_rounds": int(compiled["wrap_rounds"]),
             "merge_rounds": int(compiled["merge_rounds"]),
             "prep_phases": int(compiled["prep_phases"]),
             "measure_phases": int(compiled["measure_phases"]),

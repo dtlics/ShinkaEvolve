@@ -1,5 +1,24 @@
 # DESIGN v2 — three-ring memory: hardware mapping + shuttle schedule for a fixed code
 
+> **v4 changelog (post-run q70ring_v2, 2026-07-28):** the $50 run reached 676
+> rounds / +1.65 and stalled. Diagnosis (audited against the paper, the archive
+> DB and the journals): (1) the **zone metric was mis-defined** — it counted
+> S/J/U/D vertices and was compared against the paper's ~288 *trap sections*,
+> a 3.7x granularity error that inflated the bar by ~2 points AND paid the
+> search to serialize traffic through few corridors, which is exactly what it
+> did (80% of its score gain came from the zone term while rounds moved 3.4%);
+> (2) the real blocker is **router parallelism, not layout** — the winner's own
+> distance floor is 287 rounds and it used 676, at a mean of 25 of 140 ions
+> moving per round; (3) our **cyclicity rule is stricter than the paper**, which
+> pipelines a second ancilla batch (15–19% of every plan's rounds). Applied:
+> zones = rail sections only (anchor 428), honest paper bar restated as +1.94
+> like-for-like, `floor_total` / `rounds_over_floor` / `ions_per_round` /
+> `low_occ_rounds` / `wrap_rounds` / `vertices` added as public metrics and to
+> the feedback, and a third seed `initial_evolved.py` (v2's best with its cell
+> pitch repaired 3→4: 676 → 566 rounds, +1.711) shipped. The footprint race is
+> now won outright (288 sections vs the paper's ~288); all remaining headroom is
+> routing parallelism.
+>
 > **v3 changelog (post-run q70ring_v1, 2026-07-27):** the run confirmed the design's
 > machinery (zero evaluator pathologies, all gains real) and falsified the v1 score
 > weights. Applied fixes: (1) score v2 — plan-dependent exposure only, core time,

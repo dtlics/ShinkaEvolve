@@ -15,7 +15,8 @@ for pth in (_ROOT, _TASK):
 
 import evaluate as ev          # noqa: E402
 import initial as seed         # noqa: E402
-import initial_folded as seed_folded  # noqa: E402
+import initial_folded as seed_folded    # noqa: E402
+import initial_evolved as seed_evolved  # noqa: E402
 
 
 def check_probes(plan):
@@ -88,7 +89,15 @@ def check_seed(name, builder, spec, expect_zero):
     print(f"     per-gap used     : {compiled['per_gap_rounds']}")
     print(f"     per-gap floors   : {compiled['per_gap_floors']} (wrap floor "
           f"{compiled['wrap_floor']})")
-    print(f"     zones            : {compiled['zones']}")
+    print(f"     rounds/floor     : {compiled['transport_rounds']}/"
+          f"{compiled['floor_total']} = "
+          f"{compiled['transport_rounds']/max(compiled['floor_total'],1):.2f}x")
+    print(f"     parallelism      : {compiled['ions_per_round']:.1f} ions/round, "
+          f"{compiled['low_occ_rounds']} rounds under 20 ions")
+    print(f"     wrap-back rounds : {compiled['wrap_rounds']} "
+          f"(cyclicity cost the paper does not pay)")
+    print(f"     rail sections    : {compiled['zones']}  [paper Q70 block ~288]"
+          f"   (transit vertices {compiled['vertices']})")
     print(f"     exposure         : {compiled['exposure']:.2f} "
           f"(plan-dependent {compiled['exposure'] - ev.FROZEN_EXPOSURE:.2f})")
     print(f"     T_core / T_SEC   : {compiled['t_core_poc']:.2f} / "
@@ -113,6 +122,8 @@ def main():
                       spec, expect_zero=True)
     check_seed("folded", seed_folded.build_embedding_and_shuttle,
                spec, expect_zero=False)
+    check_seed("evolved (pitch-4 repair of run v2 best)",
+               seed_evolved.build_embedding_and_shuttle, spec, expect_zero=False)
     print()
     check_probes(plan)
 

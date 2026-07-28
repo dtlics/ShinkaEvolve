@@ -1,27 +1,46 @@
-"""FOLDED seed plan generator for q70_ring_shuttle (second basin seed).
+"""FOLDED seed, routed through the shared round packer.
 
-Same contract as initial.py, different strategy: a compact 2D folded embedding
-(the layout family run q70ring_v1's discovery round found, here given the
-parallel router that candidate lacked):
-
-  - cell (i, j): ancillas on optical row 2i+1; left-block data (+beacon) on
-    row 2i directly above, right-block data (+beacon) on row 2i+2 directly
-    below; X ancillas on side columns 4j+CB, Z ancillas on 4j+CB+2;
-  - A<->B family change = a local +-2-column SIDE FLIP (the species moving
-    left hides in legs while the other slides through) — no block swaps;
-  - medium ring (i, period l) = per-column vertical conveyors through the
-    junction legs; wrapping ions detour concurrently through the free odd
-    lane columns (X lanes ≡ CB+1, Z lanes ≡ CB+3 mod 4 — disjoint);
-  - short ring (j, period m) = Fig.-61 embedded shift inside each ancilla
-    row: wrap group hides UP, main group slides and hides DOWN, wrap group
-    crosses the emptied rail, everyone re-emerges;
-  - gating = data hop one row through the legs (4 moves), merge, gate,
-    split, hop back; prep/measure in place on the optical rows.
-
-All routines parametric in (l, m, schedule). Rows needed = 2l+1, cols =
-4m + CB + margin (Q70: 15 x 28 — roughly one third of the unfolded seed's
-footprint, and about two thirds of its transport rounds).
+455 transport rounds / 1.37x floor / score +2.1029 (was 700 / 2.10x / +1.2965
+before the router). Hand-written folded 2D embedding: cells of 3 rows (data-L /
+ancillas / data-R), A/B family change as a local side flip, per-column vertical
+conveyors, Fig.-61 embedded shifts along the rows. Kept as a structurally
+DISTINCT basin from initial_evolved.py -- different cell geometry and flip
+convention -- so the two islands explore different layout families.
 """
+
+import os
+import sys
+
+
+def _load_routing():
+    """Import the shared router regardless of how the candidate was loaded."""
+    try:
+        import routing as _r
+        return _r
+    except ImportError:
+        pass
+    import importlib.util
+    cands = []
+    for mod in [sys.modules.get("__main__")] + list(sys.modules.values()):
+        f = getattr(mod, "__file__", None)
+        if f and os.path.basename(f) in ("evaluate.py", "routing.py"):
+            cands.append(os.path.dirname(os.path.abspath(f)))
+    try:
+        cands.append(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
+        pass
+    for d in cands:
+        p = os.path.join(d, "routing.py")
+        if os.path.exists(p):
+            spec = importlib.util.spec_from_file_location("q70_routing", p)
+            m = importlib.util.module_from_spec(spec)
+            sys.modules["q70_routing"] = m
+            spec.loader.exec_module(m)
+            return m
+    raise ImportError("routing.py (shared parallel-transport router) not found")
+
+
+rt = _load_routing()
 
 
 # EVOLVE-BLOCK-START
@@ -36,10 +55,12 @@ def build_embedding_and_shuttle(spec):
     qb = spec["qid_bases"]
     DATA0, XANC0, ZANC0 = qb["data"], qb["x_anc"], qb["z_anc"]
     BEAC0, RES0 = qb["beacon"], qb["reservoir"]
+    N_SIM = 2 * (2 * n_half)
 
-    CB = 4                       # first cell column
-    ROWS = 2 * l_ring + 1        # rows 0..2l
-    COLS = CB + 4 * m_ring + 4   # cell span CB..CB+4m-1, right margin for parking
+    CB = 4
+    PITCH = 4
+    ROWS = 2 * l_ring + 1
+    COLS = CB + 4 * m_ring + 4
     assert ROWS <= spec["grid_max_rows"] and COLS <= spec["grid_max_cols"]
 
     def pos(i, j):
@@ -49,40 +70,36 @@ def build_embedding_and_shuttle(spec):
         return divmod(p, m_ring)
 
     def anc_row(i):
-        return 2 * (i % l_ring) + 1          # odd -> optical
+        return 2 * (i % l_ring) + 1
 
     def side_col(j, side):
         return CB + 4 * (j % m_ring) + (0 if side == "L" else 2)
+
+    def other_side(s):
+        return "R" if s == "L" else "L"
 
     # ---- schedule-derived tables ---------------------------------------
     fam = [t[0] for t in schedule]
     ex = [exps[t[0]][t[1]] for t in schedule]
     ez = [exps[t[2]][t[3]] for t in schedule]
 
-    def delta(e_new, e_old, sign=1):
-        return (sign * (e_new[0] - e_old[0]) % l_ring,
-                sign * (e_new[1] - e_old[1]) % m_ring)
+    def x_side_at(t):
+        return "R" if fam[t] == "B" else "L"
 
-    gaps = []
-    for t in range(n_rounds):
-        t2 = (t + 1) % n_rounds
-        gaps.append({"flip": fam[t2] != fam[t],
-                     "dX": delta(ex[t2], ex[t]),
-                     "dZ": delta(ez[t2], ez[t], sign=-1)})
-
-    # ---- initial state -------------------------------------------------
-    x_side = "R" if fam[0] == "B" else "L"   # family B: X gates the right block
-    z_side = "L" if x_side == "R" else "R"
+    # ---- static layout (byte-identical to initial_evolved.py) ----------
+    x_side, z_side = x_side_at(0), other_side(x_side_at(0))
     e0x, e0z = ex[0], ez[0]
-    x_pos = [pos(g // m_ring + e0x[0], g % m_ring + e0x[1]) for g in range(n_half)]
-    z_pos = [pos(g // m_ring - e0z[0], g % m_ring - e0z[1]) for g in range(n_half)]
+    x_pos = [pos(g // m_ring + e0x[0], g % m_ring + e0x[1])
+             for g in range(n_half)]
+    z_pos = [pos(g // m_ring - e0z[0], g % m_ring - e0z[1])
+             for g in range(n_half)]
 
     posn = {}
     for p in range(n_half):
         i, j = cell(p)
-        posn[DATA0 + p] = ("S", 2 * i, CB + 4 * j)               # left block
+        posn[DATA0 + p] = ("S", 2 * i, CB + 4 * j)
         posn[BEAC0 + p] = ("S", 2 * i, CB + 4 * j + 1)
-        posn[DATA0 + n_half + p] = ("S", 2 * i + 2, CB + 4 * j + 2)  # right block
+        posn[DATA0 + n_half + p] = ("S", 2 * i + 2, CB + 4 * j + 2)
         posn[BEAC0 + n_half + p] = ("S", 2 * i + 2, CB + 4 * j + 3)
     for g in range(n_half):
         i, j = cell(x_pos[g])
@@ -101,199 +118,22 @@ def build_embedding_and_shuttle(spec):
         "reservoir": [list(posn[RES0 + i]) for i in range(spec["n_reservoir"])],
     }
 
-    timeline = []
-    occupied = {s: q for q, s in posn.items()}
-
-    def do_round(moves):
-        if not moves:
-            return
-        tgt = {}
-        for q, fr, to in moves:
-            assert posn[q] == fr, (q, posn[q], fr)
-            assert to not in tgt, ("double target", to)
-            tgt[to] = q
-        movers = {q for q, _, _ in moves}
-        for to, q in tgt.items():
-            holder = occupied.get(to)
-            assert holder is None or holder in movers, ("collision", to, holder, q)
-        for q, fr, to in moves:
-            del occupied[fr]
-        for q, fr, to in moves:
-            assert to not in occupied, ("post-collision", to)
-            occupied[to] = q
-            posn[q] = to
-        timeline.append({"t": "move",
-                         "moves": [[q, list(f), list(t)] for q, f, t in moves]})
-
-    def run_concurrent(tracks):
-        maxlen = max((len(p) for _, p in tracks), default=0)
-        for step in range(maxlen):
-            moves = []
-            for q, p in tracks:
-                if step < len(p):
-                    moves.append((q, posn[q], p[step]))
-            do_round(moves)
-
-    # ---- path helpers --------------------------------------------------
-    def vpath(c, r_from, r_to):
-        """S(r_from,c) -> S(r_to,c) through column c's legs (exclusive of start)."""
-        path = [("J", r_from, c)]
-        if r_to > r_from:
-            for r in range(r_from, r_to):
-                path += [("D", r, c), ("U", r + 1, c), ("J", r + 1, c)]
-        else:
-            for r in range(r_from, r_to, -1):
-                path += [("U", r, c), ("D", r - 1, c), ("J", r - 1, c)]
-        path.append(("S", r_to, c))
-        return path
-
-    def lane_steps(row, c_from, c_to):
-        path = []
-        c = c_from
-        while c != c_to:
-            if c_to > c:
-                path += [("J", row, c), ("S", row, c + 1)]
-                c += 1
-            else:
-                path += [("J", row, c - 1), ("S", row, c - 1)]
-                c -= 1
-        return path
-
-    # ---- side flip (family change): left-mover hides, right-mover slides
-    def flip_sides():
-        nonlocal x_side, z_side
-        left_mover = XANC0 if x_side == "R" else ZANC0
-        right_mover = ZANC0 if left_mover == XANC0 else XANC0
-        # 1) left-movers hide in the U leg of the J to their LEFT
-        tracks = []
+    # ---- per-gate ion -> site tables (SAME assignment as the seed) ------
+    def anc_sites(t):
+        xs = x_side_at(t)
+        zs = other_side(xs)
+        out = {}
         for g in range(n_half):
-            q = left_mover + g
-            _, r, c = posn[q]
-            tracks.append((q, [("J", r, c - 1), ("U", r, c - 1)]))
-        run_concurrent(tracks)
-        # 2) right-movers slide +2 columns
-        tracks = []
-        for g in range(n_half):
-            q = right_mover + g
-            _, r, c = posn[q]
-            tracks.append((q, lane_steps(r, c, c + 2)))
-        run_concurrent(tracks)
-        # 3) left-movers descend and settle 2 columns left of their old site
-        tracks = []
-        for g in range(n_half):
-            q = left_mover + g
-            _, r, c = posn[q]          # at U(r, c) with c = old_col - 1
-            tracks.append((q, [("J", r, c), ("S", r, c),
-                               ("J", r, c - 1), ("S", r, c - 1)]))
-        run_concurrent(tracks)
-        x_side, z_side = z_side, x_side
+            i, j = divmod(g, m_ring)
+            i2, j2 = cell(pos(i + ex[t][0], j + ex[t][1]))
+            out[XANC0 + g] = ("S", anc_row(i2), side_col(j2, xs))
+            i2, j2 = cell(pos(i - ez[t][0], j - ez[t][1]))
+            out[ZANC0 + g] = ("S", anc_row(i2), side_col(j2, zs))
+        return out
 
-    # ---- vertical realign (medium ring), both species concurrent -------
-    def v_phase(dX_i, dZ_i):
-        tracks = []
-        commits = []
-        for anc0, cur_pos, side, di in ((XANC0, x_pos, lambda: x_side, dX_i),
-                                        (ZANC0, z_pos, lambda: z_side, dZ_i)):
-            if di % l_ring == 0:
-                continue
-            dv = di % l_ring
-            dvs = dv if dv <= l_ring - dv else dv - l_ring
-            moved = []
-            for g in range(n_half):
-                p = cur_pos[g]
-                i, j = cell(p)
-                i2 = (i + dv) % l_ring
-                p2 = i2 * m_ring + j
-                moved.append((g, p2))
-                c = side_col(j, side())
-                r1, r2 = anc_row(i), anc_row(i2)
-                if (i + dvs) % l_ring == i2 and 0 <= i + dvs < l_ring:
-                    tracks.append((anc0 + g, vpath(c, r1, r2)))     # main
-                else:
-                    lane = c + 1                                     # wrap
-                    path = [("J", r1, c), ("S", r1, lane), ("J", r1, lane)]
-                    if r2 > r1:
-                        for r in range(r1, r2):
-                            path += [("D", r, lane), ("U", r + 1, lane),
-                                     ("J", r + 1, lane)]
-                    else:
-                        for r in range(r1, r2, -1):
-                            path += [("U", r, lane), ("D", r - 1, lane),
-                                     ("J", r - 1, lane)]
-                    path += [("S", r2, lane), ("J", r2, c), ("S", r2, c)]
-                    tracks.append((anc0 + g, path))
-            commits.append((cur_pos, moved))
-        run_concurrent(tracks)
-        for cur_pos, moved in commits:
-            for g, p2 in moved:
-                cur_pos[g] = p2
-
-    # ---- horizontal realign (short ring), Fig.-61 embedded shift -------
-    def h_phase(anc0, cur_pos, side, other0, dj):
-        if dj % m_ring == 0:
-            return
-        djp = dj % m_ring
-        djs = djp if djp <= m_ring - djp else djp - m_ring
-        # other species hides UP in its own legs for the duration
-        run_concurrent([(other0 + g,
-                         [("J", posn[other0 + g][1], posn[other0 + g][2]),
-                          ("U", posn[other0 + g][1], posn[other0 + g][2])])
-                        for g in range(n_half)])
-        wrap, main = [], []
-        for g in range(n_half):
-            p = cur_pos[g]
-            i, j = cell(p)
-            j2 = (j + djp) % m_ring
-            if (j + djs) % m_ring == j2 and 0 <= j + djs < m_ring:
-                main.append((g, i, j, j2))
-            else:
-                wrap.append((g, i, j, j2))
-        # 1) wrap group hides UP at its own J
-        run_concurrent([(anc0 + g,
-                         [("J", anc_row(i), side_col(j, side)),
-                          ("U", anc_row(i), side_col(j, side))])
-                        for g, i, j, _ in wrap])
-        # 2) main group slides to its targets, then hides DOWN there
-        run_concurrent([(anc0 + g,
-                         lane_steps(anc_row(i), side_col(j, side),
-                                    side_col(j2, side)))
-                        for g, i, j, j2 in main])
-        run_concurrent([(anc0 + g,
-                         [("J", anc_row(i), side_col(j2, side)),
-                          ("D", anc_row(i), side_col(j2, side))])
-                        for g, i, j, j2 in main])
-        # 3) wrap group crosses the emptied rail to its targets
-        tracks = []
-        for g, i, j, j2 in wrap:
-            r = anc_row(i)
-            c1, c2 = side_col(j, side), side_col(j2, side)
-            tracks.append((anc0 + g, [("J", r, c1), ("S", r, c1)]
-                          + lane_steps(r, c1, c2)))
-        run_concurrent(tracks)
-        # 4) main group re-emerges
-        run_concurrent([(anc0 + g,
-                         [("J", anc_row(i), side_col(j2, side)),
-                          ("S", anc_row(i), side_col(j2, side))])
-                        for g, i, j, j2 in main])
-        # other species re-emerges
-        run_concurrent([(other0 + g,
-                         [("J", posn[other0 + g][1], posn[other0 + g][2]),
-                          ("S", posn[other0 + g][1], posn[other0 + g][2])])
-                        for g in range(n_half)])
-        for g, i, j, j2 in wrap + main:
-            cur_pos[g] = i * m_ring + j2
-
-    def realign(gp):
-        if gp["flip"]:
-            flip_sides()
-        v_phase(gp["dX"][0], gp["dZ"][0])
-        h_phase(XANC0, x_pos, x_side, ZANC0, gp["dX"][1])
-        h_phase(ZANC0, z_pos, z_side, XANC0, gp["dZ"][1])
-
-    # ---- gating --------------------------------------------------------
-    def gate_round(t):
+    def required_pairs(t):
         f = fam[t]
-        pairs = []   # (data_qid, anc_qid, data_row, anc_row)
+        pairs = []
         for g in range(n_half):
             i, j = divmod(g, m_ring)
             if f == "A":
@@ -304,45 +144,119 @@ def build_embedding_and_shuttle(spec):
                 zd = DATA0 + pos(i - ez[t][0], j - ez[t][1])
             pairs.append((xd, XANC0 + g))
             pairs.append((zd, ZANC0 + g))
-        # data hop one row to the ancilla row (4 moves), stop on the J
-        tracks = []
-        for dq, aq in pairs:
-            _, dr, c = posn[dq]
-            _, ar, _ = posn[aq]
-            path = vpath(c, dr, ar)[:-1]
-            tracks.append((dq, path))
-        run_concurrent(tracks)
-        timeline.append({"t": "merge", "pairs": [[dq, aq] for dq, aq in pairs]})
-        for dq, aq in pairs:
-            del occupied[posn[dq]]
-            posn[dq] = posn[aq]
-        timeline.append({"t": "gate", "round": t})
-        split_pairs = [[dq, ["J", posn[aq][1], posn[aq][2]]] for dq, aq in pairs]
-        timeline.append({"t": "split", "pairs": split_pairs})
-        for (dq, aq), sp in zip(pairs, split_pairs):
-            posn[dq] = tuple(sp[1])
-            occupied[posn[dq]] = dq
-        # return hop
-        tracks = []
-        for dq, aq in pairs:
-            home = layout["data"][dq - DATA0]
-            _, dr, c = home
-            path = vpath(c, posn[aq][1], dr)[1:]
-            tracks.append((dq, path))
-        run_concurrent(tracks)
+        return pairs
 
-    # ---- assemble one SEC ----------------------------------------------
-    timeline.append({"t": "prep",
-                     "ancillas": [XANC0 + g for g in range(n_half)]
-                     + [ZANC0 + g for g in range(n_half)]})
+    # ---- router state ---------------------------------------------------
+    static = set(posn[q] for q in range(BEAC0, RES0 + spec["n_reservoir"]))
+    live = {q: posn[q] for q in range(N_SIM)}
+    home = dict(live)
+    # data rest sites: SOFT obstacles for the ancilla routes.  With the
+    # beacons they fill the even rows, so honouring them keeps every ancilla
+    # route on the odd (ancilla) rails and the vertical ladders instead of
+    # wandering into beacon-bounded pockets.
+    parked = set(posn[DATA0 + i] for i in range(2 * n_half))
+    # FOOTPRINT: every fresh S site an ion ever stands on is a new trap zone.
+    # The ancilla rails (odd rows) are already in the footprint; the even
+    # (data/beacon) rows are not, so charge a small toll for using them as a
+    # horizontal short cut.
+    ZONE_TOLL = 28.0        # unused S site on a data row
+    RAIL_TOLL = 8.0         # unused S site on an ancilla row
+    rest = set(posn.values())
+    site_cost = dict((s, 8.0) for s in parked)
+    for r in range(ROWS):
+        for c in range(COLS):
+            s0 = ("S", r, c)
+            if s0 in rest:
+                continue
+            site_cost.setdefault(s0, ZONE_TOLL if r % 2 == 0 else RAIL_TOLL)
+    cache = {}
+    timeline = []
+
+    dbg = False
+
+    def transport(goals, paths=None, tag=""):
+        rounds = rt.plan_moves(live, goals, static, rows=ROWS, cols=COLS,
+                               paths=paths, site_cost=site_cost,
+                               field_cache=cache)
+        if dbg:
+            fl = max([rt.site_dist(live[q], goals[q], ROWS, COLS)
+                      for q in goals] or [0])
+            print(f"  [{tag}] rounds={len(rounds)} longest-single-ion={fl}")
+        rt.emit_moves(timeline, rounds)
+        rt.apply_rounds(rounds, live)
+        return len(rounds)
+
+    all_anc = ([XANC0 + g for g in range(n_half)]
+               + [ZANC0 + g for g in range(n_half)])
+    timeline.append({"t": "prep", "ancillas": all_anc})
+
     for t in range(n_rounds):
-        if t > 0:
-            realign(gaps[t - 1])
-        gate_round(t)
-    timeline.append({"t": "measure",
-                     "ancillas": [XANC0 + g for g in range(n_half)]
-                     + [ZANC0 + g for g in range(n_half)]})
-    realign(gaps[n_rounds - 1])   # wrap back to round-0 alignment
+        sites = anc_sites(t)
+        pairs = required_pairs(t)
+        dgoal = {}
+        for dq, aq in pairs:
+            _k, r, c = sites[aq]
+            dgoal[dq] = ("J", r, c)
+        assert len(set(sites.values()) | set(dgoal.values())) == 140
+
+        if t == 0:
+            # from the layout the ancillas already stand on their round-0
+            # sites, so this gap is only the data ions' approach hop
+            transport(dgoal, tag=f"gap{t}")
+        else:
+            # The 70 data ions sit on ancilla-row junctions and chop every
+            # rail, so they must clear out for the ancilla journey.  Give them
+            # an explicit route "home, idle, back" whose idle window is sized
+            # by a dry run, so their 8 rounds hide inside the ancillas' journey
+            # instead of costing a separate phase.  If that does not actually
+            # come out shorter, fall back to the two-phase emission.
+            outp, backp, n_out, n_back = {}, {}, 0, 0
+            for dq, gsite in dgoal.items():
+                outp[dq] = rt.shortest_path(live[dq], home[dq], ROWS, COLS,
+                                            static)
+                backp[dq] = rt.shortest_path(home[dq], gsite, ROWS, COLS,
+                                             static)
+                n_out = max(n_out, len(outp[dq]))
+                n_back = max(n_back, len(backp[dq]))
+            park = dict(sites)
+            dry = rt.plan_moves(live, park, static, rows=ROWS, cols=COLS,
+                                paths=outp, site_cost=site_cost,
+                                field_cache=cache)
+            merged = None
+            wait = len(dry) - n_out - n_back
+            if wait >= 0:
+                mp = {dq: outp[dq] + [None] * (len(dry) - len(outp[dq])
+                                               - len(backp[dq])) + backp[dq]
+                      for dq in dgoal}
+                try:
+                    merged = rt.plan_moves(
+                        live, park, static, rows=ROWS, cols=COLS, paths=mp,
+                        site_cost=site_cost, field_cache=cache,
+                        max_rounds=len(dry) + n_back - 1)
+                except rt.RouteError:
+                    merged = None
+            if merged is not None and len(merged) < len(dry) + n_back:
+                rt.emit_moves(timeline, merged)
+                rt.apply_rounds(merged, live)
+                if dbg:
+                    print(f"  [gap{t}] rounds={len(merged)} "
+                          f"(two-phase would be {len(dry) + n_back})")
+            else:
+                rt.emit_moves(timeline, dry)
+                rt.apply_rounds(dry, live)
+                transport(dgoal, tag=f"gap{t}b(fallback {len(dry)}+)")
+
+        timeline.append({"t": "merge", "pairs": [[dq, aq] for dq, aq in pairs]})
+        timeline.append({"t": "gate", "round": t})
+        timeline.append({"t": "split",
+                         "pairs": [[dq, ["J", sites[aq][1], sites[aq][2]]]
+                                   for dq, aq in pairs]})
+        # merge + split are a no-op on router state: every data ion leaves the
+        # junction it merged from and returns to exactly that junction.
+        if t == n_rounds - 1:
+            timeline.append({"t": "measure", "ancillas": all_anc})
+
+    transport(home, tag="wrap")   # cyclicity: everyone back on its layout site
 
     return {
         "grid": {"rows": ROWS, "cols": COLS},

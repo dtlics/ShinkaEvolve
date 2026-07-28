@@ -21,6 +21,7 @@ See [DESIGN.md](DESIGN.md) for the design rationale and background primer.
 | `initial_folded.py` | Seed B (EVOLVE-BLOCK): the *folded* 2D embedding — cells of 3 rows (data-L / ancillas / data-R), family change = ±2-column side flip (no block swaps), per-column vertical conveyors with lane-column wraps, Fig.-61 embedded shifts per row. Boots at **+1.296**. |
 | `initial_evolved.py` | Seed C (EVOLVE-BLOCK): run `q70ring_v2`'s best evolved program with its cell pitch repaired 3→4 (evolution had compressed it to win the then-broken zone term, which aliased the X/Z wrap lanes and forced an X-then-Z sequential fallback). 676 → **566 rounds**, boots at **+1.711** — above anything either run produced. Carries a hard assert on wrap-lane disjointness. |
 | `evaluate.py` | Immutable oracle: exact plan compiler/validator, POC + noise-exposure accounting, stim noiseless-determinism check, deterministic seed-anchored score. Also hosts the certification-only circuit builder + BP-OSD sampler. |
+| `routing.py` | **Shared, NON-evolved parallel round packer** — the plumbing every candidate gets for free. `plan_moves(starts, targets, blocked, ...)` finds routes and packs them into near-minimal collision-free rounds (prioritised planning, per-ion stalls, cycle rotation in one round, shove-aside, soft site costs); `route()` schedules caller-supplied paths; `to_timeline`/`emit_moves` emit the evaluator's phase format; `check_rounds` re-validates. `python routing.py` runs its self-test. Two runs and 175 evolved programs never escaped serial routing on their own — this removes that failure mode so the search can spend itself on geometry. |
 | `certify.py` | Out-of-loop head-to-head: re-runs a candidate in a fresh process and measures real Monte-Carlo LER at chosen p (BP-OSD), tabled against the paper's published Q70 numbers. |
 | `qecc/q70.json` | Pinned code assets (Hx/Hz supports, symplectic logical pairs, schedule), generated + verified by `make_code_assets.py`. |
 | `selfcheck.py` | Dev driver: seed build → compile → determinism → scoring-path → invalid-plan probe battery → optional `--ler`. |
@@ -118,15 +119,19 @@ BP-OSD costs ~0.1–4 s/shot (certification-only), eval ≈ 1–2 s, zero score 
 
 ## Seed calibration and the honest paper bar (measured under score v3)
 
-| plan | rounds | rail sections | T_SEC | var_exp | rounds/floor | score |
-|---|---|---|---|---|---|---|
-| `initial.py` unfolded (anchor) | 1012 | 428 | 66.65 | 73.22 | 1.36x | **0.000** |
-| `initial_folded.py` | 700 | 289 | 51.05 | 51.38 | 2.10x | **+1.296** |
-| `initial_evolved.py` (shipped best) | 566 | **288** | 44.35 | 42.00 | 1.72x | **+1.711** |
-| paper Q70 + our cyclicity tax | 502 | 288 | — | — | — | **+1.939** |
-| paper Q70 as published (Table XXVI) | 424 | ~288 | 34.2 micro | — | — | +2.253 |
-| evolved layout at 1.2x its floor | 395 | 288 | — | — | 1.20x | +2.383 |
-| evolved layout floor-perfect | 329 | 288 | — | — | 1.00x | +2.712 |
+| plan | rounds | rail sections | T_SEC | rounds/floor | score |
+|---|---|---|---|---|---|
+| `initial.py` unfolded (anchor) | 1012 | 428 | 66.65 | 1.36x | **0.000** |
+| `initial_folded.py` (routed) | 455 | 292 | 38.80 | 1.37x | **+2.103** |
+| **`initial_evolved.py` (routed, best)** | **419** | **301** | **37.00** | **1.27x** | **+2.212** |
+| paper Q70 + our cyclicity tax | 502 | ~288 | — | — | +1.939 |
+| paper Q70 as published (Table XXVI) | 424 | ~288 | 34.2 micro | — | +2.253 |
+| evolved layout floor-perfect | 329 | 301 | — | 1.00x | +2.65 |
+| CRT geometry, analytic rotation cost | ~194+gating | — | — | — | — |
+
+Pre-router history for reference: the same two layouts cost 700 and 566 rounds
+when each seed emitted its own movement rounds (+1.296 / +1.711), and run
+q70ring_v2's best evolved plan was 676 (+1.651).
 
 **Read the bar as +1.94, not +2.25.** Two documented asymmetries, both audited
 against the paper (Sec. XIX–XX, Tables XI/XXVI):
@@ -148,10 +153,10 @@ against the paper (Sec. XIX–XX, Tables XI/XXVI):
   hop; the paper's only numeric vertical statement (p. 85) implies ~3. Untested,
   so not corrected for — it makes our bar, if anything, more conservative.
 
-**The footprint race is already won:** the evolved seed occupies 288 rail
-sections against the paper's ~288. All remaining headroom is transport rounds,
-and specifically routing parallelism — 566 vs a 329-round distance floor on the
-*same* layout.
+**Both races against the paper are now won by the shipped seed** — 419 rounds
+vs 424 as-published (352 vs 424 like-for-like), at 301 rail sections vs ~288.
+The open problem has moved: routing slack is down to 1.27x floor, so the next
+gains must come from a layout whose *floor* is lower (see the CRT row).
 
 ## Head-to-head protocol
 
@@ -217,11 +222,15 @@ and specifically routing parallelism — 566 vs a 329-round distance floor on th
 
 ## THE OBJECTIVE, IN ONE LINE
 
-Every plan's own distance floor is printed in its feedback. **The whole remaining
-gap is `rounds_over_floor`** — the shipped seed runs at 1.72x (566 vs 329) and a
-mere 1.2x would beat IonQ's published design outright. Chase parallelism (mean
-ions moved per round, currently ~32 of 140), not footprint (already at paper
-parity), and not new layouts (the existing floors are already below the paper).
+**The shipped seed already beats the published design — now push past it by
+changing the GEOMETRY.** `initial_evolved.py` runs the SEC in **419 transport
+rounds** vs IonQ's 424 (352 vs 424 like-for-like, see below), at 1.27x its own
+distance floor. Routing plumbing is solved and shared (`routing.py`), so the
+open problem is the *layout*: the floor itself is a property of the embedding,
+and a CRT/sheared-torus geometry (l=7, m=5 coprime ⇒ the ring torus is Z₃₅, so
+every realignment becomes ONE 1-D rotation instead of two per-axis passes) has
+an analytic rotation cost near **194 rounds**. Move the floor, and the router
+will follow it down.
 
 ## Run playbook (binding lessons from runs q70ring_v1 $30 and q70ring_v2 $50)
 
@@ -236,7 +245,8 @@ seeds/score).
    **`task.init_program_paths` = [`initial.py`, `initial_folded.py`,
    `initial_evolved.py`]** (NOT the single-seed key — v1 ran single-seed and
    burned 5 of 7 windows re-deriving the folded seed); `task.language: "python"`;
-   `eval_time: 00:05:00`; `db_config.num_islands: 4-6`;
+   **`eval_time: 00:30:00`** (see "Builders may search" below);
+   `db_config.num_islands: 4-6`;
    **`db_config.migration_rate: 0.05`** with a finite `migration_interval` — v1
    ran migration 0 and two islands starved. But **exempt a newly spawned island
    from migration for a few generations**: in v2 a grounded CRT family got
@@ -265,9 +275,21 @@ seeds/score).
    rounds; exploit that a closed-loop rotation advances every ion in the same
    round; insert per-ion stalls rather than aborting a pass), then layout;
    point at the slack map and the parallelism line as the two things to move;
-   runtime caution = deterministic pure-Python `run_experiment` under 30 s.
-   **Do NOT quote "beat 424"** — name the plan's own floor and the +1.94
-   like-for-like paper bar instead (see the calibration table).
+   runtime = see "Builders may search" below.
+   **Do NOT quote "beat 424" as the target** — the shipped seed already does.
+   Name the plan's own floor, and the CRT geometry hypothesis, as the target.
+
+5b. **BUILDERS MAY SEARCH (changed after run v2).** Earlier runs told candidates
+   to build the plan fast and "avoid brute-force search", and evaluation took
+   ~1–2 s — so every candidate was a one-shot constructive heuristic. The budget
+   is now **30 minutes per evaluation** (the routed seeds build in 15–20 s, so
+   there are ~100x headroom). Say so explicitly in `task_sys_msg`: a builder MAY
+   run a real optimizer — search over layout parameters, anneal the ion→site
+   assignment, try several geometries and keep the cheapest, tune the router's
+   knobs per gap, or re-plan a gap several ways and pick the best. It must stay
+   deterministic (no wall-clock or RNG-seed dependence on run order) and must
+   finish inside the budget. This is the single biggest widening of the design
+   space available, and it is unexplored.
 6. **Two known unexploited assets**, both from v2's archive: (a) the **CRT
    sheared-torus** layout — since l=7 and m=5 are coprime the ring torus is
    Z_35, so every realignment collapses to ONE 1-D rotation instead of two

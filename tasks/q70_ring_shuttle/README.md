@@ -333,6 +333,15 @@ seeds/score).
    from migration for a few generations**: in v2 a grounded CRT family got
    immigrants within one window, whose scores then masked the family's real
    state until it died with one child.
+1b. **Patch mix — changed by the router inlining.** The two strong seeds are now
+   ~49 KB / ~1160 lines each (the router lives in the evolve block). A `full`
+   rewrite therefore means emitting 1100+ lines, which is slow, expensive and
+   error-prone. Set `evo.patch_type_probs` diff-heavy — e.g.
+   `["diff","full","cross","fix"]` at `[0.72, 0.13, 0.10, 0.05]` (v2 used 0.55
+   diff / 0.30 full on 300-line seeds). The three SECTION banners exist so a
+   diff can rewrite one section without touching the others; say so in
+   `task_sys_msg`.
+
 2. **Model arms**: v1's bandit worked with
    `["azure-gpt-5.4-mini@low", "azure-gpt-5.3-codex@medium", "azure-gpt-5.5@medium"]`
    after the warmup demoted mini from @medium (23.7 min/$0.37 for zero gain at

@@ -1,8 +1,150 @@
 # How a solution is built, and how it compares to the paper
 
-Plain-language companion to README.md. Part 1 explains the stages a candidate
-goes through; Part 2 is the head-to-head against IonQ's published Q70 design
-with every comparability caveat stated; Part 3 is what we actually found.
+Plain-language companion to README.md. **Part 0 defines every term from
+scratch** — read it first if "SEC", "ancilla" or "floor" are not already
+familiar. Part 1 explains the stages a candidate goes through; Part 2 is the
+head-to-head against IonQ's published Q70 design with every comparability caveat
+stated; Part 3 is what we actually found.
+
+---
+
+## Part 0 — The vocabulary, from zero
+
+### Why a quantum computer needs a heartbeat
+
+Quantum data is fragile and you are not allowed to look at it — measuring a data
+qubit destroys the information you are storing. So error correction works
+indirectly. You keep **data qubits** (the ones holding the information) and add
+**ancilla qubits** (helpers). Each ancilla is wired to touch a handful of data
+qubits, and then the *ancilla* — not the data — is measured. Its outcome tells
+you "something went wrong near here" without revealing what the data is.
+
+Errors never stop happening, so you must repeat this forever. One complete
+sweep, in which **every ancilla checks its assigned data qubits once and is then
+measured**, is called a **syndrome extraction cycle** — **SEC** for short. It is
+the heartbeat of the machine. Everything in the architecture is priced in SECs:
+in IonQ's paper, one logical operation costs some number of SECs, so a shorter
+SEC makes the entire computer proportionally faster.
+
+**"Syndrome"** is just the name for the pattern of ancilla measurement outcomes —
+the error report.
+
+### The Q70 code, concretely
+
+Q70 is one specific error-correcting code, written `[[70, 6, 9]]`:
+
+- **70 data qubits** — the physical qubits holding information
+- **6 logical qubits** — what those 70 actually store, error-protected
+- **distance 9** — it takes at least 9 things going wrong to cause an
+  uncorrectable error
+
+It also uses **70 ancillas** (35 checking for one error type, 35 for the other),
+**70 beacons** (extra ions parked next to data qubits to detect ion loss — in our
+model they never move, they are just obstacles), and a **10-ion reservoir** of
+spares. **220 ions in total**, all sitting on one chip.
+
+The 70 data qubits are labelled by two coordinates that wrap around: `i` from 0
+to 6 (7 values) and `j` from 0 to 4 (5 values), giving 7 × 5 = 35 positions, in
+two blocks → 70. Those wrap-around coordinates are the "rings" in the task name.
+
+### The 7-round schedule — yes, this is the syndrome-extraction schedule
+
+Each ancilla in Q70 must touch **7 different data qubits** per cycle (that is what
+"check weight 7" means). An ancilla can only do one two-qubit gate at a time, so
+it cannot touch all 7 at once. Instead the cycle is split into **7 rounds**: in
+round 1 every ancilla touches its 1st assigned partner, in round 2 its 2nd, and
+so on.
+
+**The order matters** — a different order spreads errors differently — so IonQ
+searched for a good one and published it (their Table X). **We freeze exactly
+that published order.** So yes: the "7-round schedule" *is* the syndrome
+extraction schedule for the Q70 BB code, taken verbatim from the paper.
+
+Crucially, the schedule is pure mathematics. It says *which ancilla must touch
+which data qubit in which round* — and nothing about where anything is or how it
+gets there. That gap is the entire task.
+
+### Why the ions have to travel
+
+On a trapped-ion QCCD chip there are no wires. Two qubits can interact **only if
+they are physically brought into the same little trap and merged into one well**.
+So a two-qubit gate is really: bring the two ions together → **merge** the wells →
+fire the laser/RF gate → **split** them back apart.
+
+That means between round *t* and round *t+1*, every ancilla must physically
+*travel* across the chip to reach its next partner. **That travel is what this
+task optimises.**
+
+Two more chip facts that constrain the layout:
+
+- **Optical rows.** Preparing and measuring an ion needs laser access, which
+  exists only on every other row. Ancillas must be standing on one of those rows
+  when they are prepared and when they are measured.
+- **The grid.** The chip is rails (`S` sites, where ions rest) joined by junctions
+  (`J`), with short parking stubs above and below each junction (`U`/`D`). Moving
+  one position sideways costs 2 steps; moving one row up or down costs 5.
+
+### The two units of cost
+
+- A **transport round** is one parallel movement beat: *any number of ions each
+  slide one step at the same time*. One ion moving costs exactly as much as 140
+  ions moving — which is why packing ions into shared rounds is the whole game.
+- A **POC** ("physical operation cycle") is the time of one layer of quantum
+  operations — a gate layer, a measurement — about 200 µs. A transport round is
+  much cheaper: 1/20 of a POC, about 10 µs.
+
+So: `SEC time = (transport rounds)/20 + (number of gate/prep/measure layers)`,
+measured in POC.
+
+### The "floor" — the key idea in this whole task
+
+Between two consecutive gate rounds, every ion has somewhere it must be. Work out
+how many steps each individual ion needs, and take **the largest one**. That
+single number is the *minimum* possible number of transport rounds for that gap:
+even if everything else were perfectly organised, that one unlucky ion still has
+to take all of its steps, one per round.
+
+Add those minimums over all 7 gaps (plus the walk home at the end) and you get the
+plan's **distance floor** — the fewest transport rounds this layout could *ever*
+use.
+
+> **Analogy.** 140 people in a hall must each move to a new seat, everyone
+> stepping simultaneously on a drumbeat. If the person with the longest walk needs
+> 46 steps, the reshuffle takes **at least** 46 beats — no matter how brilliantly
+> you choreograph it. That 46 is the floor for that reshuffle.
+
+Two consequences that drive everything below:
+
+1. **The floor is set purely by *where you put things*** — the layout. Change the
+   layout and the floor changes.
+2. **Routing can never beat the floor**; it only decides whether you pay 1× it or
+   3× it. Our folded layout has a gap whose floor is 46 rounds and originally
+   spent 102 on it — that 56-round difference was pure disorganisation.
+
+### CRT — the promising idea we have not exploited yet
+
+**CRT** = the Chinese Remainder Theorem, an old piece of arithmetic. The version
+that matters here:
+
+The data qubits are labelled `(i, j)` on a 7 × 5 wrap-around grid. Because **7 and
+5 share no common factor**, you can relabel every one of those 35 cells with a
+*single* number 0…34 arranged so that "step once in the i direction" and "step
+once in the j direction" both become "**move along one ring by a fixed amount**".
+
+Why we care: the movement between gate rounds is always "shift everything by
+`di` in the i direction *and* `dj` in the j direction". Our current layouts do
+that as **two separate passes** — shuffle rows, then shuffle columns — and pay for
+both. With the CRT relabelling, both collapse into **one single rotation** of a
+35-position ring.
+
+> **Analogy.** Instead of a grid where you walk up-down and then left-right,
+> thread all 35 seats onto one necklace in a clever order. Then any required
+> reshuffle is just "rotate the necklace by *k*" — one motion, everybody moving
+> together, no second pass.
+
+Arithmetic on the actual Q70 schedule says all seven rotations total **~194
+rounds**, against our current best layout's 329-round floor. That is the single
+biggest unexploited idea in the task.
 
 ---
 
@@ -13,15 +155,20 @@ Everything below happens inside one candidate program, which is handed a `spec`
 
 ### Stage 0 — What is GIVEN, and never changes
 
-The code (Q70 = [[70,6,9]]) and its 7-round syndrome schedule are frozen. Together
-they say, in pure math with no hardware in sight:
+The code (Q70 = [[70,6,9]]) and its 7-round syndrome-extraction schedule — the
+paper's published Table X — are frozen. Together they say, in pure math with no
+hardware in sight:
 
 > in gate round *t*, ancilla *g* must touch data qubit *f(g,t)*
 
 for all 70 ancillas and all 7 rounds. That is the *only* requirement. Nothing in
-it mentions positions, movement or time. Every candidate must satisfy exactly
-this, so every candidate runs a byte-identical quantum circuit with the same code
-distance. **This is why the task is a pure hardware-mapping problem.**
+it mentions positions, movement or time.
+
+Every candidate must satisfy exactly this, so every candidate ends up running a
+byte-identical quantum circuit with the same error-correcting power. **Two plans
+differ only in where the ions live and how they walk** — which is why this is a
+pure hardware-mapping problem, and why fidelity barely moves between plans while
+speed and chip area move a lot.
 
 ### Stage 1 — GEOMETRY: map the rings onto the chip *(SECTION 1 of each seed)*
 
@@ -32,12 +179,12 @@ This is the "ring → hardware" mapping. The code's qubits are indexed by three
 cyclic rings; a layout chooses how those rings become rows, columns and junction
 legs — folded into 3-row cells, spread on a line, sheared, etc.
 
-**What Stage 1 decides: the DISTANCE FLOOR.** Once you fix where things are, you
-have fixed how far each ion must travel between consecutive gate rounds. Take the
-longest single-ion journey in each gap and add them up — that is the minimum
-number of transport rounds any router could ever achieve on that layout. The
-evaluator computes and reports it as `floor_total` (currently 329 for the pitch-4
-cell layout, 333 for the folded one).
+**What Stage 1 decides: the DISTANCE FLOOR** (defined in Part 0). Once you fix
+where things are, you have fixed how far each ion must travel between
+consecutive gate rounds — so you have fixed the minimum number of transport
+rounds any router could ever achieve on that layout. The evaluator computes it
+and reports it as `floor_total`: **329** for the pitch-4 cell layout, **333** for
+the folded one.
 
 > A better layout is the *only* way to lower the floor. No amount of clever
 > movement can beat it.
@@ -58,13 +205,28 @@ floor; it decides whether you pay 1.0× it or 2.8× it. Reported as
 
 > This is the stage everyone underestimated. See Part 3.
 
-### Stage 3 — ASSEMBLY: stitch one complete cycle *(SECTION 3)*
+### Stage 3 — ASSEMBLY: write out the actual cycle, in order *(SECTION 3)*
 
-Put it together in the order physics demands: prepare all 70 ancillas (only on
-"optical" rows) → for each of the 7 gate rounds { move into place, merge each
-data–ancilla pair into one trap well, fire the gate, split them apart } →
-measure all ancillas → **move everything back home** so the next cycle can start
-identically (the "wrap-back", ~67 rounds).
+This is the least glamorous stage and the easiest to misread: it is not an
+algorithm, it is the **"main program"** of the plan. Stage 1 knows *where* things
+go, Stage 2 knows *how to move them* — Stage 3 calls them in the right order and
+writes down the resulting list of phases. In full, one SEC is:
+
+```
+1.  PREP        reset all 70 ancillas          (they must be on optical rows)
+2.  for t = 0..6:                              ← the 7 schedule rounds
+      a. MOVE   route every ion to its round-t partner   ← calls Stage 2
+      b. MERGE  fuse each data+ancilla pair into one trap well
+      c. GATE   fire the two-qubit gate on all 70 pairs at once
+      d. SPLIT  pull each pair back apart
+3.  MEASURE     read out all 70 ancillas       (optical rows again)  → the syndrome
+4.  WRAP-BACK   route every ion home           ← calls Stage 2, ~67 rounds
+```
+
+Step 4 exists because the next cycle must start from the same arrangement — the
+heartbeat has to repeat identically forever. That "walk home" is real work we
+pay for and, as Part 2 explains, is one of the two places our rules are stricter
+than the paper's.
 
 ### Stage 4 — The EVALUATOR scores it (not part of the candidate)
 

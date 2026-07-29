@@ -345,11 +345,27 @@ def build_embedding_and_shuttle(spec):
     timeline.append({"t": "measure",
                      "ancillas": [XANC0 + g for g in range(n_half)]
                      + [ZANC0 + g for g in range(n_half)]})
-    # wrap gap: restore round-0 alignment so the SEC tiles
+    # ---- wrap gap: make the SEC tile ------------------------------------
+    # Data ions are already home (each hops back after its gate round), and
+    # beacons/reservoir never move. The ancillas only have to restore their
+    # SPECIES' OCCUPIED SET, not each ion's own site: the residual is absorbed
+    # by relabelling the ancilla in software (the paper does exactly this --
+    # Alg. 1 line 2, p.30 -- and it is invisible to the circuit, which is keyed
+    # on the check index). Every realignment here is a UNIFORM ring rotation,
+    # which permutes the row's column set onto itself, so the only thing that
+    # can break the set is the BLOCK ROW: restore that, and nothing else.
     gp = gaps[n_rounds - 1]
     if gp["swap"]:
         block_swap()
-    realign_both(gp["dX"], gp["dZ"])
+    x_end = sorted(posn[XANC0 + g] for g in range(n_half))
+    z_end = sorted(posn[ZANC0 + g] for g in range(n_half))
+    if x_end != sorted(tuple(s) for s in layout["x_anc"]) or \
+            z_end != sorted(tuple(s) for s in layout["z_anc"]):
+        # a schedule whose residual is NOT a set-preserving permutation still
+        # has to be walked back the old way
+        realign_both(gp["dX"], gp["dZ"])
+        assert sorted(posn[XANC0 + g] for g in range(n_half)) == \
+            sorted(tuple(s) for s in layout["x_anc"]), "X wrap-back failed"
 
     return {
         "grid": {"rows": ROWS, "cols": COLS},

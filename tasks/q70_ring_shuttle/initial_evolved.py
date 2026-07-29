@@ -1,24 +1,27 @@
 """EVOLVED seed -- pitch-4 cell embedding + inlined parallel round packer.
 
-BEST SHIPPED PLAN: 421 transport rounds / 1.28x its own distance floor / score
-+2.2028. This is the first plan in this task to beat IonQ's published hand
-design: 421 vs their 424 rounds as-published, and 354 vs 424 on a like-for-like
-basis (subtracting the 67 wrap-back rounds our stricter cyclicity rule charges
-and theirs does not). Footprint 301 rail sections vs their ~288.
+BEST SHIPPED PLAN: 358 transport rounds / 1.58x its own distance floor / score
++2.2542, over 301 rail sections against the paper's ~288. IonQ's published hand
+design runs the same SEC in 424 rounds under the same chip model and the same
+cycle-boundary convention, so this is 16% fewer -- but read the slack ratio
+before celebrating: the floor of THIS layout is 226, so the plan is leaving 132
+rounds on the table, and the 2b banner names where most of them are.
 
 Lineage: run q70ring_v2's best evolved program -> cell pitch repaired 3->4
 (evolution had compressed it to win the then-broken footprint term, aliasing
 the X/Z wrap lanes and forcing an X-then-Z sequential fallback) -> the parallel
 round packer folded IN, so the routing algorithm now evolves alongside the
-geometry. 676 -> 566 -> 419 -> 421 rounds (the last step traded 2 rounds for a
-third of the build time; see ROUTER_ATTEMPTS).
+geometry. 676 -> 566 -> 419 -> 421 -> 358 rounds (the 419 -> 421 step traded 2
+rounds for a third of the build time, see ROUTER_ATTEMPTS; the last step is the
+corrected cycle-boundary rule, which stopped charging the ancillas a walk home
+nobody has to make).
 
 THE FILE IS THREE INDEPENDENT SECTIONS, each with its own banner listing what
 it owns and what a mutation could try. You can rewrite ONE of them without
 reading the other two:
 
   SECTION 1  GEOMETRY  grid size, where every ion rests, the per-gate-round
-                       ion -> site tables.  The layout's distance FLOOR (329
+                       ion -> site tables.  The layout's distance FLOOR (226
                        rounds here) is decided entirely here.
   SECTION 2  ROUTER    shortest paths, congestion pricing, and the round
                        packer (stalls, cycle rotation, shove-aside,
@@ -27,11 +30,13 @@ reading the other two:
   SECTION 3  ASSEMBLY  prep, the 7 merge/gate/split rounds, measure, the
                        cyclicity wrap-back, and the phase emission.
 
-WHERE THE REMAINING HEADROOM IS: 92 rounds of routing slack over this layout's
-floor, and the floor ITSELF is a property of the layout -- a CRT/sheared-torus
-embedding (l=7, m=5 coprime, so the ring torus is Z_35 and every realignment
-becomes ONE 1-D rotation) has an analytic rotation cost near 194 rounds. Both
-halves of that are now in this file.
+WHERE THE REMAINING HEADROOM IS: 132 rounds of routing slack over this
+layout's floor -- most of it because SECTION 2 walks a five-edge subgraph and
+never uses the chip's junction crossings, so every vertical hop costs it 5
+steps where the chip charges 3 (see the 2b banner) -- and the floor ITSELF is a
+property of the layout: a CRT/sheared-torus embedding (l=7, m=5 coprime, so the
+ring torus is Z_35 and every realignment becomes ONE 1-D rotation) collapses
+each realignment to a single pass. Both halves are in this file.
 """
 
 import heapq
@@ -65,9 +70,11 @@ from collections import deque
 # WHY PITCH 4 AND NOT 3: at pitch 3 the X and Z species' wrap lanes alias onto
 # shared columns, forcing an X-then-Z sequential fallback for half the rounds.
 #
-# WHAT THIS COSTS: this layout's per-gap distance floor totals 329 rounds and
-# the router realises 421 of them, over 301 rail sections.  The floor is a
-# property of the GEOMETRY ALONE, so it is the thing to attack here.
+# WHAT THIS COSTS: this layout's per-gap distance floor totals 226 rounds and
+# the router realises 358 of them, over 301 rail sections.  The floor is a
+# property of the GEOMETRY ALONE, so it is the thing to attack here -- but the
+# 132 rounds of slack above it are now the bigger term, and the 2b banner says
+# where most of them come from.
 #
 # WHAT A MUTATION COULD TRY HERE:
 #   * a CRT / sheared-torus embedding: l = 7 and m = 5 are coprime, so the ring
@@ -233,8 +240,9 @@ def build_geometry(spec):
 # (so dense trains pipeline and a closed loop of >=3 ions rotates in ONE
 # round), and only head-on swaps through a single edge are forbidden.  Emission
 # styles that route groups SEQUENTIALLY (per-axis passes, X-then-Z,
-# hide/slide/emerge) land at 1.7-2.8x the layout's distance floor; this lands
-# at ~1.28x.
+# hide/slide/emerge) land at 2.1-3.4x the layout's distance floor; this lands
+# at ~1.6x -- and most of what is left is the vertical shortcut the 2b banner
+# describes, which this packer does not use at all.
 #
 # Structure: 2a policy knobs | 2b grid primitives | 2c path finding |
 #            2d round packer | 2e entry points.
@@ -277,9 +285,11 @@ ROUTER_POLICY = {
 # the one that matters; four further settings were measured (opposed_cost 0 and
 # 12 at both radii) and NONE of them ever wins on either shipped layout, while
 # they triple the build time -- opposed_cost 0 in particular deadlocks outright.
-# Measured end-to-end here: these two give 421 rounds / 301 rail sections on
-# the pitch-4 cell layout and 446 / 287 on the folded one, against 419 / 301
-# and 455 / 292 for the six-setting portfolio, at a third of the build time.
+# Measured end-to-end here (under the v4 cycle-boundary rule): these two give
+# 358 rounds / 301 rail sections on the pitch-4 cell layout and 375 / 287 on
+# the folded one.  Under the older, stricter rule they gave 421 / 301 and
+# 446 / 287, against 419 / 301 and 455 / 292 for a six-setting portfolio, at
+# three times the build time.
 # Adding entries trades build time for rounds; a single entry is legitimate too
 # (it costs ~25 extra rail sections here).
 ROUTER_ATTEMPTS = (
@@ -305,10 +315,22 @@ _INF = float("inf")
 _WAIT = "__wait__"
 
 
-# --- 2b. GRID PRIMITIVES (must agree with evaluate.py exactly) --------------
-# One primitive transport step each:
+# --- 2b. GRID PRIMITIVES ---------------------------------------------------
+# The five edge families this router uses:
 #   S(r,c)-J(r,c) | J(r,c)-S(r,c+1) | J(r,c)-U(r,c) | J(r,c)-D(r,c)
 #   | D(r,c)-U(r+1,c)
+#
+# *** THESE ARE A SUBSET.  BIGGEST UNEXPLOITED LEVER IN THIS FILE. ***
+# The evaluator's junction is a ZERO-LENGTH CROSSING, so three MORE edges are
+# legal and this router simply never uses them:
+#   S(r,c+1)-U(r,c) | S(r,c+1)-D(r,c) | U(r,c)-D(r,c)
+# With them a one-row S->S hop costs 3 primitive steps (S(r,c) - D(r,c-1) -
+# U(r+1,c-1) - S(r+1,c)) instead of the 5 this router pays, and the evaluator's
+# distance FLOOR is computed on the full graph.  That single omission is most
+# of the gap between the floor and what this packer achieves: teach
+# `neighbors` and `site_dist` the three extra families and every vertical
+# journey gets ~40% shorter.  Both must be changed together -- `site_dist` is
+# the A* heuristic, and it must never over-estimate the true distance.
 
 def as_site(x):
     """Normalise ["S", r, c] / ("S", r, c) to a hashable tuple."""
@@ -379,12 +401,16 @@ def _portals(site, rows):
 def site_dist(a, b, rows=10 ** 9, cols=10 ** 9):
     """Exact obstacle-free graph distance between any two sites.
 
-    The per-ion journey lower bound, hence the A* heuristic AND the floor a
-    schedule is measured against.  Rows join only through the 3-step ladder
-    J(r,c)-D(r,c)-U(r+1,c)-J(r+1,c), available at every column, so a cross-row
-    journey costs 3*|dr| plus the horizontal key distance (or 2 when both ends
-    share an S column: you must step onto a junction and back).  On S-S pairs
-    this reproduces the evaluator's per-gap floor exactly.
+    The per-ion journey lower bound and the A* heuristic, computed on the
+    five-family subgraph `neighbors` walks (see the 2b banner).  There, rows
+    join only through the 3-step ladder J(r,c)-D(r,c)-U(r+1,c)-J(r+1,c), so a
+    cross-row journey costs 3*|dr| plus the horizontal key distance (or 2 when
+    both ends share an S column: you must step onto a junction and back).
+
+    It is therefore admissible for THIS router but LARGER than the evaluator's
+    own per-gap floor, which uses the chip's full edge set (2*|dr| + max(2*dc,
+    1) on S-S pairs).  Widening `neighbors` and matching this function to it is
+    the change that closes that gap.
     """
     a, b = as_site(a), as_site(b)
     if a == b:
@@ -1054,9 +1080,11 @@ def footprint_site_cost(rows, cols, occupied, parked, data_rows):
 # WHAT A MUTATION COULD TRY HERE:
 #   * overlap MORE: start the next gap's approach before the previous split,
 #     or let ancillas already in place set off early;
-#   * spread the wrap-back across the gate rounds instead of paying it in one
-#     block at the end (~16% of the rounds here, and the paper pays none of it
-#     -- it pipelines a second ancilla batch);
+#   * the wrap-back is now DATA-ONLY (4 rounds): each ancilla species need
+#     only restore its own occupied SET, which this geometry already does, so
+#     the ancillas do not walk home at all.  What is left to try is choosing
+#     the ancilla -> site assignment at the boundary so the NEXT cycle starts
+#     from a cheaper arrangement;
 #   * choose the merge SIDE per pair (data moves to ancilla, or the reverse)
 #     to halve the longest journey in a gap;
 #   * prep/measure in several smaller batches placed where they hide idle time;
@@ -1148,7 +1176,30 @@ def build_embedding_and_shuttle(spec):
         if t == n_rounds - 1:
             timeline.append({"t": "measure", "ancillas": list(anc_ids)})
 
-    transport(home)          # cyclicity: everyone back on its layout site
+    # ---- cycle boundary -------------------------------------------------
+    # Data (and the static beacons/reservoir) must end on their OWN layout
+    # site. Each ANCILLA SPECIES only has to restore its own occupied SET --
+    # the residual permutation is absorbed by relabelling the ancilla in
+    # software, which is what the paper itself does (Alg. 1 line 2, p.30) and
+    # is invisible to a circuit keyed on the check index. This geometry's last
+    # round already stands each species on its own site set, so only the data
+    # ions walk home; the greedy fallback keeps the builder correct for a
+    # schedule (or another code) whose residual is NOT set-preserving.
+    goals = {q: home[q] for q in geo["data_ids"]}
+    half = len(anc_ids) // 2
+    for species in (anc_ids[:half], anc_ids[half:]):
+        want = sorted(home[q] for q in species)
+        if sorted(live[q] for q in species) == want:
+            continue                     # set already restored -- no travel
+        free = list(want)
+        for q in sorted(species,
+                        key=lambda x: (-min(site_dist(live[x], s, rows, cols)
+                                            for s in want), x)):
+            pick = min(free, key=lambda s: (site_dist(live[q], s, rows, cols),
+                                            s))
+            free.remove(pick)
+            goals[q] = pick
+    transport(goals)
 
     return {
         "grid": {"rows": rows, "cols": cols},

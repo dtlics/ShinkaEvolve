@@ -9,8 +9,9 @@ occupies) plus a timeline of primitive phases (parallel transport rounds,
 merge/split rounds, gate layers, prep/measure batches) realizing one full SEC.
 This evaluator:
   1. compiles + validates the plan exactly (grid legality, collision freedom,
-     required data-ancilla alignments per schedule round, zone rules,
-     cyclicity, anti-teleport merge/split restrictions);
+     required data-ancilla alignments per schedule round, zone rules, the
+     cycle boundary — exact sites for data/beacon/reservoir, per-species site
+     SETS for the X and Z ancillas — anti-teleport merge/split restrictions);
   2. prices it in POC under the paper's moving-qubit model (Table III) and in
      NOISE EXPOSURE — the expected number of physical fault events per SEC,
      with p factored out (2q gate weight 1, prep/measure 1/10, idle 1/100 per
@@ -80,15 +81,21 @@ NC_SECS = 9            # number of SECs simulated (= d, paper convention)
 # under THIS evaluator (selfcheck.py prints all; that seed scores 0.0 by
 # construction; the folded seed initial_folded.py boots positive).
 FROZEN_EXPOSURE = 70.0 * 7 + 14.0   # 504: gates + prep/meas, identical for all
-SEED_VAR_EXPOSURE = 73.22           # unfolded seed's exposure - FROZEN_EXPOSURE
-SEED_T_CORE = 59.60                 # unfolded seed's t_core_poc (no LL overhead)
+# v4 anchors (2026-07-29): re-measured after the two grounded model
+# corrections — the chip's junction is a zero-length crossing (a one-row hop
+# costs 3 primitive steps, not 5) and the cycle boundary only requires each
+# ancilla SPECIES to restore its own occupied SET. The anchor seed went
+# 1012 -> 896 transport rounds under them; nothing else about it changed.
+SEED_VAR_EXPOSURE = 65.10           # unfolded seed's exposure - FROZEN_EXPOSURE
+SEED_T_CORE = 53.80                 # unfolded seed's t_core_poc (no LL overhead)
 SEED_ZONES = 428                    # v3: distinct RAIL SECTIONS (S sites) of
                                     # the anchor seed. Was 1612 when transit
                                     # vertices were counted too — that both
                                     # mis-compared against the paper's ~288
                                     # sections by ~3.7x and paid the search to
                                     # funnel traffic through few corridors.
-SHIPPED_SEED_SCORE = 2.2028  # best seed handed to the run (initial_evolved).
+                                    # Unmoved by the v4 corrections.
+SHIPPED_SEED_SCORE = 2.2542  # best seed handed to the run (initial_evolved).
                              # Reported per candidate as `gain_over_seed` so a
                              # run's own contribution is separable from what it
                              # was given. Update whenever the seeds change.
@@ -168,13 +175,47 @@ _REQUIRED = [required_pairs(t) for t in range(N_ROUNDS)]
 _REQUIRED_SETS = [frozenset((a, d) for a, d, _ in rp) for rp in _REQUIRED]
 
 # ----------------------------------------------------------------------------
-# Grid model
+# Grid model  (CORRECTED 2026-07-29 against Fig. 62's well census -- see below)
 # ----------------------------------------------------------------------------
-# Sites: ("S", r, c) rail section; ("J", r, c) junction node between S(r,c) and
-# S(r,c+1); ("U", r, c) leg stub above J(r,c); ("D", r, c) leg stub below J(r,c).
+# Every node is a POTENTIAL WELL, and one edge = one primitive transport step
+# (a well-to-well hop).  The chip's own census, read off Fig. 62's vector
+# content, is: exactly TWO wells per horizontal rail section, exactly TWO wells
+# per vertical section, and NO well at a junction -- a junction is a
+# ZERO-LENGTH CROSSING, so the (up to four) wells around it are mutually one
+# step apart.  Nodes:
+#   ("S", r, c)  left  well of horizontal section (r,c)
+#   ("J", r, c)  right well of horizontal section (r,c)  [junction-adjacent]
+#   ("D", r, c)  upper well of the vertical section below junction (r,c)
+#   ("U", r, c)  lower well of the vertical section above junction (r,c)
+# so junction (r,c) is surrounded by the four wells J(r,c), S(r,c+1), U(r,c),
+# D(r,c), which form a CLIQUE, and the vertical section between rows r and r+1
+# at column c carries exactly the two wells D(r,c), U(r+1,c).
 # Edges (1 primitive transport step each):
-#   S(r,c)-J(r,c) ; J(r,c)-S(r,c+1) ; J(r,c)-U(r,c) ; J(r,c)-D(r,c) ;
-#   D(r,c)-U(r+1,c)
+#   inside a horizontal section : S(r,c)-J(r,c)
+#   inside a vertical section   : D(r,c)-U(r+1,c)
+#   across the junction (r,c)   : J(r,c)-S(r,c+1) ; J(r,c)-U(r,c) ;
+#                                 J(r,c)-D(r,c)   ; S(r,c+1)-U(r,c) ;
+#                                 S(r,c+1)-D(r,c) ; U(r,c)-D(r,c)
+# Consequences: one COLUMN costs 2 steps (S(r,c)-J(r,c)-S(r,c+1) — the paper
+# states this directly, p.78 "two shuttling steps to increment its column
+# index", and that statement is also what forces TWO wells per section), and
+# one ROW costs 3 steps (S(r,c)-D(r,c-1)-U(r+1,c-1)-S(r+1,c)). The rest-site
+# metric is therefore d(S,S) = 2*dr + max(2*dc, 1) for dr > 0 and 2*dc for
+# dr = 0 (exact away from the c = 0 boundary column, a lower bound on it),
+# which _dist_lb reproduces.
+#
+# The evidence is the STRUCTURAL census, not a fit to the paper's transport
+# total: that total alone is degenerate — a 5-step row hop with the paper's own
+# routing reproduces Table XXVI's 424 for Q70, and so does a 3-step row hop
+# with ~19% of overhead the reconstruction does not model. The well census is
+# what settles it. (Do NOT cite p.85's "v = 10" here: in context v counts the
+# 10 VERTICAL SECTIONS an 11-row block spans, not a step cost.)
+#
+# WHAT THIS REPLACED, and why it was wrong: the model used to make J both the
+# section's second well AND the junction, with the legs reachable only through
+# it.  That charged 5 steps for a one-row hop and 3*dr + 2*max(dc,1) in general
+# -- i.e. it over-charged every vertical move by dr + 1 steps against the chip
+# the paper actually draws.
 # Chip rule: odd rows are optical (measure/reset allowed there only).
 
 
@@ -196,8 +237,10 @@ def _site_ok(site, rows, cols):
 
 
 def _is_edge(a, b):
+    """One primitive transport step (one well-to-well hop). See "Grid model"."""
     ka, ra, ca = a
     kb, rb, cb = b
+    # inside a horizontal section, and the two ways out of its right well
     if ka == "S" and kb == "J":
         return (ra == rb) and (cb == ca or cb == ca - 1)
     if ka == "J" and kb == "S":
@@ -206,8 +249,15 @@ def _is_edge(a, b):
         return (ra, ca) == (rb, cb)
     if ka in ("U", "D") and kb == "J":
         return (ra, ca) == (rb, cb)
+    # the junction is a ZERO-LENGTH crossing: the leg wells of junction (r,c)
+    # touch the section-(r,c+1) left well directly, and each other directly
+    if ka == "S" and kb in ("U", "D"):
+        return (ra == rb) and (cb == ca - 1)
+    if ka in ("U", "D") and kb == "S":
+        return _is_edge(b, a)
     if ka == "D" and kb == "U":
-        return (rb == ra + 1) and (ca == cb)
+        # rb == ra  : across junction (r,c);  rb == ra+1 : the vertical section
+        return (ca == cb) and (rb == ra or rb == ra + 1)
     if ka == "U" and kb == "D":
         return _is_edge(b, a)
     return False
@@ -312,9 +362,11 @@ def compile_plan(plan):
     split_used = set()
     ion_steps = 0          # total (ion, round) movements — parallelism numerator
     low_occ_rounds = 0     # move phases in which fewer than 20 ions move
-    wrap_rounds = 0        # transport rounds AFTER the first measure phase:
-                           # the cyclicity buy-back the paper does not pay
-                           # (it pipelines a second ancilla batch instead)
+    wrap_rounds = 0        # transport rounds AFTER the first measure phase —
+                           # the walk home that closes the cycle. Since v4 the
+                           # ancillas do not owe one (their species set is what
+                           # must repeat), so this should be the DATA ions'
+                           # return leg, which the paper pays too.
     measured_started = False
 
     def check_site(obj, what, pi):
@@ -559,12 +611,65 @@ def compile_plan(plan):
         raise PlanError(f"only {len(measured)}/70 ancillas measured")
     if merged:
         raise PlanError("ions still merged at end of SEC")
-    bad = [q for q in pos if pos[q] != init_pos[q]]
+    # ---- cycle boundary ------------------------------------------------
+    # The SEC must TILE. Two different rules, for two different reasons:
+    #
+    #  (a) every ion that is NOT an ancilla -- data, beacon, reservoir -- must
+    #      end on its EXACT layout site. Permuting the data would relabel the
+    #      code's qubits and so the logical frame, and nothing downstream would
+    #      catch it (the circuit is built from the frozen schedule, not from
+    #      positions). Beacons/reservoir are static anyway.
+    #
+    #  (b) each ANCILLA SPECIES need only end on its OWN SET of layout sites,
+    #      compared SEPARATELY for X and for Z. Nothing pins an ancilla ion to
+    #      a position: beacons and cooling partners attach to DATA, the loss
+    #      protocol's ancilla is dynamic, and the reservoir swaps ancilla ions
+    #      in and out. This is the paper's own convention -- its Algorithm 1
+    #      (p.30) runs 6 of 7 shift legs and ends each SEC with all ancillas
+    #      displaced by a uniform group shift, absorbing the mismatch with
+    #      "Relabel the ancilla in software" (Alg. 1 line 2; p.28: "no physical
+    #      transport"). It is sound here because build_circuit is entirely
+    #      position-blind and every detector is keyed on the CHECK index, so a
+    #      relabel is invisible to the circuit -- and because each ancilla is
+    #      reset at prep and measured before the boundary, so no state crosses
+    #      it. The comparison is a MULTISET comparison and is verified by
+    #      replay of the timeline, never taken on the candidate's word.
+    #
+    # The species are compared separately on purpose: swapping an X-ancilla
+    # position with a Z-ancilla one is NOT a relabel, it changes which check a
+    # given optical site serves and would not tile.
+    anc_lo, anc_hi = XANC0, ZANC0 + N_HALF
+    bad = [q for q in sorted(pos) if not (anc_lo <= q < anc_hi)
+           and pos[q] != init_pos[q]]
     if bad:
+        kind = ("data" if bad[0] < N_DATA else
+                "beacon" if bad[0] < RES0 else "reservoir")
         raise PlanError(
-            f"plan is not cyclic: {len(bad)} ions end away from their layout "
-            f"position (e.g. qubit {bad[0]}: {init_pos[bad[0]]} -> {pos[bad[0]]}); "
-            f"the SEC must tile, so every ion must return to its start site")
+            f"plan is not cyclic: {len(bad)} non-ancilla ions end away from "
+            f"their layout position (e.g. {kind} qubit {bad[0]}: "
+            f"{init_pos[bad[0]]} -> {pos[bad[0]]}); data/beacon/reservoir ions "
+            f"carry the logical frame, so each must return to its OWN site")
+    for label, lo in (("X", XANC0), ("Z", ZANC0)):
+        end_sites = sorted(pos[q] for q in range(lo, lo + N_HALF))
+        home_sites = sorted(init_pos[q] for q in range(lo, lo + N_HALF))
+        if end_sites != home_sites:
+            # multiset difference, so a duplicated end site is reported too
+            # (unreachable given the collision rules, but never assumed)
+            spare = list(home_sites)
+            stray = []
+            for s in end_sites:
+                if s in spare:
+                    spare.remove(s)
+                else:
+                    stray.append(s)
+            raise PlanError(
+                f"plan is not cyclic: the set of {label}-ancilla end positions "
+                f"is not the set of {label}-ancilla layout sites "
+                f"({len(stray)} end site(s) outside it, e.g. "
+                f"{stray[0] if stray else end_sites[0]}); an "
+                f"ancilla may be relabelled onto ANOTHER site of its OWN "
+                f"species, but the species' occupied set must repeat so the "
+                f"SEC tiles")
 
     t_core = transport_rounds / 20.0 + N_ROUNDS + prep_phases + measure_phases
     t_sec = t_core + LL_OVERHEAD_POC
@@ -573,16 +678,18 @@ def compile_plan(plan):
     # lower bound between consecutive gate-time positions (all ions rest on S
     # sites at gate time), minus 2 for the POC-free merge+split edges an ion
     # may use per interval. Parallel rounds >= the longest single-ion journey.
+    # The metric is the corrected well graph's (see "Grid model"): one column
+    # costs 2 steps, one row costs 3.
     def _dist_lb(a, b):
         dr = abs(a[0] - b[0])
         dc = abs(a[1] - b[1])
         if dr == 0:
             return 2 * dc
-        return 3 * dr + (2 * dc if dc >= 1 else 2)
+        return 2 * dr + max(2 * dc, 1)
 
-    def _gap_floor(snap_a, snap_b):
+    def _gap_floor(snap_a, snap_b, ids=range(N_SIM)):
         best = 0
-        for q in range(N_SIM):
+        for q in ids:
             lb = _dist_lb(snap_a[q], snap_b[q]) - 2
             if lb > best:
                 best = lb
@@ -591,7 +698,14 @@ def compile_plan(plan):
     per_gap_floors = [
         _gap_floor(gate_snapshots[g], gate_snapshots[g + 1])
         for g in range(N_ROUNDS)]
-    wrap_floor = _gap_floor(gate_snapshots[N_ROUNDS], gate_snapshots[0])
+    # The wrap-back floor is a DATA-ONLY quantity: under the paper's
+    # cycle-boundary convention an ancilla need only end on some site of its
+    # own species (the residual permutation is absorbed by relabelling the
+    # ancilla in software), so its distance back to its own layout site is not
+    # a journey anybody has to make. Counting it would make rounds_over_floor
+    # measure a constraint the validator no longer imposes.
+    wrap_floor = _gap_floor(gate_snapshots[N_ROUNDS], gate_snapshots[0],
+                            range(N_DATA))
 
     # Noise exposure per SEC (expected fault events, with p factored out):
     #   2q gates: 70 pairs x N_ROUNDS layers x weight 1

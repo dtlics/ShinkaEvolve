@@ -80,9 +80,18 @@ Two more chip facts that constrain the layout:
 - **Optical rows.** Preparing and measuring an ion needs laser access, which
   exists only on every other row. Ancillas must be standing on one of those rows
   when they are prepared and when they are measured.
-- **The grid.** The chip is rails (`S` sites, where ions rest) joined by junctions
-  (`J`), with short parking stubs above and below each junction (`U`/`D`). Moving
-  one position sideways costs 2 steps; moving one row up or down costs 5.
+- **The grid.** The chip is a lattice of **potential wells**. Each horizontal
+  rail section holds exactly two of them (`S(r,c)` and `J(r,c)`); each vertical
+  section between two rows holds exactly two (`D(r,c)` and `U(r+1,c)`); and a
+  **junction holds none** — it is a zero-length crossing, so the four wells
+  around it are all one step from each other. One step = one hop between
+  neighbouring wells. Consequence: **moving one column sideways costs 2 steps,
+  moving one row up or down costs 3.**
+
+  > This is a **correction applied on 2026-07-29**. The model used to make the
+  > junction a well in its own right, which charged **5** steps for a one-row
+  > hop — a 67% over-charge on every vertical move. Part 2 explains how the
+  > correction was grounded.
 
 ### The two units of cost
 
@@ -118,8 +127,10 @@ Two consequences that drive everything below:
 1. **The floor is set purely by *where you put things*** — the layout. Change the
    layout and the floor changes.
 2. **Routing can never beat the floor**; it only decides whether you pay 1× it or
-   3× it. Our folded layout has a gap whose floor is 46 rounds and originally
-   spent 102 on it — that 56-round difference was pure disorganisation.
+   3× it. Our folded layout has a gap whose floor is 50 rounds and spends 72 on
+   it — that 22-round difference is pure disorganisation, and most of it is one
+   identified thing: the router still walks the *old* five-edge graph and pays 5
+   steps per row where the chip charges 3.
 
 ### CRT — the promising idea we have not exploited yet
 
@@ -143,8 +154,10 @@ both. With the CRT relabelling, both collapse into **one single rotation** of a
 > together, no second pass.
 
 Arithmetic on the actual Q70 schedule says all seven rotations total **~194
-rounds**, against our current best layout's 329-round floor. That is the single
-biggest unexploited idea in the task.
+rounds**, against our current best layout's 226-round floor. It is one of the
+two biggest unexploited ideas in the task — the other one is smaller, more
+certain and much cheaper: teach the router the junction-crossing steps it
+currently ignores (Part 3, finding 7).
 
 ---
 
@@ -183,7 +196,7 @@ legs — folded into 3-row cells, spread on a line, sheared, etc.
 where things are, you have fixed how far each ion must travel between
 consecutive gate rounds — so you have fixed the minimum number of transport
 rounds any router could ever achieve on that layout. The evaluator computes it
-and reports it as `floor_total`: **329** for the pitch-4 cell layout, **333** for
+and reports it as `floor_total`: **226** for the pitch-4 cell layout, **230** for
 the folded one.
 
 > A better layout is the *only* way to lower the floor. No amount of clever
@@ -201,9 +214,10 @@ so the entire game is packing as many ions as possible into each round.
 
 **What Stage 2 decides: how close you get to the floor.** It cannot lower the
 floor; it decides whether you pay 1.0× it or 2.8× it. Reported as
-`rounds_over_floor`, with `ions_per_round` showing the packing quality.
+`rounds_over_floor`, with `ions_per_round` showing the packing quality. The two
+shipped routers are at **1.58×** and **1.63×**.
 
-> This is the stage everyone underestimated. See Part 3.
+> This is the stage everyone underestimated, twice. See Part 3.
 
 ### Stage 3 — ASSEMBLY: write out the actual cycle, in order *(SECTION 3)*
 
@@ -220,13 +234,26 @@ writes down the resulting list of phases. In full, one SEC is:
       c. GATE   fire the two-qubit gate on all 70 pairs at once
       d. SPLIT  pull each pair back apart
 3.  MEASURE     read out all 70 ancillas       (optical rows again)  → the syndrome
-4.  WRAP-BACK   route every ion home           ← calls Stage 2, ~67 rounds
+4.  WALK HOME   route the DATA ions home       ← calls Stage 2, 4 rounds
 ```
 
 Step 4 exists because the next cycle must start from the same arrangement — the
-heartbeat has to repeat identically forever. That "walk home" is real work we
-pay for and, as Part 2 explains, is one of the two places our rules are stricter
-than the paper's.
+heartbeat has to repeat identically forever. But "the same arrangement" is a
+weaker requirement than it looks, and getting it right is the second of the two
+corrections in Part 2:
+
+- **Data, beacons and reservoir ions must each end on their own exact site.**
+  The data qubits *are* the code; permuting them silently relabels the logical
+  frame, and nothing downstream would notice.
+- **Ancillas only have to restore their species' occupied *set*.** Which
+  particular ion sits on which ancilla site does not matter — an ancilla is
+  reset before every cycle and read out at the end of it, so it carries nothing
+  across the boundary, and the circuit is built from the check index, never from
+  a position. Any leftover shuffle is fixed by renaming the ancillas in
+  software, which is exactly what IonQ's own algorithm does.
+
+This used to cost 67 rounds of the best seed's 421 (every ancilla walking back
+to its personal site). It now costs 4.
 
 ### Stage 4 — The EVALUATOR scores it (not part of the candidate)
 
@@ -267,6 +294,55 @@ roughly **288 trap sections** (Table XXVI / Fig. 62, arXiv:2604.19481).
 | Physical qubits | same — 220 (70 data + 70 ancilla + 70 beacon + 10 reservoir) |
 | Cost unit | same — a "round" is one parallel one-edge transport step; their own arithmetic `424/20 + 13 = 34.2 POC` confirms it |
 | Horizontal cost | same — 2 primitive steps per column, stated twice in the paper |
+| **Vertical cost** | **same — 3 primitive steps per row. Was 5 on our side; corrected 2026-07-29, see below** |
+| **Cycle boundary** | **same — ancillas end on their species' site set and are relabelled in software. We used to demand exact sites; corrected 2026-07-29, see below** |
+
+### The two corrections that made this like-for-like
+
+This section used to be headed *"Two caveats that could move the verdict"*. They
+are no longer caveats: both were run down against the paper and **applied**.
+
+**How they were grounded.** Rebuilding IonQ's SEC from their published Table X
+schedules alone reproduces every *non-transport* row of their Table XXVI
+**exactly, for BOTH the Q70 and the Q102 block, with zero free parameters** —
+merge/split 16 / 18, two-qubit layers 8 / 9, readout 3 / 3, state preparation
+1 / 1. Getting the two-qubit row right required identifying the extra layer
+(Q70's schedule has 7 rounds but the table says 8) as the **data
+leakage-detection unit**, the beacon-based check that runs at the start of the
+SEC and costs a gate layer but no transport. Four independent integer rows
+landing on two different codes is what licenses the rest.
+
+1. **Vertical cost — the junction holds no well.** Fig. 62's vector well census
+   is exactly **2 wells per horizontal section, 2 per vertical section, and none
+   at a junction**. With the paper's own "two shuttling steps to increment its
+   column index", that forces a one-row well-to-well hop to be **3** steps. Our
+   grid charged 5, because our junction node was doubling as the section's
+   second well. Adding the three junction-crossing edges makes the junction the
+   zero-length crossing it actually is, and BFS then gives
+   `d = 2·dr + max(2·dc, 1)` — verified exact against the evaluator's own
+   `_dist_lb` on every interior pair.
+
+   > **Honest caveat, stated because it matters.** The transport *total* alone
+   > cannot decide this. A 5-step row hop with the paper's routing reconstructs
+   > their 424 for Q70; so does a 3-step row hop plus ~19% of overhead the
+   > reconstruction doesn't model (and the same 0.837 ratio shows up for Q102,
+   > so it is code-independent, not a Q70 fudge). **The well census settles it**
+   > — it is a structural reading of the figure, not a fit to a number.
+
+2. **Cycle boundary — IonQ relabel, so may we.** Their **Algorithm 1** (p. 30)
+   executes only **6 of the 7** shift legs and ends each SEC with every ancilla
+   displaced by a single uniform group shift, absorbing the mismatch on line 2:
+   *"Relabel the ancilla in software"* (p. 28: "no physical transport"). That
+   residual was derived **two independent ways and they agree**: summing
+   Algorithm 1's six executed legs gives `(long 0, medium 3, short 4)`, and
+   tracking the alignment cell of every ancilla through this repo's own
+   `required_pairs()` gives the same `(0, 3, 4)` — one single residual shared by
+   all 35 X ancillas and all 35 Z ancillas, i.e. genuinely a group shift.
+   Nothing pins an ancilla ion to a position: beacons and cooling partners
+   attach to **data**, the loss protocol's ancilla is dynamic, and the reservoir
+   swaps ancilla ions in and out. Here the circuit builder is position-blind and
+   every detector is keyed on the check index, so the relabel is invisible.
+   Data, beacons and reservoir ions still must end on their **exact** sites.
 
 ### The comparison
 
@@ -275,35 +351,28 @@ layers + 8 two-qubit layers + 3 readout`), so only the transport count differs:
 
 | | transport rounds | SEC time (their formula) | exposure → LER | rail sections |
 |---|---|---|---|---|
-| **paper Q70** | 424 | 34.20 POC | 536.20 | ~288 |
-| **ours — `initial_evolved`** | **421** | **34.05 POC** (−0.4%) | 535.85 (**+0.3% LER**) | 301 (+4.5%) |
-| **ours — `initial_folded`** | 446 (+5%) | 35.30 POC (+3.2%) | 537.60 (−1.0% LER) | **287** (−0.3%) |
+| **paper Q70** | 424 | 34.20 POC | 536.06 | ~288 |
+| **ours — `initial_evolved`** | **358** (−16%) | **30.90 POC** (−9.6%) | 531.44 (−0.86% ⇒ ~4% LER) | 301 (+4.5%) |
+| **ours — `initial_folded`** | 375 (−12%) | 31.75 POC (−7.2%) | 532.63 (−0.64% ⇒ ~3% LER) | **287** (−0.3%) |
 
-**Read this as a tie.** We are 0.7% fewer rounds and 0.4% faster on the best
-seed — inside any reasonable modelling error. We have **not** meaningfully beaten
-the paper, and specifically **not on LER**, which differs by 0.3%.
+**Read this as a real but narrow speed win, on one axis only.** Same chip graph,
+same cycle-boundary convention, same 220 ions, same circuit: 16% fewer transport
+rounds and a ~10% shorter core cycle. Three things keep it honest:
 
-### Two caveats that could move the verdict, both in our favour
-
-1. **Cyclicity convention.** Our rules require every ancilla to walk back to its
-   starting site so the cycle repeats with a *single* ancilla batch — 67 of our
-   421 rounds. The paper instead pipelines a **second** ancilla batch, which
-   removes measurement/reset from the clock cycle (p. 81) but needs ~70 more
-   qubits than the 220 their own Table XI counts. Under *their* convention we
-   would be at **354 vs 424 rounds — 17% fewer**. Under *ours*, at equal qubit
-   count, their 424 is arguably missing a return leg. The paper does not give
-   enough detail to settle this, so both numbers are quoted and neither is
-   claimed as the headline.
-2. **Vertical cost.** We charge 5 rounds per one-row hop; the paper's only
-   numeric vertical statement implies ~3. If so, our model is harsher than
-   theirs and our 421 is an over-estimate.
+- our footprint is **4.5% larger** on the fast seed (the folded seed matches
+  their area at 375 rounds, so we do not beat them on both at once);
+- 424 is *their published number for their own hand design*. An idealized
+  mechanical reconstruction of that same design on the corrected chip lands near
+  **355** — so "16% fewer" is a comparison against a published figure, not a
+  claim that their strategy could not do better;
+- and it is **not** an LER win — see below.
 
 ### Why LER barely moves, and what that means
 
 A transport round costs `p/2000` on each qubit; a two-qubit gate layer costs `p`
 on 70 pairs. So the entire plan-dependent share of the error budget is **~6%** of
 the total, and the frozen circuit dominates. Even *free* transport would improve
-LER by only ~21% versus the paper.
+LER by only ~25% versus the paper, and our actual 16% round saving buys ~4%.
 
 > **A shuttle plan buys time and chip area, not fidelity.** The honest claim for
 > this task is a faster, no-larger logical clock cycle at unchanged fidelity —
@@ -315,8 +384,9 @@ LER by only ~21% versus the paper.
 ## Part 3 — What we actually found
 
 1. **The paper's 424 was never the obstacle.** Both layouts we had by run 2 have
-   distance floors of 329/333 — well under 424. A perfect router on the geometry
-   already in hand would have beaten the published number.
+   distance floors well under 424 (329/333 as measured then; 226/230 on the
+   corrected chip). A perfect router on the geometry already in hand would have
+   beaten the published number.
 2. **The failure was entirely in Stage 2 (routing).** Run q70ring_v2's best plan
    used 676 rounds against its own 287-round floor: 287 floor + 83 detour +
    **306 rounds of pure stalling**, with only ~25 of 140 ions moving in a typical
@@ -332,22 +402,38 @@ LER by only ~21% versus the paper.
    and reverting that one constant: 676 → 566 rounds.
 4. **Routing, done properly, closed the gap.** A prioritised-planning packer with
    stalls, one-round loop rotation and shove-aside took the same layouts from
-   1.7–2.1× floor to 1.27–1.34×: 566 → 421 and 700 → 446 rounds. That is the
-   whole difference between "34% worse than the paper" and "level with it".
-5. **The comparison itself was mis-stated** in two places, both now corrected: the
-   footprint bar compared vertices against trap sections (a 3.7× error), and an
-   LER win was implied where there is a 0.3% tie.
-6. **The next lever is Stage 1, not Stage 2.** Routing slack is down to ~1.27×,
-   so the remaining large win must come from a layout with a lower floor. The
-   concrete candidate: since l = 7 and m = 5 are coprime, the ring torus is
-   isomorphic to Z₃₅, so every realignment collapses to **one** 1-D rotation
-   instead of two per-axis passes — analytically ~194 rounds of rotation versus
-   the current 329-round floor.
+   1.7–2.1× floor to 1.27–1.34× (as the floor was then measured): 566 → 421 and
+   700 → 446 rounds. That is the whole difference between "34% worse than the
+   paper" and "level with it".
+5. **The comparison itself was mis-stated**, four times now, each time in a way
+   that made us look *worse* or the bar look wronger, and each time corrected:
+   the footprint bar compared vertices against trap sections (a 3.7× error); an
+   LER win was implied where there is a tie; the chip over-charged vertical
+   motion by 67%; and the cycle boundary demanded a walk home the paper's own
+   algorithm does not make. The last two are the 2026-07-29 corrections in
+   Part 2, worth 421 → 358 rounds on the best seed with **no change to any
+   plan's actual movement** — they only stopped charging for things the hardware
+   does not charge for.
+6. **The floor is a Stage-1 property and still the deepest lever.** Since
+   l = 7 and m = 5 are coprime, the ring torus is isomorphic to Z₃₅, so every
+   realignment collapses to **one** 1-D rotation instead of two per-axis
+   passes — analytically ~194 rounds of rotation versus the current 226-round
+   floor.
+7. **But Stage 2 is back on top of the list, for a very concrete reason.** The
+   chip correction cut the floor further than it cut the plans, so routing slack
+   *rose* from ~1.28× to **1.58×**. The cause is identified and local: the
+   routers inside SECTION 2 still walk the old five-edge graph — they never use
+   the junction-crossing steps — so they pay 5 primitive steps per row where the
+   evaluator's floor charges 3. Widening `neighbors()` and matching `site_dist`
+   to the new metric is a small, well-specified edit with a large expected
+   payoff, and it is the first thing the next run should try.
 
 ### Attribution, stated plainly
 
 No result in the current seeds is purely evolution's. Run 2's evolved layout is
 in there, but its headline change (the pitch compression) was a regression caused
-by the broken metric; the pitch repair and the router were hand-written. That is
-why every candidate now reports `gain_over_seed` — so the next run's own
-contribution is unambiguous.
+by the broken metric; the pitch repair, the router, and both 2026-07-29 model
+corrections were hand-made. Note especially that the 421 → 358 improvement is
+**not** a better plan — it is the same plans, re-priced correctly. That is why
+every candidate reports `gain_over_seed` (now against +2.2542) — so the next
+run's own contribution is unambiguous.

@@ -20,9 +20,9 @@ the audited comparison against the paper, and what the two runs found.
 
 | File | Role |
 |---|---|
-| `initial.py` | Seed A (EVOLVE-BLOCK): the *unfolded* realization of the Fig.-60 strategy — block swaps for the long ring, conveyor+rail-wrap medium shifts, Fig.-61 embedded short shifts, vertical data hops for gating, in-place prep/measure on optical rows. Score anchor (0.0). Parametric in `(l, m, schedule)`; self-verifies while building. |
-| `initial_folded.py` | Seed B (EVOLVE-BLOCK): the *folded* 2D embedding — cells of 3 rows (data-L / ancillas / data-R), family change = ±2-column side flip (no block swaps), per-column vertical conveyors with lane-column wraps, Fig.-61 embedded shifts per row. **446 rounds / +2.1649** at 287 rail sections. |
-| `initial_evolved.py` | Seed C (EVOLVE-BLOCK): run `q70ring_v2`'s best evolved program with its cell pitch repaired 3→4 (evolution had compressed it to win the then-broken zone term, which aliased the X/Z wrap lanes and forced an X-then-Z sequential fallback). 676 → 566 → **421 rounds / +2.2028**. |
+| `initial.py` | Seed A (EVOLVE-BLOCK): the *unfolded* realization of the Fig.-60 strategy — block swaps for the long ring, conveyor+rail-wrap medium shifts, Fig.-61 embedded short shifts, vertical data hops for gating, in-place prep/measure on optical rows. Score anchor (0.0), **896 rounds**. Parametric in `(l, m, schedule)`; self-verifies while building. |
+| `initial_folded.py` | Seed B (EVOLVE-BLOCK): the *folded* 2D embedding — cells of 3 rows (data-L / ancillas / data-R), family change = ±2-column side flip (no block swaps), per-column vertical conveyors with lane-column wraps, Fig.-61 embedded shifts per row. **375 rounds / +2.2392** at 287 rail sections. |
+| `initial_evolved.py` | Seed C (EVOLVE-BLOCK): run `q70ring_v2`'s best evolved program with its cell pitch repaired 3→4 (evolution had compressed it to win the then-broken zone term, which aliased the X/Z wrap lanes and forced an X-then-Z sequential fallback). 676 → 566 → 421 → **358 rounds / +2.2542**. |
 | `evaluate.py` | Immutable oracle: exact plan compiler/validator, POC + noise-exposure accounting, stim noiseless-determinism check, deterministic seed-anchored score. Also hosts the certification-only circuit builder + BP-OSD sampler. |
 | `routing.py` | **FROZEN REFERENCE ONLY — no seed imports it.** It *was* the shared, non-evolved round packer; the router now lives INSIDE each seed's EVOLVE-BLOCK (SECTION 2), so a mutation can improve the packing algorithm as well as the geometry. Kept on disk unchanged as a regression baseline: given the same `DEFAULT_ATTEMPTS`, the inlined copy reproduces its schedules exactly (419/301 and 455/292). `python routing.py` still runs its self-test. |
 | `certify.py` | Out-of-loop head-to-head: re-runs a candidate in a fresh process and measures real Monte-Carlo LER at chosen p (BP-OSD), tabled against the paper's published Q70 numbers. |
@@ -44,11 +44,27 @@ phase = {"t":"move",    "moves": [[qid, from_site, to_site], ...]}   # 1 paralle
         {"t":"prep",    "ancillas": [...]} / {"t":"measure", "ancillas": [...]}
 ```
 
-Grid semantics: `S(r,c)` rail sections joined through junction nodes `J(r,c)`
-(between `S(r,c)` and `S(r,c+1)`) with leg stubs `U/D(r,c)`; vertical passage
-`D(r,c)–U(r+1,c)`. Each listed edge is one primitive transport step. **Odd rows are
-optical** (prep/measure allowed there only). One ion per site; a move phase is one
-parallel transport round; merges require one-edge adjacency to a host on an S site.
+Grid semantics (**corrected 2026-07-29 against Fig. 62's well census — see
+"The chip model" below**): every node is a *potential well* and every edge is
+one primitive transport step. A horizontal rail section `(r,c)` carries exactly
+two wells, `S(r,c)` and `J(r,c)`; a vertical section carries exactly two,
+`D(r,c)` and `U(r+1,c)`; **a junction carries no well at all** — it is a
+zero-length crossing, so the four wells around junction `(r,c)` — `J(r,c)`,
+`S(r,c+1)`, `U(r,c)`, `D(r,c)` — are mutually one step apart. The eight edge
+families are therefore
+
+```
+S(r,c)–J(r,c)        (inside a horizontal section)
+D(r,c)–U(r+1,c)      (inside a vertical section)
+J(r,c)–S(r,c+1)   J(r,c)–U(r,c)   J(r,c)–D(r,c)
+S(r,c+1)–U(r,c)   S(r,c+1)–D(r,c) U(r,c)–D(r,c)      (across the junction)
+```
+
+so **one column costs 2 steps and one row costs 3**, and the rest-site metric is
+`d = 2·dr + max(2·dc, 1)` (`2·dc` when `dr = 0`). **Odd rows are optical**
+(prep/measure allowed there only). One ion per site; a move phase is one
+parallel transport round; merges require one-edge adjacency to a host on an S
+site.
 
 Validator highlights (each violation → archived sentinel score −2.0 with the exact
 rule named): plans are JSON-sanitized on entry (plain data only); edge-legality +
@@ -59,8 +75,10 @@ round requires, ≤1 merge + 1 split per ion per inter-gate interval (merge/spli
 cost 0 POC per the paper, so this closes free-teleport chains; they DO carry
 transport-round noise); prep before gates / measure after all gates, both on
 optical rows, each ancilla exactly once; beacons in the same row as their partner
-data qubit; **cyclicity** — every ion must end the SEC on its layout site so
-cycles tile.
+data qubit; **cycle boundary** — every *non-ancilla* ion (data, beacon,
+reservoir) must end the SEC on its **exact** layout site, and each **ancilla
+species must restore its own occupied SET** (X compared to X, Z compared to Z,
+separately), verified by replay.
 
 ## Hardware model (paper's moving-qubit model, Table III)
 
@@ -78,7 +96,71 @@ and the head-to-head uses their Pauli-only *reference* curves). Physical qubits 
 constant by construction: 70 data + 70 ancilla + 70 beacons + 10 reservoir = 220
 (matches Table XI).
 
-## Score (v3 — deterministic; zone metric corrected after run q70ring_v2)
+## The chip model and the cycle boundary: two corrections, grounded (2026-07-29)
+
+Two things in this task's model were wrong against the paper. Both were
+established by **reproducing IonQ's own Table XXVI from their published
+schedules with zero free parameters**, and both have now been applied. The
+seeds and the score anchors moved as a result; nothing about the code, the
+circuit or the noise model changed.
+
+**How the reconstruction was grounded.** Rebuilding the SEC's
+primitive-operation counts from the Table X schedules alone reproduces every
+*non-transport* row of Table XXVI **exactly, for BOTH Q70 and Q102, with no
+fitted parameter**: merge/split 16 / 18, two-qubit layers 8 / 9, readout 3 / 3,
+state preparation 1 / 1. Getting the two-qubit row right requires identifying
+the extra layer — Q70's schedule has 7 rounds but the table says 8 — as the
+**data leakage-detection unit** (the beacon-based data LDU that runs at the
+start of the SEC, p.34: a 2q layer plus 1q layers plus a readout, and zero
+transport). A model that lands four independent integer rows on two different
+codes is a model of the right SEC.
+
+**Correction 1 — the junction holds no well.** Fig. 62's vector well census is
+exactly 2 wells per horizontal section, 2 per vertical section, and **none at a
+junction**; combined with p.78's "two shuttling steps to increment its column
+index" this forces a one-row well-to-well hop to be **3** primitive steps (and a
+`dr`-row hop `2·dr + 1`). Our grid charged **5** and `3·dr + 2·max(dc,1)`,
+because our `J` node was doing double duty as both the section's second well
+*and* the junction. The fix adds the three junction-crossing edges
+`D(r,c)–S(r,c+1)`, `U(r,c)–S(r,c+1)`, `U(r,c)–D(r,c)`; BFS over the resulting
+graph gives `d = 2·dr + max(2·dc, 1)`, and `_dist_lb` now reproduces it exactly
+(verified exact on every interior S–S pair, and a valid lower bound on the
+`c = 0` boundary column).
+
+> **Stated plainly: the transport-round total alone does NOT settle this.** It
+> is degenerate — a 5-step row hop with the paper's own routing reconstructs
+> Table XXVI's 424 for Q70, and so does a 3-step row hop plus ~19% of overhead
+> the reconstruction does not model (the same 0.837 ratio appears for Q102, so
+> whatever it is, it is code-independent). **The well census is what settles
+> it**, because it is a direct structural reading of the figure rather than a
+> fit. Do not cite p.85's "v = 10" as corroboration: in context `v` counts the
+> ten *vertical sections* an 11-row block spans, not a step cost.
+
+**Correction 2 — ancillas need not return to their exact sites.** IonQ's
+Algorithm 1 (p.30) runs only **6 of the 7** shift legs and ends each SEC with
+every ancilla displaced by one **uniform group shift**, absorbing the mismatch
+with "Relabel the ancilla in software" (Alg. 1 line 2; p.28: "no physical
+transport"). That residual was derived **two independent ways** and agrees:
+summing Algorithm 1's six executed legs gives `(long 0, medium 3, short 4)`,
+and tracking the alignment cell of every ancilla through this repo's own
+`required_pairs()` gives the *same* `(0, 3, 4)` for all 35 X and all 35 Z
+ancillas (one distinct residual per species, i.e. genuinely a group shift).
+Nothing pins an ancilla ion to a position — beacons and cooling partners attach
+to **data**, the loss protocol's ancilla is dynamic, and the reservoir swaps
+ancilla ions in and out — and `build_circuit` here is entirely position-blind
+with detectors keyed on the **check index**, so a relabel is invisible to the
+circuit. The rule is now: data / beacon / reservoir ions must end on their
+**exact** layout site (permuting data would silently relabel the logical
+frame), and each ancilla **species** must restore its own occupied **set**,
+compared **separately** for X and Z. Both halves are verified by replay.
+
+Effect on the seeds: **1012 → 896**, **446 → 375**, **421 → 358** transport
+rounds, and `rounds_over_floor` *rises* (1.36→1.39, 1.34→1.63, 1.28→1.58)
+because the floor fell further than the plans did — the seeds' routers still
+walk the old five-edge subgraph and pay 5 steps for a row. That gap is now the
+single largest signposted lever inside the evolve block (SECTION 2b banner).
+
+## Score (v4 — deterministic; v3 zone metric, v4 anchors)
 
 ```
 exposure  = 490 (gates) + 14 (prep/meas) + idle_slots/100
@@ -87,10 +169,16 @@ var_exp   = exposure − 504                                # the part a plan ca
 T_core    = transport_rounds/20 + 7 + prep_phases + measure_phases
 zones     = distinct RAIL SECTIONS (S sites) the plan ever occupies
 
-score = 1.0 * log2(73.22 / var_exp)      # plan-dependent noise exposure
-      + 0.5 * log2(59.60 / T_core)       # core SEC time (no frozen 7.05 overhead)
+score = 1.0 * log2(65.10 / var_exp)      # plan-dependent noise exposure
+      + 0.5 * log2(53.80 / T_core)       # core SEC time (no frozen 7.05 overhead)
       + 1.0 * log2(428   / zones)        # trap footprint, in the paper's own unit
 ```
+
+**v4 anchor change:** `SEED_VAR_EXPOSURE` 73.22 → **65.10** and `SEED_T_CORE`
+59.60 → **53.80**, because the anchor seed now runs the SEC in 896 rounds
+instead of 1012 under the corrected cycle-boundary rule. `SEED_ZONES` is
+unmoved at 428 — neither correction touches the footprint. `SHIPPED_SEED_SCORE`
+2.2028 → **2.2542**. Weights are unchanged (1.0 / 0.5 / 1.0).
 
 Anchors = the unfolded seed (scores exactly 0). The operating-point reliability
 readout — `ler_shift_log10 = 5·log10(total exposure ratio)`, the paper's
@@ -138,77 +226,97 @@ identical decoder config (`osd_order=0`), ~1.9 h total:
 
 Verdict: the substitution is sound for ranking and roughly calibrated in
 magnitude. Reproduce with `scratchpad/metric_validation.py` after any change to
-the noise model or the score.
+the noise model or the score. *(Those three exposures are the pre-router plans
+as they stood when the LER was measured; the seeds have since moved to
+569.10 / 532.63 / 531.44. The validation is of the exposure→LER mapping itself,
+which neither v4 correction touches — the Table III weights are unchanged — so
+it stands as measured and was not re-run.)*
 
-> **PROVISIONAL v3, revisit after the next run** (orchestrator note — do not
+> **PROVISIONAL, revisit after the next run** (orchestrator note — do not
 > surface mutable-rules talk to the mutation LLM): weights are 1.0 / 0.5 / 1.0.
-> The zone term is now bounded (220 sections is the hard floor — 220 ions must
+> The zone term is bounded (220 sections is the hard floor — 220 ions must
 > each rest on their own S site — so it can yield at most log2(428/220) = +0.96
 > and cannot be farmed by serializing). Watch next: whether `rounds_over_floor`
-> actually falls, and whether any plan games `low_occ_rounds` by padding
-> high-occupancy no-op rounds. Changing weights or anchors mid-run invalidates
-> archive ordering; do it between runs only.
+> actually falls — it *rose* to 1.58–1.63x under the v4 corrections because the
+> floor moved further than the plans did, so there is real headroom there for
+> the first time in two runs — and whether any plan games `low_occ_rounds` by
+> padding high-occupancy no-op rounds. Changing weights or anchors mid-run
+> invalidates archive ordering; do it between runs only.
 
-## Seed calibration and the honest paper bar (measured under score v3)
+## Seed calibration and the honest paper bar (measured under score v4)
 
-| plan | rounds | rail sections | T_SEC | rounds/floor | score |
-|---|---|---|---|---|---|
-| `initial.py` unfolded (anchor) | 1012 | 428 | 66.65 | 1.36x | **0.000** |
-| `initial_folded.py` (inlined router) | 446 | 287 | 38.35 | 1.34x | **+2.165** |
-| **`initial_evolved.py` (inlined router, best)** | **421** | **301** | **37.10** | **1.28x** | **+2.203** |
-| paper Q70 + our cyclicity tax | 502 | ~288 | — | — | +1.939 |
-| paper Q70 as published (Table XXVI) | 424 | ~288 | 34.2 micro | — | +2.253 |
-| evolved layout floor-perfect | 329 | 301 | — | 1.00x | +2.65 |
-| CRT geometry, analytic rotation cost | ~194+gating | — | — | — | — |
+| plan | rounds | rail sections | T_SEC | floor | rounds/floor | score |
+|---|---|---|---|---|---|---|
+| `initial.py` unfolded (anchor) | 896 | 428 | 60.85 | 646 | 1.39x | **0.000** |
+| `initial_folded.py` (inlined router) | 375 | 287 | 34.80 | 230 | 1.63x | **+2.239** |
+| **`initial_evolved.py` (inlined router, best)** | **358** | **301** | **33.95** | **226** | **1.58x** | **+2.254** |
+| **paper Q70 as published (Table XXVI)** | **424** | **~288** | 34.2 micro | — | — | **+2.010** |
+| folded layout floor-perfect | 230 | 287 | 27.55 | 230 | 1.00x | +3.089 |
+| evolved layout floor-perfect | 226 | 301 | 27.35 | 226 | 1.00x | +3.050 |
+| CRT geometry, analytic rotation cost | ~194+gating | — | — | — | — | ≈+3.30 |
 
-Pre-router history for reference: the same two layouts cost 700 and 566 rounds
-when each seed emitted its own movement rounds (+1.296 / +1.711), and run
-q70ring_v2's best evolved plan was 676 (+1.651). With the shared `routing.py`
-they were 455 and 419; the seeds now carry their own trimmed copy of that
-router INSIDE the evolve block (see "The router is evolvable now" below).
+Paper rows are priced through *our* accounting (14 merge/split rounds, one prep
+and one measure phase) so that only the transport count and the footprint
+differ; that is the same convention the +2.253 figure used before the v4
+anchors, so the row moved only because the anchors did.
 
-Every candidate's public metrics carry **`gain_over_seed` = score − 2.2028**, so
+Pre-correction history for reference: under the pre-v4 model the same three
+seeds were 1012 / 446 / 421 rounds and scored 0 / +2.165 / +2.203. Before the
+router was inlined the two routed layouts cost 700 and 566 rounds (+1.296 /
++1.711), and run q70ring_v2's best evolved plan was 676 (+1.651). With the
+shared `routing.py` they were 455 and 419; the seeds now carry their own
+trimmed copy of that router INSIDE the evolve block (see "The router is
+evolvable now" below).
+
+Every candidate's public metrics carry **`gain_over_seed` = score − 2.2542**, so
 a run's own contribution is always separable from what it was handed. Report it
 alongside the absolute score in any write-up.
 
-**Read the bar as +1.94, not +2.25.** Two documented asymmetries, both audited
-against the paper (Sec. XIX–XX, Tables XI/XXVI):
+**The bar is +2.01, and it is now a genuine like-for-like number.** Both of the
+asymmetries this section used to carry have been *corrected*, not merely noted:
 
 - *The unit is identical.* Table XXVI's 424 counts parallel rounds exactly as we
   do — their own arithmetic `424/20 + 2 + 8 + 3 = 34.2 POC` (p. 85) and the
   sibling row `Merge/split 16 = 2 x 8 gate layers` both confirm it, and their
   horizontal cost (2 primitive steps per column) matches our `S→J→S` exactly.
-- *We are stricter on cyclicity.* Our rule returns every ancilla to its layout
-  site so one ancilla batch tiles; the paper instead pipelines a **second**
-  ancilla batch, which "would remove all contribution of ancilla measurement
-  and reset to the logical clock cycle" (p. 81). That wrap-back is reported per
-  plan as `wrap_rounds` (evolved seed: 78 of 566). Adding it to the paper's 424
-  gives the like-for-like **502 rounds / +1.939**. We keep the strict rule
-  because our 220-qubit budget matches their Table XI count, which does *not*
-  include a second batch — but every comparison must state which convention it
-  uses.
-- *We may also be stricter vertically*: we charge 5 rounds per one-row `S→S`
-  hop; the paper's only numeric vertical statement (p. 85) implies ~3. Untested,
-  so not corrected for — it makes our bar, if anything, more conservative.
+- *The vertical cost is now identical too.* We used to charge 5 rounds per
+  one-row `S→S` hop against the chip's 3. **Corrected** — see "The chip model
+  and the cycle boundary" above. Our 424-vs-358 comparison is now on one graph.
+- *The cycle-boundary convention is now identical too.* We used to return every
+  ancilla to its own layout site and then add that tax to the paper's 424 to get
+  a "like-for-like 502". **Corrected** — the paper's own Algorithm 1 leaves a
+  uniform group shift and relabels in software, and so may we. `wrap_rounds` is
+  still reported (4 of 358 on the best seed: the data ions' walk home) but there
+  is no tax to add to the paper's number any more, so the 502 row is gone.
 
 **What we do and do NOT beat the paper on — state this carefully.**
 
-- *Transport rounds and SEC time: parity, edging ahead.* 421 vs 424
-  as-published; 354 vs 424 like-for-like (removing our wrap-back tax). This is
-  a **speed** result — it shortens the logical clock cycle, hence algorithm
-  wall-clock.
-- *Logical error rate: a tie, not a win.* Our exposure is 535.85 against the
-  paper's ~536.20 for its own 424-round plan — a **0.1%** difference, i.e. a
-  ~0.4% LER change at the measured exponent. Do not claim an LER improvement.
-  The reason is structural and worth internalising: a transport round costs
-  `p/2000` on each qubit while a two-qubit gate layer costs `p` on 70 pairs, so
-  the entire plan-dependent budget is only ~6% of total exposure. Even
-  **free** transport would buy just ~21% LER versus the paper. Fidelity is
-  dominated by the frozen circuit; what a plan actually buys is time and area.
+- *Transport rounds and SEC time: ahead, by ~16%.* 358 vs 424 rounds, 30.90 vs
+  34.20 POC in the paper's own accounting formula (−9.6%), on the same chip
+  model and the same cycle-boundary convention. This is a **speed** result — it
+  shortens the logical clock cycle, hence algorithm wall-clock. Two honest
+  qualifiers: our footprint is 301 rail sections against their ~288 (+4.5%; the
+  folded seed is at 287 for 375 rounds), and 424 is *their published number for
+  their own hand design*, whereas an idealized reconstruction of that same
+  design on the corrected chip comes out near 355 — so treat "16% fewer" as the
+  published-number comparison it is, not as a claim about the best plan their
+  strategy admits.
+- *Logical error rate: still essentially a tie.* Our exposure is 531.44 against
+  536.06 for their 424-round plan under identical accounting — **0.86%**, i.e.
+  a ~4% LER change at the ansatz exponent (~3% at the measured one). Do not
+  claim a meaningful LER improvement. The reason is structural and worth
+  internalising: a transport round costs `p/2000` on each qubit while a
+  two-qubit gate layer costs `p` on 70 pairs, so the entire plan-dependent
+  budget is ~6% of total exposure. Even **free** transport would buy only ~25%
+  LER versus the paper. Fidelity is dominated by the frozen circuit; what a plan
+  actually buys is time and area.
 
-The open problem has moved: routing slack is down to 1.28x floor, so the next
-gains must come from a layout whose *floor* is lower (see the CRT row) — or
-from a better packer, which is now also inside the evolve block.
+The open problem has moved *back* to routing, for the first time in two runs:
+slack is 1.58–1.63x floor because the corrected chip made the floor cheaper
+while the seeds' routers still walk the old five-edge subgraph and pay 5 steps
+for a row instead of 3. Teaching SECTION 2's `neighbors` + `site_dist` the three
+junction-crossing edges is the single most concrete lever in the file. After
+that, the floor itself is a property of the layout (see the CRT row).
 
 ## The router is evolvable now (was `routing.py`, shared and frozen)
 
@@ -226,7 +334,7 @@ reading the others:
 |---|---|---|
 | 1 GEOMETRY | grid dims, every ion's rest site, the per-gate ion→site tables | `CELL_BASE` / `CELL_PITCH`; the layout's distance **floor** is set here and nowhere else |
 | 2 ROUTER | `site_dist`, A* with soft site costs + directed-edge congestion pricing, BFS field, the round packer (per-ion stalls, ≥3-cycle rotation in one round, cascading shove-aside, bounded replanning) | `ROUTER_POLICY` + `ROUTER_ATTEMPTS`, one block at the top of the section |
-| 3 ASSEMBLY | prep, the 7 merge/gate/split rounds, measure, wrap-back, phase emission | the gap>0 "duck out and come back" overlap |
+| 3 ASSEMBLY | prep, the 7 merge/gate/split rounds, measure, the data-only walk home, phase emission | the gap>0 "duck out and come back" overlap |
 
 What the inlined copy drops from `routing.py` (~39% of it): the 6-config
 attempt portfolio (now 2 configs — measured better, see below), `route()`,
@@ -234,19 +342,27 @@ attempt portfolio (now 2 configs — measured better, see below), `route()`,
 bookkeeping, `avoid`/`soft_cost`, `_infer_grid`, the `field_cache` (dead on the
 path-planning code path the seeds use), the whole field-plan engine mode with
 its `_descend`/`override` machinery, and the self-test. Given the same
-`DEFAULT_ATTEMPTS` the trimmed copy reproduces `routing.py`'s schedules
-**exactly** (419 rounds / 301 sections and 455 / 292), so the removal is
-verified lossless; the shipped 2-config portfolio then trades 2 rounds on the
-evolved seed for 5 fewer on the folded one, 5 fewer rail sections, and a third
-of the build time (~6 s per plan).
+`DEFAULT_ATTEMPTS` the trimmed copy reproduced `routing.py`'s schedules
+**exactly** (419 rounds / 301 sections and 455 / 292 under the pre-v4 rules), so
+the removal is verified lossless; the shipped 2-config portfolio then traded 2
+rounds on the evolved seed for 5 fewer on the folded one, 5 fewer rail sections,
+and a third of the build time (~6 s per plan).
+
+**The router walks a SUBSET of the chip's edges** — the five families it had
+before the v4 chip correction, so it pays 5 primitive steps for a one-row `S→S`
+hop where the evaluator's graph (and its floor) charges 3. `routing.py` is
+frozen and was not updated. Widening SECTION 2's `neighbors()` with
+`S(r,c+1)–U(r,c)`, `S(r,c+1)–D(r,c)`, `U(r,c)–D(r,c)` **and** matching
+`site_dist` to the new metric (it is the A* heuristic — it must not
+over-estimate) is the largest signposted single change in either seed.
 
 ## Head-to-head protocol
 
-- Score 0 = anchor-seed parity. **Paper parity = +1.94** like-for-like (their 424
-  rounds + our cyclicity wrap-back, at 288 rail sections); +2.25 if the wrap-back
-  is ignored. Quote `transport_rounds`, `wrap_rounds` and `zones` together, and
-  say which cyclicity convention the comparison uses — the raw round count alone
-  is not comparable.
+- Score 0 = anchor-seed parity. **Paper parity = +2.010** (their 424 rounds at
+  ~288 rail sections), and since the v4 corrections that is a single
+  like-for-like number: same chip graph, same cycle-boundary convention, no tax
+  to add either way. Quote `transport_rounds`, `zones` and `rounds_over_floor`
+  together — the raw round count alone still says nothing about footprint.
 - Certification (`certify.py`, fresh process, evolution never sees it): real
   BP-OSD LER at p ∈ {1e-3, 2e-3, 3e-3}, ≥100 errors/point where affordable, fit
   the paper's ansatz `p^5·exp(αp²+βp+ζ)`, extrapolate to p = 1e-4, table against
@@ -272,6 +388,20 @@ of the build time (~6 s per plan).
   (`sys.modules['__main__']` rebinding — scoring now runs through a pristine
   re-import of evaluate.py from disk; the demonstrated exploit now lands on the
   sentinel).
+- **Closed at v4, when the cycle-boundary rule was relaxed** (4 further probes,
+  all executed in `selfcheck.py`, all reaching the sentinel on the *named*
+  rule): a plan leaving a **DATA** ion displaced (→ the non-ancilla exact-site
+  rule); an ancilla parked on a site **outside** its species' layout set (→ the
+  per-species set rule); an **X↔Z end-position swap**, which is constructed to
+  preserve the *combined* ancilla site set exactly and is caught only because X
+  and Z are compared **separately**; and two ancillas ending on **one** site,
+  which the move-collision rule refuses before the boundary check is even
+  reached — that occupancy invariant is what makes the multiset comparison
+  impossible to fool with duplicates. The relaxation grants a candidate exactly
+  one thing: it may choose *which* ancilla of a species ends on *which* of that
+  species' own sites. That is the paper's own software relabel, and the circuit
+  cannot see it (position-blind builder, detectors keyed on the check index,
+  every ancilla reset at prep and measured before the boundary).
 - **Residual, documented:** a maximally determined in-process attacker can still
   subvert any in-process defense (this repo's eval architecture runs candidate
   code in the evaluator process); the backstop is certification — every elite is
@@ -289,10 +419,20 @@ of the build time (~6 s per plan).
   distance probe finds weight-9 logicals and nothing below (paper: d = 9 exact);
   schedule = exact Table X permutation; alignment closure — the 7 scheduled
   rounds reproduce every check's Tanner support exactly.
-- `selfcheck.py`: seed legal under the full validator; cyclic; noiseless-
-  deterministic on both observable circuits (validates detector/record
-  arithmetic end-to-end); seed scores +0.0000; 10 invalid-plan probes → sentinel
-  with named rules; full scoring path 0.4 s.
+- `selfcheck.py`: all three seeds legal under the full validator; cycle boundary
+  satisfied; noiseless-deterministic on both observable circuits (validates
+  detector/record arithmetic end-to-end); anchor seed scores +0.0000; **14**
+  invalid-plan probes → sentinel with named rules (10 malformed/illegal + the 4
+  v4 cycle-boundary probes above); full scoring path 0.7–0.9 s.
+- v4 chip-model correction: BFS over the graph built *directly from*
+  `_is_edge` confirms 2 wells per horizontal section, 2 per vertical section and
+  a K4 clique of wells around each junction; `d(S,S) = 2·dr + max(2·dc,1)` exact
+  on every interior pair for `dr,dc ∈ 0..6` in all four sign combinations;
+  `_dist_lb` a valid lower bound on all 41 472 ordered S/J/U/D pairs tested and
+  **exact** on the 1104 interior S–S pairs (the only kind `compile_plan` ever
+  feeds it — verified by replay: every gate-time snapshot of all three seeds
+  contains S sites only).
+- Determinism: each seed built twice per process, byte-identical JSON.
 - 4-agent adversarial review (validator, stim/decoder, exploit hunt, seed
   robustness) with live probe execution; all critical/major findings fixed (see
   Anti-gaming) or documented. Reviewer verified detector lookback arithmetic
@@ -304,17 +444,18 @@ of the build time (~6 s per plan).
 
 ## THE OBJECTIVE, IN ONE LINE
 
-**The shipped seed already beats the published design — now push past it by
-changing the GEOMETRY.** `initial_evolved.py` runs the SEC in **421 transport
-rounds** vs IonQ's 424 (354 vs 424 like-for-like, see below), at 1.28x its own
-distance floor. The primary open problem is the *layout*: the floor itself is a
-property of the embedding, and a CRT/sheared-torus geometry (l=7, m=5 coprime ⇒
-the ring torus is Z₃₅, so every realignment becomes ONE 1-D rotation instead of
-two per-axis passes) has an analytic rotation cost near **194 rounds**. Move
-the floor, and the router will follow it down. Secondary, and now in scope for
-the first time: the ~92 rounds of slack ABOVE that floor, because the round
-packer lives inside the evolve block too (SECTION 2) rather than in a shared
-frozen module.
+**The shipped seed beats the published design on speed; the largest remaining
+win is now ROUTING, then geometry.** `initial_evolved.py` runs the SEC in **358
+transport rounds** vs IonQ's published 424, on the same chip graph and the same
+cycle-boundary convention — but at **1.58x its own 226-round distance floor**,
+i.e. 132 rounds of pure parallelism loss. Most of that is one identified thing:
+SECTION 2's `neighbors`/`site_dist` walk the pre-correction five-edge subgraph,
+so every vertical hop costs the router 5 primitive steps where the chip charges
+3. Fix that first. Then the floor itself, which is a property of the embedding:
+a CRT/sheared-torus geometry (l=7, m=5 coprime ⇒ the ring torus is Z₃₅, so every
+realignment becomes ONE 1-D rotation instead of two per-axis passes) has an
+analytic rotation cost near **194 rounds**. Both levers are inside the evolve
+block.
 
 ## Run playbook (binding lessons from runs q70ring_v1 $30 and q70ring_v2 $50)
 
@@ -361,16 +502,20 @@ seeds/score).
 5. **`task_sys_msg` authoring** (both runs' texts produced ZERO
    contract-misunderstanding invalids in warmup — reuse their shape): goal =
    drive `rounds_over_floor` toward 1.0 for the frozen Q70 SEC; hard constraints
-   = quote the validator highlights above (all 9 rules, the 5 edge types,
-   odd-rows-optical, cyclicity); building blocks = **router architecture first**
-   (fuse a gap's `(delta_i, delta_j)` into ONE stall-tolerant pass instead of
-   sequential per-axis passes; interleave the X and Z species into shared
-   rounds; exploit that a closed-loop rotation advances every ion in the same
-   round; insert per-ion stalls rather than aborting a pass), then layout;
-   point at the slack map and the parallelism line as the two things to move;
-   runtime = see "Builders may search" below.
+   = quote the validator highlights above (all 9 rules, **the EIGHT edge
+   families**, odd-rows-optical, and the **two-part cycle boundary**: exact
+   sites for data/beacon/reservoir, per-species set for X and Z ancillas);
+   building blocks = **router architecture first** (teach the router the three
+   junction-crossing edges the seeds' `neighbors()` still omits — that alone is
+   worth ~40% off every vertical journey; fuse a gap's `(delta_i, delta_j)` into
+   ONE stall-tolerant pass instead of sequential per-axis passes; interleave the
+   X and Z species into shared rounds; exploit that a closed-loop rotation
+   advances every ion in the same round; insert per-ion stalls rather than
+   aborting a pass), then layout; point at the slack map and the parallelism
+   line as the two things to move; runtime = see "Builders may search" below.
    **Do NOT quote "beat 424" as the target** — the shipped seed already does.
-   Name the plan's own floor, and the CRT geometry hypothesis, as the target.
+   Name the plan's own floor (226) and the CRT geometry hypothesis as the
+   target.
 
 5b. **BUILDERS MAY SEARCH (changed after run v2).** Earlier runs told candidates
    to build the plan fast and "avoid brute-force search", and evaluation took
@@ -383,14 +528,18 @@ seeds/score).
    deterministic (no wall-clock or RNG-seed dependence on run order) and must
    finish inside the budget. This is the single biggest widening of the design
    space available, and it is unexplored.
-6. **Two known unexploited assets**, both from v2's archive: (a) the **CRT
-   sheared-torus** layout — since l=7 and m=5 are coprime the ring torus is
-   Z_35, so every realignment collapses to ONE 1-D rotation instead of two
-   per-axis passes (its grounded implementation cut gap r1's floor 24→12 but
-   routed at 35x floor; analytically the seven rotations total ~194 rounds if
-   done in lockstep, which would beat the paper outright); (b) the
-   **farthest-first single-phase router** that produced v2's best lineage. **The
-   two were never combined** — that combination is the obvious first move.
+6. **Three known unexploited assets.** (a) **The junction-crossing edges** (new
+   at v4, and the cheapest of the three): SECTION 2's `neighbors()` omits
+   `S(r,c+1)–U(r,c)`, `S(r,c+1)–D(r,c)`, `U(r,c)–D(r,c)`, so the router pays 5
+   steps per row where the evaluator's floor charges 3 — `site_dist` must be
+   updated in the same edit, it is the A* heuristic. (b) The **CRT
+   sheared-torus** layout, from v2's archive — since l=7 and m=5 are coprime the
+   ring torus is Z_35, so every realignment collapses to ONE 1-D rotation
+   instead of two per-axis passes (its grounded implementation cut gap r1's
+   floor 24→12 but routed at 35x floor; analytically the seven rotations total
+   ~194 rounds if done in lockstep). (c) The **farthest-first single-phase
+   router** that produced v2's best lineage. **(b) and (c) were never
+   combined** — with (a) applied first, that combination is the obvious move.
 7. **Budget**: v1 $30 → 7 windows/68 programs; v2 $50 → 10 windows/107
    programs, but 6 of its 10 windows produced no new best ($21 of $49). Expect
    ~$3–5 per window. The certification tier (`certify.py`) runs on elites

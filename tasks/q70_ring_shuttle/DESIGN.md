@@ -1,5 +1,17 @@
 # DESIGN v2 — three-ring memory: hardware mapping + shuttle schedule for a fixed code
 
+> **SUPERSEDED IN TWO PLACES (2026-07-29).** This file is a dated changelog and
+> is kept as history. Two model facts stated below are now known to be wrong and
+> have been corrected in `evaluate.py`; read
+> [README.md](README.md) § "The chip model and the cycle boundary" and
+> [HEAD_TO_HEAD.md](HEAD_TO_HEAD.md) Part 2 for the current position:
+> (a) a one-row `S→S` hop costs **3** primitive steps, not 5 — the junction
+> holds no potential well; (b) our cycle-boundary rule is **not** stricter than
+> the paper's — each ancilla species need only restore its own occupied site
+> set, exactly as IonQ's Algorithm 1 does, so the "+1.94 like-for-like" bar and
+> the "second ancilla batch" reading below are both obsolete (the bar is now
+> **+2.010** on a single, genuinely like-for-like convention).
+
 > **v4 changelog (post-run q70ring_v2, 2026-07-28):** the $50 run reached 676
 > rounds / +1.65 and stalled. Diagnosis (audited against the paper, the archive
 > DB and the journals): (1) the **zone metric was mis-defined** — it counted

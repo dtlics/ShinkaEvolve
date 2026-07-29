@@ -11,7 +11,10 @@ in where ions sit and how they move — which changes SEC duration (POC), the
 noise exposure accumulated per cycle (hence logical error rate at the operating
 point), and the trap footprint (zones).
 
-See [DESIGN.md](DESIGN.md) for the design rationale and background primer.
+See [HEAD_TO_HEAD.md](HEAD_TO_HEAD.md) for a plain-language walkthrough of the
+four stages a solution goes through (geometry → routing → assembly → scoring),
+the audited comparison against the paper, and what the two runs found.
+[DESIGN.md](DESIGN.md) has the design rationale and background primer.
 
 ## Contract files
 

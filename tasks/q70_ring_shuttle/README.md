@@ -21,10 +21,10 @@ the audited comparison against the paper, and what the two runs found.
 | File | Role |
 |---|---|
 | `initial.py` | Seed A (EVOLVE-BLOCK): the *unfolded* realization of the Fig.-60 strategy — block swaps for the long ring, conveyor+rail-wrap medium shifts, Fig.-61 embedded short shifts, vertical data hops for gating, in-place prep/measure on optical rows. Score anchor (0.0), **896 rounds**. Parametric in `(l, m, schedule)`; self-verifies while building. |
-| `initial_folded.py` | Seed B (EVOLVE-BLOCK): the *folded* 2D embedding — cells of 3 rows (data-L / ancillas / data-R), family change = ±2-column side flip (no block swaps), per-column vertical conveyors with lane-column wraps, Fig.-61 embedded shifts per row. **375 rounds / +2.2392** at 287 rail sections. |
-| `initial_evolved.py` | Seed C (EVOLVE-BLOCK): run `q70ring_v2`'s best evolved program with its cell pitch repaired 3→4 (evolution had compressed it to win the then-broken zone term, which aliased the X/Z wrap lanes and forced an X-then-Z sequential fallback). 676 → 566 → 421 → **358 rounds / +2.2542**. |
+| `initial_folded.py` | Seed B (EVOLVE-BLOCK): the *folded* 2D embedding — cells of 3 rows (data-L / ancillas / data-R), family change = ±2-column side flip (no block swaps), per-column vertical conveyors with lane-column wraps, Fig.-61 embedded shifts per row. **300 rounds / +2.6565** at 283 rail sections — the best of the three seeds since the v6.1 router repair. |
+| `initial_evolved.py` | Seed C (EVOLVE-BLOCK): run `q70ring_v2`'s best evolved program with its cell pitch repaired 3→4 (evolution had compressed it to win the then-broken zone term, which aliased the X/Z wrap lanes and forced an X-then-Z sequential fallback). 676 → 566 → 421 → 358 → **310 rounds / +2.6300** at 277 rail sections. Since the v6.1 router repair seed B edges ahead, so `SHIPPED_SEED_SCORE` tracks **seed B** (+2.6565) — it must always track the best shipped plan, or a run could report positive `gain_over_seed` just by rediscovering a basin it was already handed. |
 | `evaluate.py` | Immutable oracle: exact plan compiler/validator, POC + noise-exposure accounting, stim noiseless-determinism check, deterministic seed-anchored score. Also hosts the certification-only circuit builder + BP-OSD sampler. |
-| `routing.py` | **FROZEN REFERENCE ONLY — no seed imports it.** It *was* the shared, non-evolved round packer; the router now lives INSIDE each seed's EVOLVE-BLOCK (SECTION 2), so a mutation can improve the packing algorithm as well as the geometry. Kept on disk unchanged as a regression baseline: given the same `DEFAULT_ATTEMPTS`, the inlined copy reproduces its schedules exactly (419/301 and 455/292). `python routing.py` still runs its self-test. |
+| `routing.py` | **FROZEN REFERENCE ONLY — no seed imports it, and since v6.1 it no longer matches them.** It *was* the shared, non-evolved round packer; the router now lives INSIDE each seed's EVOLVE-BLOCK (SECTION 2), so a mutation can improve the packing algorithm as well as the geometry. It is kept on disk **unchanged**, which means it still walks the pre-correction *five*-family subgraph: it reproduced the inlined copies exactly (419/301 and 455/292) only up to v6, and the v6.1 repair of `neighbors`/`site_dist` in the seeds deliberately left it behind. Treat it as a frozen *pre-repair* baseline, not as the current router. `python routing.py` still runs its self-test. |
 | `certify.py` | Out-of-loop head-to-head: re-runs a candidate in a fresh process and measures real Monte-Carlo LER at chosen p (BP-OSD), tabled against the paper's published Q70 numbers. |
 | `qecc/q70.json` | Pinned code assets (Hx/Hz supports, symplectic logical pairs, schedule), generated + verified by `make_code_assets.py`. |
 | `selfcheck.py` | Dev driver: seed build → compile → determinism → scoring-path → invalid-plan probe battery → optional `--ler`. |
@@ -155,10 +155,21 @@ frame), and each ancilla **species** must restore its own occupied **set**,
 compared **separately** for X and Z. Both halves are verified by replay.
 
 Effect on the seeds: **1012 → 896**, **446 → 375**, **421 → 358** transport
-rounds, and `rounds_over_floor` *rises* (1.36→1.39, 1.34→1.63, 1.28→1.58)
-because the floor fell further than the plans did — the seeds' routers still
-walk the old five-edge subgraph and pay 5 steps for a row. That gap is now the
-single largest signposted lever inside the evolve block (SECTION 2b banner).
+rounds, and `rounds_over_floor` *rose* (1.36→1.39, 1.34→1.63, 1.28→1.58)
+because the floor fell further than the plans did — the seeds' routers were
+still walking the old five-edge subgraph and paying 5 steps for a row.
+
+**v6.1 (2026-07-30) closed that gap.** Both evolved seeds' SECTION-2b
+`is_edge`/`neighbors`/`site_dist` were re-derived on the corrected eight-family
+graph (`site_dist` is now *exact* on the obstacle-free chip; the derivation
+treats the four wells around each junction as a clique and the chip as a grid
+of cliques joined by one edge each). No layout constant was touched. Result:
+**375 → 300** and **358 → 310** transport rounds, `rounds_over_floor`
+**1.63 → 1.30x** and **1.58 → 1.37x**, footprint 287 → 283 and 301 → 277 rail
+sections, scores **+2.2392 → +2.6565** and **+2.2542 → +2.6300**. The anchor
+`initial.py` shares no router code with them (it is a template-based builder
+whose `hop_steps` deliberately walks the 5-step J-centred ladder), so it was
+left alone at 896 rounds and the three `SEED_*` anchors did not move.
 
 ## Score (v4 — deterministic; v3 zone metric, v4 anchors)
 
@@ -179,6 +190,11 @@ score = 1.0 * log2(65.10 / var_exp)      # plan-dependent noise exposure
 instead of 1012 under the corrected cycle-boundary rule. `SEED_ZONES` is
 unmoved at 428 — neither correction touches the footprint. `SHIPPED_SEED_SCORE`
 2.2028 → **2.2542**. Weights are unchanged (1.0 / 0.5 / 1.0).
+
+**v6.1:** all three `SEED_*` anchors are **unchanged** (the router repair did
+not touch `initial.py`, which still scores exactly 0.0000), and only
+`SHIPPED_SEED_SCORE` moved, 2.2542 → **2.6300**, tracking the rebuilt
+`initial_evolved.py`.
 
 Anchors = the unfolded seed (scores exactly 0). The operating-point reliability
 readout — `ler_shift_log10 = 5·log10(total exposure ratio)`, the paper's
@@ -228,7 +244,7 @@ Verdict: the substitution is sound for ranking and roughly calibrated in
 magnitude. Reproduce with `scratchpad/metric_validation.py` after any change to
 the noise model or the score. *(Those three exposures are the pre-router plans
 as they stood when the LER was measured; the seeds have since moved to
-569.10 / 532.63 / 531.44. The validation is of the exposure→LER mapping itself,
+569.10 / 527.38 / 528.08. The validation is of the exposure→LER mapping itself,
 which neither v4 correction touches — the Table III weights are unchanged — so
 it stands as measured and was not re-run.)*
 
@@ -237,9 +253,11 @@ it stands as measured and was not re-run.)*
 > The zone term is bounded (220 sections is the hard floor — 220 ions must
 > each rest on their own S site — so it can yield at most log2(428/220) = +0.96
 > and cannot be farmed by serializing). Watch next: whether `rounds_over_floor`
-> actually falls — it *rose* to 1.58–1.63x under the v4 corrections because the
-> floor moved further than the plans did, so there is real headroom there for
-> the first time in two runs — and whether any plan games `low_occ_rounds` by
+> keeps falling — it *rose* to 1.58–1.63x under the v4 corrections because the
+> floor moved further than the plans did, and the v6.1 router repair brought it
+> back to **1.30–1.37x** without touching a layout constant, so what is left
+> above the floor is packing slack rather than a wrong chip map — and whether
+> any plan games `low_occ_rounds` by
 > padding high-occupancy no-op rounds. Changing weights or anchors mid-run
 > invalidates archive ordering; do it between runs only.
 
@@ -248,12 +266,20 @@ it stands as measured and was not re-run.)*
 | plan | rounds | rail sections | T_SEC | floor | rounds/floor | score |
 |---|---|---|---|---|---|---|
 | `initial.py` unfolded (anchor) | 896 | 428 | 60.85 | 646 | 1.39x | **0.000** |
-| `initial_folded.py` (inlined router) | 375 | 287 | 34.80 | 230 | 1.63x | **+2.239** |
-| **`initial_evolved.py` (inlined router, best)** | **358** | **301** | **33.95** | **226** | **1.58x** | **+2.254** |
+| **`initial_folded.py` (inlined router, best)** | **300** | **283** | **31.05** | **230** | **1.30x** | **+2.657** |
+| `initial_evolved.py` (inlined router, `SHIPPED_SEED_SCORE`) | 310 | 277 | 31.55 | 226 | 1.37x | **+2.630** |
 | **paper Q70 as published (Table XXVI)** | **424** | **~288** | 34.2 micro | — | — | **+2.010** |
-| folded layout floor-perfect | 230 | 287 | 27.55 | 230 | 1.00x | +3.089 |
-| evolved layout floor-perfect | 226 | 301 | 27.35 | 226 | 1.00x | +3.050 |
-| CRT geometry, analytic rotation cost | ~194+gating | — | — | — | — | ≈+3.30 |
+| folded layout floor-perfect | 230 | 283 | 27.55 | 230 | 1.00x | +3.110 |
+| evolved layout floor-perfect | 226 | 277 | 27.35 | 226 | 1.00x | +3.170 |
+| CRT geometry, analytic rotation cost | ~194+gating | — | — | — | — | ≈+3.42 |
+
+The two "floor-perfect" rows hold each plan's own realised footprint fixed and
+only collapse its routing slack; they are what SECTION 2 + SECTION 3 alone could
+still buy (**+0.45 / +0.54**). Everything past that has to come from SECTION 1.
+The v6.1 router repair took the two seeds most of the way from where they were
+(+2.239 / +2.254) to those ceilings, and it flipped their order: the folded
+layout has the *worse* floor (230 vs 226) and the *bigger* footprint (283 vs
+277) but packs tighter, so it now scores higher.
 
 Paper rows are priced through *our* accounting (14 merge/split rounds, one prep
 and one measure phase) so that only the transport count and the footprint
@@ -268,9 +294,13 @@ shared `routing.py` they were 455 and 419; the seeds now carry their own
 trimmed copy of that router INSIDE the evolve block (see "The router is
 evolvable now" below).
 
-Every candidate's public metrics carry **`gain_over_seed` = score − 2.2542**, so
+Every candidate's public metrics carry **`gain_over_seed` = score − 2.6565**, so
 a run's own contribution is always separable from what it was handed. Report it
-alongside the absolute score in any write-up.
+alongside the absolute score in any write-up. The constant tracks the **best**
+shipped plan (`initial_folded.py`), so every seed boots at `gain_over_seed <= 0`
+and only genuine progress reads positive — if it tracked a weaker seed instead,
+a candidate could show a positive gain merely by rediscovering the better basin
+it was already handed.
 
 **The bar is +2.01, and it is now a genuine like-for-like number.** Both of the
 asymmetries this section used to carry have been *corrected*, not merely noted:
@@ -280,30 +310,33 @@ asymmetries this section used to carry have been *corrected*, not merely noted:
   sibling row `Merge/split 16 = 2 x 8 gate layers` both confirm it, and their
   horizontal cost (2 primitive steps per column) matches our `S→J→S` exactly.
 - *The vertical cost is now identical too.* We used to charge 5 rounds per
-  one-row `S→S` hop against the chip's 3. **Corrected** — see "The chip model
-  and the cycle boundary" above. Our 424-vs-358 comparison is now on one graph.
+  one-row `S→S` hop against the chip's 3. **Corrected** in the evaluator
+  (v6, "The chip model and the cycle boundary" above) and, as of **v6.1**, in
+  the seeds' own routers as well — until then they were still *planning* on the
+  5-step graph while being *priced* on the 3-step one. Our 424-vs-300
+  comparison is now on one graph at both ends.
 - *The cycle-boundary convention is now identical too.* We used to return every
   ancilla to its own layout site and then add that tax to the paper's 424 to get
   a "like-for-like 502". **Corrected** — the paper's own Algorithm 1 leaves a
   uniform group shift and relabels in software, and so may we. `wrap_rounds` is
-  still reported (4 of 358 on the best seed: the data ions' walk home) but there
+  still reported (5 of 300 on the best seed: the data ions' walk home) but there
   is no tax to add to the paper's number any more, so the 502 row is gone.
 
 **What we do and do NOT beat the paper on — state this carefully.**
 
-- *Transport rounds and SEC time: ahead, by ~16%.* 358 vs 424 rounds, 30.90 vs
-  34.20 POC in the paper's own accounting formula (−9.6%), on the same chip
+- *Transport rounds and SEC time: ahead, by ~29%.* 300 vs 424 rounds, 28.00 vs
+  34.20 POC in the paper's own accounting formula (−18.1%), on the same chip
   model and the same cycle-boundary convention. This is a **speed** result — it
-  shortens the logical clock cycle, hence algorithm wall-clock. Two honest
-  qualifiers: our footprint is 301 rail sections against their ~288 (+4.5%; the
-  folded seed is at 287 for 375 rounds), and 424 is *their published number for
-  their own hand design*, whereas an idealized reconstruction of that same
-  design on the corrected chip comes out near 355 — so treat "16% fewer" as the
-  published-number comparison it is, not as a claim about the best plan their
-  strategy admits.
-- *Logical error rate: still essentially a tie.* Our exposure is 531.44 against
-  536.06 for their 424-round plan under identical accounting — **0.86%**, i.e.
-  a ~4% LER change at the ansatz exponent (~3% at the measured one). Do not
+  shortens the logical clock cycle, hence algorithm wall-clock. One honest
+  qualifier remains: 424 is *their published number for their own hand design*,
+  whereas an idealized reconstruction of that same design on the corrected chip
+  comes out near 355 — so treat "29% fewer" as the published-number comparison
+  it is, not as a claim about the best plan their strategy admits. (The
+  footprint caveat is gone: since v6.1 both seeds sit at 283 and 277 rail
+  sections, *below* the paper's ~288, where they used to be at 287 and 301.)
+- *Logical error rate: still essentially a tie.* Our exposure is 527.38 against
+  536.06 for their 424-round plan under identical accounting — **1.6%**, i.e.
+  a ~8% LER change at the ansatz exponent (~6% at the measured one). Do not
   claim a meaningful LER improvement. The reason is structural and worth
   internalising: a transport round costs `p/2000` on each qubit while a
   two-qubit gate layer costs `p` on 70 pairs, so the entire plan-dependent
@@ -311,12 +344,12 @@ asymmetries this section used to carry have been *corrected*, not merely noted:
   LER versus the paper. Fidelity is dominated by the frozen circuit; what a plan
   actually buys is time and area.
 
-The open problem has moved *back* to routing, for the first time in two runs:
-slack is 1.58–1.63x floor because the corrected chip made the floor cheaper
-while the seeds' routers still walk the old five-edge subgraph and pay 5 steps
-for a row instead of 3. Teaching SECTION 2's `neighbors` + `site_dist` the three
-junction-crossing edges is the single most concrete lever in the file. After
-that, the floor itself is a property of the layout (see the CRT row).
+The open problem is now split cleanly in two, and v6.1 removed the confound
+between them. Routing slack is **1.30–1.37x** floor and is *entirely* packing
+loss — stalls, shove-asides, replans and SECTION 3's phase boundaries — because
+SECTION 2 now walks exactly the graph the floor is computed on. Collapsing it
+completely is worth +0.45 / +0.54 (the floor-perfect rows). Everything beyond
+that is the floor itself, a property of the layout (see the CRT row).
 
 ## The router is evolvable now (was `routing.py`, shared and frozen)
 
@@ -346,15 +379,27 @@ its `_descend`/`override` machinery, and the self-test. Given the same
 **exactly** (419 rounds / 301 sections and 455 / 292 under the pre-v4 rules), so
 the removal is verified lossless; the shipped 2-config portfolio then traded 2
 rounds on the evolved seed for 5 fewer on the folded one, 5 fewer rail sections,
-and a third of the build time (~6 s per plan).
+and a third of the build time (~4 s per plan). *That equivalence held up to v6
+only* — the v6.1 repair below moved the inlined copies off `routing.py`'s graph
+on purpose.
 
-**The router walks a SUBSET of the chip's edges** — the five families it had
-before the v4 chip correction, so it pays 5 primitive steps for a one-row `S→S`
-hop where the evaluator's graph (and its floor) charges 3. `routing.py` is
-frozen and was not updated. Widening SECTION 2's `neighbors()` with
-`S(r,c+1)–U(r,c)`, `S(r,c+1)–D(r,c)`, `U(r,c)–D(r,c)` **and** matching
-`site_dist` to the new metric (it is the A* heuristic — it must not
-over-estimate) is the largest signposted single change in either seed.
+**v6.1: the router now walks the chip's FULL edge set.** Until v6.1 SECTION 2
+used the five families it had before the v4 chip correction and paid 5 primitive
+steps for a one-row `S→S` hop the evaluator's graph (and its floor) charges 3 —
+it was planning on a strictly harsher subgraph than it was priced on. `is_edge`
+and `neighbors` gained `S(r,c+1)–U(r,c)`, `S(r,c+1)–D(r,c)` and `U(r,c)–D(r,c)`
+in both directions, and `site_dist` — which is *both* the A* heuristic and the
+per-ion journey bound, so it must never over-estimate — was re-derived from
+scratch on the widened graph. The derivation is the clique picture: every well
+belongs to exactly one junction clique, the chip is a rectangular grid of those
+cliques joined by one edge each, so a route pays `2·(|dr|+|dc|) − 1` plus a
+0-or-1 correction at each end depending on which clique member it starts and
+finishes on. It is **exact**, not merely admissible, and was checked against
+brute-force BFS over the seeds' own `neighbors()` for every ordered pair of
+sites (all four kinds, both boundary columns) on grids from 1×4 to 8×3.
+Measured effect, with no layout constant touched: 375 → 300 and 358 → 310
+rounds. `routing.py` is frozen and was deliberately **not** updated, so it is
+now a pre-repair baseline rather than a mirror of the seeds.
 
 ## Head-to-head protocol
 
@@ -432,6 +477,15 @@ over-estimate) is the largest signposted single change in either seed.
   **exact** on the 1104 interior S–S pairs (the only kind `compile_plan` ever
   feeds it — verified by replay: every gate-time snapshot of all three seeds
   contains S sites only).
+- v6.1 seed-router repair: the seeds' own `is_edge` agrees with the evaluator's
+  `_is_edge` on all 10 000 ordered site pairs of a 5×5 window; their
+  `neighbors()` equals the evaluator's adjacency restricted to the grid, site by
+  site; and `site_dist` is **admissible and exact** against brute-force BFS over
+  that same `neighbors()` on every ordered pair of sites — all 16 site-kind
+  combinations — for grids 6×6, 5×7, 4×4, 3×9, 2×2, 8×3, 1×4 and 7×5 (85 424
+  pairs). On the seeds' own 15×28 grid `site_dist ≥ _dist_lb` for all 176 400
+  S–S pairs, with equality on 176 190 of them (the 210 exceptions all touch the
+  dead-end column 0, where `_dist_lb` stays a strict lower bound by design).
 - Determinism: each seed built twice per process, byte-identical JSON.
 - 4-agent adversarial review (validator, stim/decoder, exploit hunt, seed
   robustness) with live probe execution; all critical/major findings fixed (see
@@ -444,18 +498,19 @@ over-estimate) is the largest signposted single change in either seed.
 
 ## THE OBJECTIVE, IN ONE LINE
 
-**The shipped seed beats the published design on speed; the largest remaining
-win is now ROUTING, then geometry.** `initial_evolved.py` runs the SEC in **358
-transport rounds** vs IonQ's published 424, on the same chip graph and the same
-cycle-boundary convention — but at **1.58x its own 226-round distance floor**,
-i.e. 132 rounds of pure parallelism loss. Most of that is one identified thing:
-SECTION 2's `neighbors`/`site_dist` walk the pre-correction five-edge subgraph,
-so every vertical hop costs the router 5 primitive steps where the chip charges
-3. Fix that first. Then the floor itself, which is a property of the embedding:
-a CRT/sheared-torus geometry (l=7, m=5 coprime ⇒ the ring torus is Z₃₅, so every
+**The shipped seeds beat the published design on speed; the largest remaining
+win is GEOMETRY, with packing slack a close second.** `initial_folded.py` runs
+the SEC in **300 transport rounds** vs IonQ's published 424, at 283 rail
+sections vs their ~288, on the same chip graph and the same cycle-boundary
+convention — but at **1.30x its own 230-round distance floor** (the pitch-4
+seed: 310 rounds, 1.37x over 226). Since v6.1 the router walks exactly the graph
+the floor is computed on, so that 1.30–1.37x is pure packing loss — stalls,
+shove-asides, replans, phase boundaries — worth **+0.45 / +0.54** if collapsed
+entirely. Past that the floor itself is a property of the embedding: a
+CRT/sheared-torus geometry (l=7, m=5 coprime ⇒ the ring torus is Z₃₅, so every
 realignment becomes ONE 1-D rotation instead of two per-axis passes) has an
-analytic rotation cost near **194 rounds**. Both levers are inside the evolve
-block.
+analytic rotation cost near **194 rounds**, i.e. ≈+3.42. Both levers are inside
+the evolve block.
 
 ## Run playbook (binding lessons from runs q70ring_v1 $30 and q70ring_v2 $50)
 
@@ -505,41 +560,44 @@ seeds/score).
    = quote the validator highlights above (all 9 rules, **the EIGHT edge
    families**, odd-rows-optical, and the **two-part cycle boundary**: exact
    sites for data/beacon/reservoir, per-species set for X and Z ancillas);
-   building blocks = **router architecture first** (teach the router the three
-   junction-crossing edges the seeds' `neighbors()` still omits — that alone is
-   worth ~40% off every vertical journey; fuse a gap's `(delta_i, delta_j)` into
-   ONE stall-tolerant pass instead of sequential per-axis passes; interleave the
-   X and Z species into shared rounds; exploit that a closed-loop rotation
-   advances every ion in the same round; insert per-ion stalls rather than
-   aborting a pass), then layout; point at the slack map and the parallelism
-   line as the two things to move; runtime = see "Builders may search" below.
-   **Do NOT quote "beat 424" as the target** — the shipped seed already does.
-   Name the plan's own floor (226) and the CRT geometry hypothesis as the
-   target.
+   building blocks = **geometry first now that v6.1 fixed the router's chip
+   map** (the CRT/sheared-torus embedding; a cell pitch that varies with the
+   column; interleaving the two blocks in one row band; min-cost matching for
+   the per-round ancilla→site assignment), then packing (fuse a gap's
+   `(delta_i, delta_j)` into ONE stall-tolerant pass instead of sequential
+   per-axis passes; interleave the X and Z species into shared rounds; exploit
+   that a closed-loop rotation advances every ion in the same round; insert
+   per-ion stalls rather than aborting a pass; overlap SECTION 3's phases
+   harder); point at the slack map and the parallelism line as the two things to
+   move; runtime = see "Builders may search" below.
+   **Do NOT quote "beat 424" as the target** — both shipped seeds already do,
+   and both are already below the paper's footprint. Name each plan's own floor
+   (226 / 230) and the CRT geometry hypothesis as the target.
 
 5b. **BUILDERS MAY SEARCH (changed after run v2).** Earlier runs told candidates
    to build the plan fast and "avoid brute-force search", and evaluation took
    ~1–2 s — so every candidate was a one-shot constructive heuristic. The budget
-   is now **30 minutes per evaluation** (the routed seeds build in 15–20 s, so
-   there are ~100x headroom). Say so explicitly in `task_sys_msg`: a builder MAY
+   is now **30 minutes per evaluation** (the routed seeds build in ~4 s since
+   the v6.1 repair — shorter routes, fewer A* expansions — so there is ~400x
+   headroom). Say so explicitly in `task_sys_msg`: a builder MAY
    run a real optimizer — search over layout parameters, anneal the ion→site
    assignment, try several geometries and keep the cheapest, tune the router's
    knobs per gap, or re-plan a gap several ways and pick the best. It must stay
    deterministic (no wall-clock or RNG-seed dependence on run order) and must
    finish inside the budget. This is the single biggest widening of the design
    space available, and it is unexplored.
-6. **Three known unexploited assets.** (a) **The junction-crossing edges** (new
-   at v4, and the cheapest of the three): SECTION 2's `neighbors()` omits
-   `S(r,c+1)–U(r,c)`, `S(r,c+1)–D(r,c)`, `U(r,c)–D(r,c)`, so the router pays 5
-   steps per row where the evaluator's floor charges 3 — `site_dist` must be
-   updated in the same edit, it is the A* heuristic. (b) The **CRT
-   sheared-torus** layout, from v2's archive — since l=7 and m=5 are coprime the
-   ring torus is Z_35, so every realignment collapses to ONE 1-D rotation
-   instead of two per-axis passes (its grounded implementation cut gap r1's
-   floor 24→12 but routed at 35x floor; analytically the seven rotations total
-   ~194 rounds if done in lockstep). (c) The **farthest-first single-phase
-   router** that produced v2's best lineage. **(b) and (c) were never
-   combined** — with (a) applied first, that combination is the obvious move.
+6. **Two known unexploited assets** (the third, the junction-crossing edges,
+   was **spent at v6.1** — `is_edge`/`neighbors`/`site_dist` now walk the full
+   eight-family graph in both seeds, worth 375→300 and 358→310 rounds; do not
+   re-suggest it). (a) The **CRT sheared-torus** layout, from v2's archive —
+   since l=7 and m=5 are coprime the ring torus is Z_35, so every realignment
+   collapses to ONE 1-D rotation instead of two per-axis passes (its grounded
+   implementation cut gap r1's floor 24→12 but routed at 35x floor;
+   analytically the seven rotations total ~194 rounds if done in lockstep).
+   (b) The **farthest-first single-phase router** that produced v2's best
+   lineage. **(a) and (b) were never combined** — and both now sit on a router
+   that finally prices vertical travel correctly, so that combination is the
+   obvious move.
 7. **Budget**: v1 $30 → 7 windows/68 programs; v2 $50 → 10 windows/107
    programs, but 6 of its 10 windows produced no new best ($21 of $49). Expect
    ~$3–5 per window. The certification tier (`certify.py`) runs on elites

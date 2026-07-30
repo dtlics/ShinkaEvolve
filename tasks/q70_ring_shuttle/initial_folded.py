@@ -1,13 +1,20 @@
 """FOLDED seed -- folded 2D embedding + inlined parallel round packer.
 
-375 transport rounds / 1.63x its own distance floor / score +2.2392, at 287
-rail sections -- the smallest footprint of the three seeds, and just under the
-paper's own ~288. Hand-written folded embedding: cells of three rows (data-L /
-ancillas / data-R), an A/B family change as a local +-2-column side flip rather
-than a block swap, per-column vertical conveyors, embedded shifts along the
-rows. Kept as a structurally DISTINCT basin from the pitch-4 cell seed --
-different cell geometry and flip convention -- so the two islands explore
-different layout families. 700 -> 455 -> 446 -> 375 rounds.
+300 transport rounds / 1.30x its own distance floor / score +2.6565, at 283
+rail sections -- BEST OF THE THREE SEEDS since the 2b router repair, and below
+the paper's own ~288 sections. Hand-written folded embedding: cells of three
+rows (data-L / ancillas / data-R), an A/B family change as a local +-2-column
+side flip rather than a block swap, per-column vertical conveyors, embedded
+shifts along the rows. Kept as a structurally DISTINCT basin from the pitch-4
+cell seed -- different cell geometry and flip convention -- so the two islands
+explore different layout families.
+700 -> 455 -> 446 -> 375 -> 300 rounds (the last step is the 2b repair: the
+router used to walk a five-family subgraph and pay 5 steps for a one-row hop
+the chip charges 3 for).
+
+evaluate.py's SHIPPED_SEED_SCORE still tracks initial_evolved.py (+2.6300), so
+`gain_over_seed` reads -0.0265 for this file even though it is the stronger
+plan. That is bookkeeping, not a regression.
 
 THE FILE IS THREE INDEPENDENT SECTIONS, each with its own banner listing what
 it owns and what a mutation could try. You can rewrite ONE of them without
@@ -23,14 +30,15 @@ reading the other two:
   SECTION 3  ASSEMBLY  prep, the 7 merge/gate/split rounds, measure, the
                        cyclicity wrap-back, and the phase emission.
 
-WHERE THE REMAINING HEADROOM IS: 145 rounds of routing slack over this layout's
-floor -- more slack than the pitch-4 cell seed carries, and most of it because
-SECTION 2 walks a five-edge subgraph and never uses the chip's junction
-crossings, so every vertical hop costs it 5 primitive steps where the chip
-charges 3 (see the 2b banner) -- and the floor ITSELF is a property of the
-layout. A CRT/sheared-torus embedding (l=7, m=5 coprime, so the ring torus is
-Z_35 and every realignment becomes ONE 1-D rotation) collapses each realignment
-to a single pass. Both halves are in this file.
+WHERE THE REMAINING HEADROOM IS: two halves, both in this file.
+  * 70 rounds of PACKING slack over this layout's floor -- LESS slack than the
+    pitch-4 cell seed now carries (84). SECTION 2 walks exactly the
+    eight-family graph the evaluator prices, so what is left is stalls, shoves,
+    replans and SECTION 3's phase boundaries, not a wrong chip map.
+  * the floor ITSELF (230), a property of the layout alone, and 4 rounds worse
+    than the pitch-4 seed's 226. A CRT/sheared-torus embedding (l=7, m=5
+    coprime, so the ring torus is Z_35 and every realignment becomes ONE 1-D
+    rotation) collapses each realignment to a single pass.
 """
 
 import heapq
@@ -64,11 +72,18 @@ from collections import deque
 # the left edge, leaving a free margin the router uses as a wrap lane.
 #
 # WHAT THIS COSTS: this layout's per-gap distance floor totals 230 rounds and
-# the router realises 375 of them -- more slack than the pitch-4 cell layout
-# (226 / 358) but over a SMALLER footprint (287 rail sections vs 301, i.e.
-# below the paper's own ~288).  The floor is a property of the GEOMETRY ALONE,
-# so it is the thing to attack here -- but note the slack is now the bigger
-# term of the two, and the 2b banner says where most of it comes from.
+# the router realises 300 of them, over 283 rail sections (below the paper's
+# own ~288).  Against the pitch-4 cell layout (226 floor / 310 realised / 277
+# sections) this one has the WORSE floor and the BIGGER footprint but packs
+# noticeably tighter -- 1.30x vs 1.37x -- which is why it now scores higher.
+# The floor is a property of the GEOMETRY ALONE, so it is the thing to attack
+# HERE; the 70 rounds of slack above it belong to SECTION 2 and SECTION 3.
+#
+# ONE CONSTANT WORTH RE-EXAMINING (deliberately NOT changed): CELL_BASE = 4
+# leaves columns 0-3 free as a wrap lane, but COLUMN 0 IS A DEAD END on this
+# chip -- S(r,0)'s only neighbour is J(r,0) -- so only three of those four
+# columns are genuinely useful lane.  CELL_BASE = 3 would keep the whole usable
+# lane and buy back a column of width; nobody has measured that trade.
 #
 # WHAT A MUTATION COULD TRY HERE:
 #   * a CRT / sheared-torus embedding: l = 7 and m = 5 are coprime, so the ring
@@ -227,8 +242,9 @@ def build_geometry(spec):
 # round), and only head-on swaps through a single edge are forbidden.  Emission
 # styles that route groups SEQUENTIALLY (per-axis passes, X-then-Z,
 # hide/slide/emerge) land at 2.1-3.4x the layout's distance floor; this lands
-# at ~1.6x -- and most of what is left is the vertical shortcut the 2b banner
-# describes, which this packer does not use at all.
+# at ~1.3x.  The router walks the chip's FULL eight-family graph (2b), the same
+# one the evaluator prices the floor on, so what is left above the floor is
+# PACKING slack -- see the 2b banner for where.
 #
 # Structure: 2a policy knobs | 2b grid primitives | 2c path finding |
 #            2d round packer | 2e entry points.
@@ -271,13 +287,15 @@ ROUTER_POLICY = {
 # the one that matters; four further settings were measured (opposed_cost 0 and
 # 12 at both radii) and NONE of them ever wins on either shipped layout, while
 # they triple the build time -- opposed_cost 0 in particular deadlocks outright.
-# Measured end-to-end here (under the v4 cycle-boundary rule): these two give
-# 358 rounds / 301 rail sections on the pitch-4 cell layout and 375 / 287 on
-# the folded one.  Under the older, stricter rule they gave 421 / 301 and
-# 446 / 287, against 419 / 301 and 455 / 292 for a six-setting portfolio, at
-# three times the build time.
-# Adding entries trades build time for rounds; a single entry is legitimate too
-# (it costs ~25 extra rail sections here).
+# Measured end-to-end here (v6.1, on the repaired eight-family graph of 2b):
+# these two give 310 rounds / 277 rail sections on the pitch-4 cell layout and
+# 300 / 283 on the folded one, in ~3.7 s and ~4.0 s of build time.  Before the
+# 2b repair the SAME two entries gave 358 / 301 and 375 / 287.
+# Adding entries trades build time for rounds; a single entry is legitimate.
+# Dropping to aside_radius 2 alone costs 5 rounds (evolved) / 1 round (folded)
+# and NO extra rail sections, at ~60% of the build time; aside_radius 3 alone
+# costs 2 / 10 rounds and +34 rail sections on the pitch-4 layout, so radius 2
+# is the one to keep if the portfolio is ever cut to one.
 ROUTER_ATTEMPTS = (
     {"aside_radius": 2, "opposed_cost": 3.0},
     {"aside_radius": 3, "opposed_cost": 3.0},
@@ -302,21 +320,36 @@ _WAIT = "__wait__"
 
 
 # --- 2b. GRID PRIMITIVES ---------------------------------------------------
-# The five edge families this router uses:
-#   S(r,c)-J(r,c) | J(r,c)-S(r,c+1) | J(r,c)-U(r,c) | J(r,c)-D(r,c)
-#   | D(r,c)-U(r+1,c)
+# The chip's FULL edge set -- all EIGHT families, exactly what the evaluator
+# accepts as one primitive transport step:
+#   inside a horizontal section : S(r,c)-J(r,c)
+#   inside a vertical section   : D(r,c)-U(r+1,c)
+#   the junction-(r,c) CLIQUE   : J(r,c)-S(r,c+1) | J(r,c)-U(r,c) |
+#                                 J(r,c)-D(r,c)   | S(r,c+1)-U(r,c) |
+#                                 S(r,c+1)-D(r,c) | U(r,c)-D(r,c)
+# A junction is a ZERO-LENGTH CROSSING, so the four wells around it are
+# MUTUALLY one step apart.  That clique is what makes one COLUMN cost 2 steps
+# (S(r,c)-J(r,c)-S(r,c+1)) and one ROW cost 3 (S(r,c)-D(r,c-1)-U(r+1,c-1)-
+# S(r+1,c)); the rest-site metric is 2*|dr| + max(2*|dc|, 1).
 #
-# *** THESE ARE A SUBSET.  BIGGEST UNEXPLOITED LEVER IN THIS FILE. ***
-# The evaluator's junction is a ZERO-LENGTH CROSSING, so three MORE edges are
-# legal and this router simply never uses them:
-#   S(r,c+1)-U(r,c) | S(r,c+1)-D(r,c) | U(r,c)-D(r,c)
-# With them a one-row S->S hop costs 3 primitive steps (S(r,c) - D(r,c-1) -
-# U(r+1,c-1) - S(r+1,c)) instead of the 5 this router pays, and the evaluator's
-# distance FLOOR is computed on the full graph.  That single omission is most
-# of the gap between the floor and what this packer achieves: teach
-# `neighbors` and `site_dist` the three extra families and every vertical
-# journey gets ~40% shorter.  Both must be changed together -- `site_dist` is
-# the A* heuristic, and it must never over-estimate the true distance.
+# WHAT IS LEFT NOW THAT THE MAP IS RIGHT:
+#   * this router used to walk a FIVE-family subgraph and pay 5 steps for a
+#     one-row hop the chip charges 3 for.  It no longer does, so every round
+#     above `floor_total` is PACKING slack -- stalls, shoves, replans and the
+#     phase boundaries SECTION 3 imposes -- not a wrong chip map.  That makes
+#     the packer and SECTION 3's overlap the places left to attack;
+#   * COLUMN 0 IS A DEAD END.  S(r,0)'s only neighbour is J(r,0) (there is no
+#     junction to its left), so a one-row hop starting or ending there costs 5
+#     steps while the evaluator's floor still charges 3.  Neither shipped
+#     layout puts MOVING ions on column 0 -- the folded seed keeps CELL_BASE=4
+#     columns of free margin, the pitch-4 seed puts only STATIC beacons there
+#     -- but a SECTION 1 mutation that parks live ions on column 0 would pay
+#     for it invisibly.  Shifting the pitch-4 layout one column right
+#     (CELL_BASE = 1) would also free column 0 as a wrap lane; it is NOT done
+#     here because that is a layout change, not a router repair;
+#   * `site_dist` is EXACT on the obstacle-free graph.  Any rewrite of it must
+#     stay a LOWER bound on the true distance or A* stops returning shortest
+#     paths -- brute-force it against `neighbors` before shipping.
 
 def as_site(x):
     """Normalise ["S", r, c] / ("S", r, c) to a hashable tuple."""
@@ -335,10 +368,17 @@ def is_edge(a, b):
         return ra == rb and ca == cb
     if ka in ("U", "D") and kb == "J":
         return ra == rb and ca == cb
+    # zero-length junction crossing: its two leg wells touch the NEXT
+    # section's left well, and each other, directly
+    if ka == "S" and kb in ("U", "D"):
+        return ra == rb and cb == ca - 1
+    if ka in ("U", "D") and kb == "S":
+        return ra == rb and ca == cb - 1
     if ka == "D" and kb == "U":
-        return rb == ra + 1 and ca == cb
+        # rb == ra: across junction (r,c);  rb == ra+1: the vertical section
+        return ca == cb and (rb == ra or rb == ra + 1)
     if ka == "U" and kb == "D":
-        return rb == ra - 1 and ca == cb
+        return ca == cb and (rb == ra or rb == ra - 1)
     return False
 
 
@@ -346,76 +386,102 @@ def neighbors(site, rows, cols):
     """All sites one primitive edge away from ``site`` inside the grid."""
     k, r, c = site
     if k == "S":
-        out = [("J", r, c)] if c < cols else []
-        if c >= 1:
+        out = [("J", r, c)]
+        if c >= 1:                       # the junction (r, c-1) clique
             out.append(("J", r, c - 1))
+            out.append(("U", r, c - 1))
+            out.append(("D", r, c - 1))
         return out
     if k == "J":
-        out = [("S", r, c)]
+        out = [("S", r, c), ("U", r, c), ("D", r, c)]
         if c + 1 < cols:
             out.append(("S", r, c + 1))
-        out.append(("U", r, c))
-        out.append(("D", r, c))
         return out
     if k == "U":
-        return [("J", r, c)] + ([("D", r - 1, c)] if r >= 1 else [])
-    return [("J", r, c)] + ([("U", r + 1, c)] if r + 1 < rows else [])
+        out = [("J", r, c), ("D", r, c)]
+        if c + 1 < cols:
+            out.append(("S", r, c + 1))
+        if r >= 1:
+            out.append(("D", r - 1, c))
+        return out
+    out = [("J", r, c), ("U", r, c)]
+    if c + 1 < cols:
+        out.append(("S", r, c + 1))
+    if r + 1 < rows:
+        out.append(("U", r + 1, c))
+    return out
 
 
-def _sj_key(site):
-    """(row, key) of an S/J site; key = 2c for S(r,c), 2c+1 for J(r,c).
+def _cell(site):
+    """(junction row, junction col, clique-member tag, pendant steps).
 
-    Along one row the graph is the path S(r,0) J(r,0) S(r,1) J(r,1) ..., so
-    horizontal distance inside a row is just |key difference|.
+    Every well belongs to exactly ONE junction clique -- J(r,c), U(r,c) and
+    D(r,c) to junction (r,c), S(r,c) to junction (r,c-1) -- and the tag says
+    WHICH of the four members it is.  S(r,0) is the sole exception: column 0
+    has no junction to its left, so it hangs off J(r,0) as a PENDANT, one
+    extra step away from everything.
     """
     k, r, c = site
-    return (r, 2 * c) if k == "S" else (r, 2 * c + 1)
-
-
-def _portals(site, rows):
-    """S/J entry points of a site with their step cost (identity for S/J)."""
-    k, r, c = site
-    if k in ("S", "J"):
-        return ((site, 0),)
-    if k == "U":
-        return ((((("J", r, c), 1), (("J", r - 1, c), 2)) if r >= 1
-                 else ((("J", r, c), 1),)))
-    return ((((("J", r, c), 1), (("J", r + 1, c), 2)) if r + 1 < rows
-             else ((("J", r, c), 1),)))
+    if k == "S":
+        if c == 0:
+            return r, 0, "J", 1
+        return r, c - 1, "S", 0
+    if k == "J":
+        return r, c, "J", 0
+    return r, c, k, 0
 
 
 def site_dist(a, b, rows=10 ** 9, cols=10 ** 9):
-    """Exact obstacle-free graph distance between any two sites.
+    """EXACT obstacle-free graph distance between any two sites.
 
-    The per-ion journey lower bound and the A* heuristic, computed on the
-    five-family subgraph `neighbors` walks (see the 2b banner).  There, rows
-    join only through the 3-step ladder J(r,c)-D(r,c)-U(r+1,c)-J(r+1,c), so a
-    cross-row journey costs 3*|dr| plus the horizontal key distance (or 2 when
-    both ends share an S column: you must step onto a junction and back).
+    Both the A* heuristic AND the router's per-ion journey bound, computed on
+    the chip's full eight-family graph (2b banner), so it agrees with the
+    metric the evaluator prices the distance floor with.
 
-    It is therefore admissible for THIS router but LARGER than the evaluator's
-    own per-gap floor, which uses the chip's full edge set (2*|dr| + max(2*dc,
-    1) on S-S pairs).  Widening `neighbors` and matching this function to it is
-    the change that closes that gap.
+    Derivation: the chip is a rectangular grid of junction CLIQUES joined by
+    ONE edge each -- clique (r,c) reaches (r,c+1) through S(r,c+1)-J(r,c+1)
+    and (r+1,c) through D(r,c)-U(r+1,c).  A route therefore crosses
+    k = |dr| + |dc| portal edges and pays one step inside each of the k-1
+    cliques it merely transits (a transit always enters and leaves by
+    DIFFERENT members), plus one step at each END unless that endpoint already
+    IS the member the route departs from / arrives at.  Which end members are
+    available depends on the first and last direction of travel, and the two
+    are NOT independent when the route can turn only once -- hence ``combos``.
+    A longer-than-Manhattan clique route costs >= 2 more, so Manhattan wins.
+
+    ``rows``/``cols`` are accepted for call compatibility only: the clique grid
+    is rectangular, so a shortest route never leaves its endpoints' bounding
+    box and the bounds cannot change the answer.
+
+    Exactness is not cosmetic -- A* needs a lower bound, and a TIGHT one is
+    what keeps expansions in the hundreds.  Verified against brute-force BFS
+    over `neighbors` for EVERY ordered pair of sites (all four kinds) on grids
+    from 1x4 to 8x3: exact on all of them, boundary columns included.
     """
     a, b = as_site(a), as_site(b)
     if a == b:
         return 0
-    if is_edge(a, b):
-        return 1
-    best = _INF
-    for pa, ca in _portals(a, rows):
-        ra, ka = _sj_key(pa)
-        for pb, cb in _portals(b, rows):
-            rb, kb = _sj_key(pb)
-            if ra == rb:
-                d = ca + cb + abs(ka - kb)
-            else:
-                h = 2 if (ka == kb and ka % 2 == 0) else abs(ka - kb)
-                d = ca + cb + 3 * abs(ra - rb) + h
-            if d < best:
-                best = d
-    return best
+    ra, ca, ta, pa = _cell(a)
+    rb, cb, tb, pb = _cell(b)
+    dr, dc = rb - ra, cb - ca
+    if dr == 0 and dc == 0:                        # same clique
+        return pa + pb + (0 if ta == tb else 1)
+    # the member a step in a given direction leaves from is the same one a
+    # step in that direction arrives at
+    h_out, h_in = ("S", "J") if dc > 0 else ("J", "S")
+    v_out, v_in = ("D", "U") if dr > 0 else ("U", "D")
+    if dr == 0:
+        combos = ((h_out, h_in),)
+    elif dc == 0:
+        combos = ((v_out, v_in),)
+    else:
+        combos = [(h_out, v_in), (v_out, h_in)]    # one turn, either order
+        if abs(dc) >= 2:
+            combos.append((h_out, h_in))           # room to start AND end flat
+        if abs(dr) >= 2:
+            combos.append((v_out, v_in))
+    end = min((0 if ta == f else 1) + (0 if tb == l else 1) for f, l in combos)
+    return pa + pb + 2 * (abs(dr) + abs(dc)) - 1 + end
 
 
 # --- 2c. PATH FINDING ------------------------------------------------------
@@ -587,8 +653,9 @@ class _Engine(object):
         self.replan_after = int(replan_after)
         self.replan_slack = int(replan_slack)
         # how many planned routes cross each site: a shove should park where
-        # nobody is coming, NOT in the nearest U/D leg (legs are ladder rungs,
-        # so parking there jams the vertical passage head-on)
+        # nobody is coming, NOT in the nearest U/D leg (a leg well is one of the
+        # four members of its junction's clique, so parking there chokes EVERY
+        # route across that junction, not just the vertical one)
         self.site_use = site_use or {}
         self.site_cost = site_cost or {}
         self.aside_count = {}
@@ -793,10 +860,12 @@ class _Engine(object):
         """Shove ion ``o`` out of the way, splicing the detour AND the return
         trip into its own route so it still reaches its goal.
 
-        An S site's only two neighbours are the junctions the pusher itself
-        needs, so a one-step shove is often impossible: BFS over currently FREE
-        sites for the nearest parking spot outside the pusher's near-term
-        corridor, preferring quiet sites and avoiding other ions' goals.
+        A rail section's neighbours are its own junction plus the three
+        other wells of the junction on its left -- exactly the wells the pusher
+        itself needs -- so a one-step shove is often impossible: BFS over
+        currently FREE sites for the nearest parking spot outside the pusher's
+        near-term corridor, preferring quiet sites and avoiding other ions'
+        goals.
         ``avoid`` is hard (never entered), ``keep_clear`` is soft (traversable,
         never parked on).
         """

@@ -27,6 +27,17 @@ unfolded seed is intentionally simpler and slower — improving on it (e.g. by
 folding, smarter wrap routing, overlapping gaps with gating) is the point of
 the evolution. All routines are parametric in (l, m, schedule) so a plan
 builder that works here can be re-run on other three-ring codes.
+
+THIS FILE IS THE SCORE ANCHOR (896 transport rounds, 428 rail sections,
+T_core 53.80 POC — evaluate.py's SEED_* constants are these numbers, so it
+scores exactly 0.0000 by construction). It shares NO code with the two evolved
+seeds: it has no router at all, only hand-written path templates. `hop_steps`
+deliberately walks the J-centred vertical LADDER — S→J→D→U→J→S, five steps for
+a one-row hop the chip itself charges three for — and the local `_edge` mirror
+is a strict SUBSET of the evaluator's adjacency rule, so its assertions stay
+conservative and never fire. Both are part of what makes this the slow
+reference, and both are left alone on purpose: repairing them would move the
+zero point of the score and invalidate every recorded comparison.
 """
 
 

@@ -127,10 +127,11 @@ Two consequences that drive everything below:
 1. **The floor is set purely by *where you put things*** — the layout. Change the
    layout and the floor changes.
 2. **Routing can never beat the floor**; it only decides whether you pay 1× it or
-   3× it. Our folded layout has a gap whose floor is 50 rounds and spends 72 on
-   it — that 22-round difference is pure disorganisation, and most of it is one
-   identified thing: the router still walks the *old* five-edge graph and pays 5
-   steps per row where the chip charges 3.
+   3× it. Our folded layout has a gap whose floor is 50 rounds and spends 61 on
+   it — that 11-round difference is pure disorganisation. It used to be 72
+   rounds, and the difference was mostly one identified thing: the router walked
+   the *old* five-edge graph and paid 5 steps per row where the chip charges 3.
+   That was repaired (v6.1); what is left is genuine packing loss.
 
 ### CRT — the promising idea we have not exploited yet
 
@@ -154,10 +155,10 @@ both. With the CRT relabelling, both collapse into **one single rotation** of a
 > together, no second pass.
 
 Arithmetic on the actual Q70 schedule says all seven rotations total **~194
-rounds**, against our current best layout's 226-round floor. It is one of the
-two biggest unexploited ideas in the task — the other one is smaller, more
-certain and much cheaper: teach the router the junction-crossing steps it
-currently ignores (Part 3, finding 7).
+rounds**, against our current best layouts' 226- and 230-round floors. It is now
+**the** biggest unexploited idea in the task: the other one that used to sit
+beside it — teaching the router the junction-crossing steps it ignored — was
+cashed in at v6.1 (Part 3, finding 7) and is worth no more.
 
 ---
 
@@ -215,7 +216,8 @@ so the entire game is packing as many ions as possible into each round.
 **What Stage 2 decides: how close you get to the floor.** It cannot lower the
 floor; it decides whether you pay 1.0× it or 2.8× it. Reported as
 `rounds_over_floor`, with `ions_per_round` showing the packing quality. The two
-shipped routers are at **1.58×** and **1.63×**.
+shipped routers are at **1.37×** (pitch-4) and **1.30×** (folded) — they were at
+1.58× and 1.63× until v6.1 taught them the chip's real step rules.
 
 > This is the stage everyone underestimated, twice. See Part 3.
 
@@ -234,7 +236,7 @@ writes down the resulting list of phases. In full, one SEC is:
       c. GATE   fire the two-qubit gate on all 70 pairs at once
       d. SPLIT  pull each pair back apart
 3.  MEASURE     read out all 70 ancillas       (optical rows again)  → the syndrome
-4.  WALK HOME   route the DATA ions home       ← calls Stage 2, 4 rounds
+4.  WALK HOME   route the DATA ions home       ← calls Stage 2, 5 rounds
 ```
 
 Step 4 exists because the next cycle must start from the same arrangement — the
@@ -253,7 +255,7 @@ corrections in Part 2:
   software, which is exactly what IonQ's own algorithm does.
 
 This used to cost 67 rounds of the best seed's 421 (every ancilla walking back
-to its personal site). It now costs 4.
+to its personal site). It now costs 5.
 
 ### Stage 4 — The EVALUATOR scores it (not part of the candidate)
 
@@ -352,32 +354,39 @@ layers + 8 two-qubit layers + 3 readout`), so only the transport count differs:
 | | transport rounds | SEC time (their formula) | exposure → LER | rail sections |
 |---|---|---|---|---|
 | **paper Q70** | 424 | 34.20 POC | 536.06 | ~288 |
-| **ours — `initial_evolved`** | **358** (−16%) | **30.90 POC** (−9.6%) | 531.44 (−0.86% ⇒ ~4% LER) | 301 (+4.5%) |
-| **ours — `initial_folded`** | 375 (−12%) | 31.75 POC (−7.2%) | 532.63 (−0.64% ⇒ ~3% LER) | **287** (−0.3%) |
+| **ours — `initial_folded`** | **300** (−29%) | **28.00 POC** (−18.1%) | 527.38 (−1.62% ⇒ ~8% LER) | 283 (−1.7%) |
+| **ours — `initial_evolved`** | 310 (−27%) | 28.50 POC (−16.7%) | 528.08 (−1.49% ⇒ ~7% LER) | **277** (−3.8%) |
 
-**Read this as a real but narrow speed win, on one axis only.** Same chip graph,
-same cycle-boundary convention, same 220 ions, same circuit: 16% fewer transport
-rounds and a ~10% shorter core cycle. Three things keep it honest:
+*(Both seed rows moved at v6.1, when their routers were taught the chip's real
+step rules — before that they read 375 / 287 and 358 / 301. No layout constant
+changed; the plans simply stopped taking 5 steps where 3 were available.)*
 
-- our footprint is **4.5% larger** on the fast seed (the folded seed matches
-  their area at 375 rounds, so we do not beat them on both at once);
+**Read this as a real speed win, on one axis.** Same chip graph, same
+cycle-boundary convention, same 220 ions, same circuit: 29% fewer transport
+rounds and an ~18% shorter core cycle. Two things keep it honest:
+
 - 424 is *their published number for their own hand design*. An idealized
   mechanical reconstruction of that same design on the corrected chip lands near
-  **355** — so "16% fewer" is a comparison against a published figure, not a
-  claim that their strategy could not do better;
+  **355** — so "29% fewer" is a comparison against a published figure, not a
+  claim that their strategy could not do better. Against that 355 reconstruction
+  the margin is ~15%;
 - and it is **not** an LER win — see below.
+
+The area caveat this list used to carry is **gone**: both seeds are now under
+the paper's ~288 sections (283 and 277), where before v6.1 the fast one was at
+301. We now beat them on rounds and on area at the same time.
 
 ### Why LER barely moves, and what that means
 
 A transport round costs `p/2000` on each qubit; a two-qubit gate layer costs `p`
 on 70 pairs. So the entire plan-dependent share of the error budget is **~6%** of
 the total, and the frozen circuit dominates. Even *free* transport would improve
-LER by only ~25% versus the paper, and our actual 16% round saving buys ~4%.
+LER by only ~25% versus the paper, and our actual 29% round saving buys ~8%.
 
 > **A shuttle plan buys time and chip area, not fidelity.** The honest claim for
-> this task is a faster, no-larger logical clock cycle at unchanged fidelity —
-> which still matters, because every logical operation in the architecture is
-> priced in cycles.
+> this task is a faster, slightly smaller logical clock cycle at essentially
+> unchanged fidelity — which still matters, because every logical operation in
+> the architecture is priced in cycles.
 
 ---
 
@@ -414,26 +423,38 @@ LER by only ~25% versus the paper, and our actual 16% round saving buys ~4%.
    Part 2, worth 421 → 358 rounds on the best seed with **no change to any
    plan's actual movement** — they only stopped charging for things the hardware
    does not charge for.
-6. **The floor is a Stage-1 property and still the deepest lever.** Since
-   l = 7 and m = 5 are coprime, the ring torus is isomorphic to Z₃₅, so every
-   realignment collapses to **one** 1-D rotation instead of two per-axis
-   passes — analytically ~194 rounds of rotation versus the current 226-round
-   floor.
-7. **But Stage 2 is back on top of the list, for a very concrete reason.** The
-   chip correction cut the floor further than it cut the plans, so routing slack
-   *rose* from ~1.28× to **1.58×**. The cause is identified and local: the
-   routers inside SECTION 2 still walk the old five-edge graph — they never use
-   the junction-crossing steps — so they pay 5 primitive steps per row where the
-   evaluator's floor charges 3. Widening `neighbors()` and matching `site_dist`
-   to the new metric is a small, well-specified edit with a large expected
-   payoff, and it is the first thing the next run should try.
+6. **The floor is a Stage-1 property and is now clearly the deepest lever.**
+   Since l = 7 and m = 5 are coprime, the ring torus is isomorphic to Z₃₅, so
+   every realignment collapses to **one** 1-D rotation instead of two per-axis
+   passes — analytically ~194 rounds of rotation versus the current 226- and
+   230-round floors.
+7. **Stage 2's one identified defect has now been fixed, and it was worth what
+   it looked like.** The chip correction had cut the floor further than it cut
+   the plans, so routing slack *rose* from ~1.28× to 1.58–1.63×. The cause was
+   local: the routers inside SECTION 2 were still walking the old five-edge
+   graph — they never used the junction-crossing steps — so they paid 5
+   primitive steps per row where the evaluator's floor charged 3. They were
+   planning on a strictly harsher chip than the one they were priced on.
+   At v6.1 `is_edge`/`neighbors` gained the three missing edge families and
+   `site_dist` was re-derived from scratch on the widened graph (a clique-grid
+   argument; it is now *exact*, verified by brute-force BFS against the seeds'
+   own `neighbors()` over every ordered site pair on eight different grid
+   shapes). **No layout constant was touched.** Result: 375 → 300 and
+   358 → 310 rounds, slack 1.63× → **1.30×** and 1.58× → **1.37×**, footprint
+   287 → 283 and 301 → 277, scores +2.2392 → +2.6565 and +2.2542 → +2.6300.
+   It also flipped the ranking: the folded seed is now the better plan.
+   What is left above the floor is genuine packing loss, and collapsing it
+   entirely is worth only +0.45 / +0.54 — so **finding 6 is now the main event**.
 
 ### Attribution, stated plainly
 
 No result in the current seeds is purely evolution's. Run 2's evolved layout is
 in there, but its headline change (the pitch compression) was a regression caused
-by the broken metric; the pitch repair, the router, and both 2026-07-29 model
-corrections were hand-made. Note especially that the 421 → 358 improvement is
-**not** a better plan — it is the same plans, re-priced correctly. That is why
-every candidate reports `gain_over_seed` (now against +2.2542) — so the next
-run's own contribution is unambiguous.
+by the broken metric; the pitch repair, the router, both 2026-07-29 model
+corrections and the v6.1 router repair were hand-made. Note especially that the
+421 → 358 improvement is **not** a better plan — it is the same plans, re-priced
+correctly — whereas 358 → 310 and 375 → 300 *are* genuinely shorter plans, just
+found by a hand-written fix rather than by search. That is why every candidate
+reports `gain_over_seed` (now against +2.6300, which tracks `initial_evolved`
+even though `initial_folded` scores 0.0265 higher) — so the next run's own
+contribution is unambiguous.

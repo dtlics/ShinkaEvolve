@@ -21,8 +21,9 @@ the audited comparison against the paper, and what the two runs found.
 | File | Role |
 |---|---|
 | `initial.py` | Seed A (EVOLVE-BLOCK): the *unfolded* realization of the Fig.-60 strategy — block swaps for the long ring, conveyor+rail-wrap medium shifts, Fig.-61 embedded short shifts, vertical data hops for gating, in-place prep/measure on optical rows. Score anchor (0.0), **896 rounds**. Parametric in `(l, m, schedule)`; self-verifies while building. |
-| `initial_folded.py` | Seed B (EVOLVE-BLOCK): the *folded* 2D embedding — cells of 3 rows (data-L / ancillas / data-R), family change = ±2-column side flip (no block swaps), per-column vertical conveyors with lane-column wraps, Fig.-61 embedded shifts per row. **300 rounds / +2.6565** at 283 rail sections — the best of the three seeds since the v6.1 router repair. |
-| `initial_evolved.py` | Seed C (EVOLVE-BLOCK): run `q70ring_v2`'s best evolved program with its cell pitch repaired 3→4 (evolution had compressed it to win the then-broken zone term, which aliased the X/Z wrap lanes and forced an X-then-Z sequential fallback). 676 → 566 → 421 → 358 → **310 rounds / +2.6300** at 277 rail sections. Since the v6.1 router repair seed B edges ahead, so `SHIPPED_SEED_SCORE` tracks **seed B** (+2.6565) — it must always track the best shipped plan, or a run could report positive `gain_over_seed` just by rediscovering a basin it was already handed. |
+| `initial_folded.py` | Seed B (EVOLVE-BLOCK): the *folded* 2D embedding — cells of 3 rows (data-L / ancillas / data-R), family change = ±2-column side flip (no block swaps), per-column vertical conveyors with lane-column wraps, Fig.-61 embedded shifts per row. **300 rounds / +2.6565** at 283 rail sections — the smallest footprint of the four. |
+| `initial_evolved.py` | Seed C (EVOLVE-BLOCK): run `q70ring_v2`'s best evolved program with its cell pitch repaired 3→4 (evolution had compressed it to win the then-broken zone term, which aliased the X/Z wrap lanes and forced an X-then-Z sequential fallback). 676 → 566 → 421 → 358 → **310 rounds / +2.6300** at 277 rail sections. |
+| `initial_annealed.py` | **Seed D (EVOLVE-BLOCK) — BEST PLAN, and evolution's own discovery.** Salvaged from run `q70ring_v3`: an *annealed affine embedding* (row permutation, column multiplier, shear, side mask, data flip, pitch/base) scored by a per-gate Hungarian ancilla-to-site matching against an analytic floor. It moved the distance **floor to 166** (others: 226/230) — the first floor movement in 62 programs. Its original router was pre-correction and was replaced by the shared SECTION 2. **244 rounds / +2.9075**, but at **304** rail sections it is the *worst* on area. `SHIPPED_SEED_SCORE` tracks this file; the constant must always follow the best seed, or a candidate could post a positive `gain_over_seed` by rediscovering a basin it was handed. |
 | `evaluate.py` | Immutable oracle: exact plan compiler/validator, POC + noise-exposure accounting, stim noiseless-determinism check, deterministic seed-anchored score. Also hosts the certification-only circuit builder + BP-OSD sampler. |
 | `routing.py` | **FROZEN REFERENCE ONLY — no seed imports it, and since v6.1 it no longer matches them.** It *was* the shared, non-evolved round packer; the router now lives INSIDE each seed's EVOLVE-BLOCK (SECTION 2), so a mutation can improve the packing algorithm as well as the geometry. It is kept on disk **unchanged**, which means it still walks the pre-correction *five*-family subgraph: it reproduced the inlined copies exactly (419/301 and 455/292) only up to v6, and the v6.1 repair of `neighbors`/`site_dist` in the seeds deliberately left it behind. Treat it as a frozen *pre-repair* baseline, not as the current router. `python routing.py` still runs its self-test. |
 | `certify.py` | Out-of-loop head-to-head: re-runs a candidate in a fresh process and measures real Monte-Carlo LER at chosen p (BP-OSD), tabled against the paper's published Q70 numbers. |
@@ -267,7 +268,7 @@ it stands as measured and was not re-run.)*
 |---|---|---|---|---|---|---|
 | `initial.py` unfolded (anchor) | 896 | 428 | 60.85 | 646 | 1.39x | **0.000** |
 | **`initial_folded.py` (inlined router, best)** | **300** | **283** | **31.05** | **230** | **1.30x** | **+2.657** |
-| `initial_evolved.py` (inlined router, `SHIPPED_SEED_SCORE`) | 310 | 277 | 31.55 | 226 | 1.37x | **+2.630** |
+| `initial_evolved.py` (inlined router) | 310 | 277 | 31.55 | 226 | 1.37x | **+2.630** |
 | **paper Q70 as published (Table XXVI)** | **424** | **~288** | 34.2 micro | — | — | **+2.010** |
 | folded layout floor-perfect | 230 | 283 | 27.55 | 230 | 1.00x | +3.110 |
 | evolved layout floor-perfect | 226 | 277 | 27.35 | 226 | 1.00x | +3.170 |
@@ -294,10 +295,10 @@ shared `routing.py` they were 455 and 419; the seeds now carry their own
 trimmed copy of that router INSIDE the evolve block (see "The router is
 evolvable now" below).
 
-Every candidate's public metrics carry **`gain_over_seed` = score − 2.6565**, so
+Every candidate's public metrics carry **`gain_over_seed` = score − 2.9075**, so
 a run's own contribution is always separable from what it was handed. Report it
 alongside the absolute score in any write-up. The constant tracks the **best**
-shipped plan (`initial_folded.py`), so every seed boots at `gain_over_seed <= 0`
+shipped plan (`initial_annealed.py`), so every seed boots at `gain_over_seed <= 0`
 and only genuine progress reads positive — if it tracked a weaker seed instead,
 a candidate could show a positive gain merely by rediscovering the better basin
 it was already handed.

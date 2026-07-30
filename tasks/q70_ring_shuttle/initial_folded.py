@@ -12,9 +12,10 @@ explore different layout families.
 router used to walk a five-family subgraph and pay 5 steps for a one-row hop
 the chip charges 3 for).
 
-evaluate.py's SHIPPED_SEED_SCORE still tracks initial_evolved.py (+2.6300), so
-`gain_over_seed` reads -0.0265 for this file even though it is the stronger
-plan. That is bookkeeping, not a regression.
+`SHIPPED_SEED_SCORE` tracks the BEST shipped plan, which is now
+initial_annealed.py (+2.9075), so this file reads a negative `gain_over_seed`.
+That is the intended bookkeeping: every seed boots at or below zero so only
+genuine progress reads positive.
 
 THE FILE IS THREE INDEPENDENT SECTIONS, each with its own banner listing what
 it owns and what a mutation could try. You can rewrite ONE of them without
@@ -1135,7 +1136,7 @@ def footprint_site_cost(rows, cols, occupied, parked, data_rows):
 # WHAT A MUTATION COULD TRY HERE:
 #   * overlap MORE: start the next gap's approach before the previous split,
 #     or let ancillas already in place set off early;
-#   * the wrap-back is now DATA-ONLY (4 rounds): each ancilla species need
+#   * the wrap-back is now DATA-ONLY (5 rounds here): each ancilla species need
 #     only restore its own occupied SET, which this geometry already does, so
 #     the ancillas do not walk home at all.  What is left to try is choosing
 #     the ancilla -> site assignment at the boundary so the NEXT cycle starts

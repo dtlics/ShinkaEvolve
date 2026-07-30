@@ -95,33 +95,18 @@ SEED_ZONES = 428                    # v3: distinct RAIL SECTIONS (S sites) of
                                     # sections by ~3.7x and paid the search to
                                     # funnel traffic through few corridors.
                                     # Unmoved by the v4 corrections.
-SHIPPED_SEED_SCORE = 2.6565  # BEST plan handed to the run. Reported per
-                             # candidate as `gain_over_seed` so a run's own
+SHIPPED_SEED_SCORE = 2.9075  # BEST plan handed to the run. Reported per
+                             # candidate as `gain_over_seed`, so a run's own
                              # contribution is separable from what it was
-                             # given. MUST track the best-scoring seed, not a
-                             # designated one: if it tracked a weaker seed, a
-                             # candidate could report positive gain merely by
-                             # rediscovering the better basin it was already
-                             # handed. Update whenever the seeds change.
-                             # v6.1b: now tracks initial_folded (+2.6565),
-                             # which overtook initial_evolved (+2.6300) when
-                             # the router repair landed.
-                             # v6.1 (2026-07-30): was 2.2542. Both evolved
-                             # seeds' SECTION-2 routers still walked the OLD
-                             # five-family subgraph after the chip correction,
-                             # paying 5 steps for a one-row hop the chip
-                             # charges 3 for; repairing them took
-                             # initial_evolved 358 -> 310 rounds (+2.2542 ->
-                             # +2.6300) and initial_folded 375 -> 300 (+2.2392
-                             # -> +2.6565). NOTE the folded seed now edges
-                             # AHEAD of the pitch-4 one; this constant still
-                             # tracks initial_evolved, so `gain_over_seed` is a
-                             # gain over the pitch-4 basin, not over the best
-                             # shipped plan. The ANCHOR seed (initial.py) is a
-                             # template-based builder that shares no router
-                             # code with the two evolved seeds, so it was NOT
-                             # touched and the three anchors below are
-                             # unchanged.
+                             # given. MUST track the best-scoring seed: if it
+                             # tracked a weaker one, a candidate could report a
+                             # positive gain merely by rediscovering the better
+                             # basin it was already handed. Every shipped seed
+                             # therefore boots at gain_over_seed <= 0.
+                             # History: 2.2028 (v5) -> 2.2542 (v6 model
+                             # corrections) -> 2.6300 (v6.1 router resync) ->
+                             # 2.6565 (folded overtook evolved) -> 2.9075
+                             # (initial_annealed, salvaged from run q70ring_v3).
 SEED_EXPOSURE_TOTAL = FROZEN_EXPOSURE + SEED_VAR_EXPOSURE   # for the public
                                                             # LER-shift readout
 

@@ -17,6 +17,7 @@ import evaluate as ev          # noqa: E402
 import initial as seed         # noqa: E402
 import initial_folded as seed_folded    # noqa: E402
 import initial_evolved as seed_evolved  # noqa: E402
+import initial_annealed as seed_annealed  # noqa: E402
 
 
 def replay(plan):
@@ -283,6 +284,8 @@ def main():
                              spec, expect_zero=False)
     check_seed("evolved (pitch-4 repair of run v2 best)",
                seed_evolved.build_embedding_and_shuttle, spec, expect_zero=False)
+    check_seed("annealed (run v3 geometry + shipped router) BEST",
+               seed_annealed.build_embedding_and_shuttle, spec, expect_zero=False)
     print()
     check_probes(plan)
     check_cycle_probes("folded", plan_folded)

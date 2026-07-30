@@ -1,54 +1,53 @@
-"""EVOLVED seed -- pitch-4 cell embedding + inlined parallel round packer.
+"""ANNEALED seed -- affine embedding found by evolution + the shipped router.
 
-THIS PLAN: 310 transport rounds / 1.37x its own distance floor / score +2.6300,
-over 277 rail sections against the paper's ~288. IonQ's published hand design
-runs the same SEC in 424 rounds under the same chip model and the same
-cycle-boundary convention, so this is 27% fewer -- but read the slack ratio
-before celebrating: the floor of THIS layout is 226, so the plan is still
-leaving 84 rounds on the table.
+BEST PLAN IN THE TASK: 244 transport rounds / 1.47x its own distance floor /
+score +2.9075, at 304 rail sections. IonQ's published hand design runs the same
+SEC in 424 rounds, so this is 42% fewer -- but it uses MORE chip area than they
+do (304 vs ~288 sections) and than the other two seeds (283 / 277), and its
+measured LER is statistically indistinguishable from theirs. It is a SPEED and
+AREA result, and only the speed half is a win.
 
-NOT THE BEST SEED: since the 2b router repair the sibling seed
-initial_folded.py lands at 300 rounds / +2.6565, just ahead of this one, and
-initial_annealed.py (evolution's own layout discovery) leads at 244 / +2.9075.
-All three remain separate islands with different geometries, and
-`SHIPPED_SEED_SCORE` tracks the BEST of them, so this file reads a negative
-`gain_over_seed` by design.
+PROVENANCE, and why this file exists. Run q70ring_v3 ($59.66 of a $100 budget,
+11 windows, 113 programs) produced one structural discovery: a grounded
+SECTION-1 rewrite -- an ANNEALED AFFINE EMBEDDING (row permutation, column
+multiplier, shear, side mask, data flip, pitch and base) scored by a per-gate
+Hungarian ancilla-to-site matching against an analytic floor -- which moved the
+layout's distance FLOOR for the first time in 62 programs. That run predates
+three model corrections, so its own numbers do not transfer; what transfers is
+the SECTION 1 code. Re-running that same annealer against the CORRECTED
+distance oracle re-optimised the floor with no human input, and four unrelated
+islands had converged on the same optimum. This file is that SECTION 1 and
+SECTION 3, with SECTION 2 replaced by the router shared byte-for-byte with the
+other two seeds.
 
-Lineage: run q70ring_v2's best evolved program -> cell pitch repaired 3->4
-(evolution had compressed it to win the then-broken footprint term, aliasing
-the X/Z wrap lanes and forcing an X-then-Z sequential fallback) -> the parallel
-round packer folded IN, so the routing algorithm now evolves alongside the
-geometry -> the router's chip map repaired to the evaluator's eight-family
-graph. 676 -> 566 -> 419 -> 421 -> 358 -> 310 rounds (the 419 -> 421 step
-traded 2 rounds for a third of the build time, see ROUTER_ATTEMPTS; the
-421 -> 358 step is the corrected cycle-boundary rule, which stopped charging
-the ancillas a walk home nobody has to make; the last step is the 2b repair).
+  floor 226/230 (other seeds)  ->  166 here
+  rounds 300/310               ->  244 here
 
 THE FILE IS THREE INDEPENDENT SECTIONS, each with its own banner listing what
-it owns and what a mutation could try. You can rewrite ONE of them without
-reading the other two:
+it owns and what a mutation could try. You can rewrite ONE without reading the
+other two:
 
   SECTION 1  GEOMETRY  grid size, where every ion rests, the per-gate-round
-                       ion -> site tables.  The layout's distance FLOOR (226
-                       rounds here) is decided entirely here.
-  SECTION 2  ROUTER    shortest paths, congestion pricing, and the round
-                       packer (stalls, cycle rotation, shove-aside,
-                       replanning) that turns routes into parallel rounds.
-                       All its knobs are in the ROUTER_POLICY block at 2a.
-  SECTION 3  ASSEMBLY  prep, the 7 merge/gate/split rounds, measure, the
-                       cyclicity wrap-back, and the phase emission.
+                       ion -> site tables. This layout's FLOOR (166) is decided
+                       entirely here, and this section is the evolved asset.
+  SECTION 2  ROUTER    shortest paths, congestion pricing and the round packer.
+                       Byte-identical to the other seeds; knobs in ROUTER_POLICY.
+  SECTION 3  ASSEMBLY  prep, the 7 merge/gate/split rounds, measure, the cycle
+                       boundary, and phase emission.
 
-WHERE THE REMAINING HEADROOM IS: two halves, both in this file.
-  * 84 rounds of PACKING slack over this layout's floor. SECTION 2 now walks
-    exactly the eight-family graph the evaluator prices (the old five-family
-    subgraph, which cost 5 steps for a one-row hop the chip charges 3 for, is
-    gone), so what is left is stalls, shoves, replans and SECTION 3's phase
-    boundaries -- not a wrong chip map. The per-gap slack map in the
-    evaluator's feedback says which gap to attack.
-  * the floor ITSELF (226), a property of the layout alone: a CRT/sheared-torus
-    embedding (l=7, m=5 coprime, so the ring torus is Z_35 and every
-    realignment becomes ONE 1-D rotation) collapses each realignment to a
-    single pass.
+WHERE THE REMAINING HEADROOM IS, largest first:
+  * THE WRAP FLOOR, ~40 rounds. This layout pays wrap_floor 40 where both other
+    seeds pay 1, purely because its data HOME sites are not where data stands at
+    the last gate round. Two mechanical fixes, both in SECTION 1: let it choose
+    data homes that coincide with the final gate round's data positions; and
+    note its internal annealing objective still maxes the wrap term over BOTH
+    data and ancillas, although the evaluator's wrap_floor has been DATA-ONLY
+    since the cycle-boundary correction -- i.e. it is optimising a stale
+    objective. Either could take the floor from 166 toward ~127.
+  * PACKING SLACK, 78 rounds (244 used vs 166 floor, 1.47x). 59 of the 244
+    rounds still move fewer than 20 of 140 ions.
+  * AREA, 304 sections. The worst of the three seeds and above the paper's ~288;
+    the score's footprint term is paying for that.
 """
 
 import heapq
@@ -63,63 +62,83 @@ from collections import deque
 # EVOLVE-BLOCK-START
 # ===========================================================================
 # SECTION 1 - GEOMETRY
-# ---------------------------------------------------------------------------
-# OWNS: the grid size, WHERE EVERY ION RESTS (the static layout), and the
-# per-gate-round ion -> site assignment tables.  Nothing here knows how an ion
-# travels -- that is SECTION 2 -- so this section can be replaced wholesale.
-#
-# THIS LAYOUT (the "pitch-4 cell" embedding): one CELL per ring position
-# (i, j).  Column band j occupies CELL_PITCH = 4 columns --
-#   col 4j+0 left-block beacon | 4j+1 left-block data | 4j+2 right-block data
-#   (right-block beacons get their own band past the data columns)
-# -- and rows alternate data / ancilla: left-block data on row 2i, right-block
-# data on row 2i+2, the X and Z ancillas of cell row i on the OPTICAL row 2i+1
-# between them (odd rows are the only place prep/measure is allowed).  An
-# ancilla sits on the LEFT column of its cell when its schedule family is A and
-# the RIGHT column when it is B, so a family change is a 1-column side flip
-# rather than a block swap.
-#
-# WHY PITCH 4 AND NOT 3: at pitch 3 the X and Z species' wrap lanes alias onto
-# shared columns, forcing an X-then-Z sequential fallback for half the rounds.
-#
-# WHAT THIS COSTS: this layout's per-gap distance floor totals 226 rounds and
-# the router realises 310 of them, over 277 rail sections.  The floor is a
-# property of the GEOMETRY ALONE, so it is the thing to attack HERE; the 84
-# rounds of slack above it belong to SECTION 2 and SECTION 3.
-#
-# ONE CONSTANT WORTH RE-EXAMINING (deliberately NOT changed): CELL_BASE = 0
-# puts the left-block beacons on COLUMN 0, and column 0 is a dead end on this
-# chip -- S(r,0)'s only neighbour is J(r,0), so anything that has to move
-# through it pays 5 steps for a one-row hop instead of 3 (see the 2b banner).
-# Those beacons are STATIC, so today it costs nothing; but CELL_BASE = 1 would
-# free column 0 as a wrap lane at the price of one extra column of width, and
-# nobody has measured that trade.
-#
-# WHAT A MUTATION COULD TRY HERE:
-#   * a CRT / sheared-torus embedding: l = 7 and m = 5 are coprime, so the ring
-#     torus is Z_35 and every realignment collapses to ONE 1-D rotation instead
-#     of two per-axis passes -- analytically ~194 rounds of rotation;
-#   * a different cell pitch, or a pitch that varies with the column;
-#   * interleave the two blocks in one row band instead of stacking them, so a
-#     family change costs zero rows;
-#   * put the ancillas on the ladder columns and the data on the rails;
-#   * pick the ancilla -> site assignment per round by min-cost matching
-#     against the previous round's sites instead of by formula;
-#   * shear the row index with j so a column shift also advances the row.
 # ===========================================================================
 
-CELL_BASE = 0        # first column of ring column j = 0
-CELL_PITCH = 4       # columns consumed by one ring column j
+import random
+
+CELL_BASE = 4
+CELL_PITCH = 4
+
+
+def _coprime_units(n):
+    out = []
+    for a in range(1, n):
+        ok = True
+        for d in range(2, min(a, n) + 1):
+            if a % d == 0 and n % d == 0:
+                ok = False
+                break
+        if ok:
+            out.append(a)
+    return out or [1]
+
+
+def _hungarian(cost):
+    n = len(cost)
+    if n == 0:
+        return []
+    m = len(cost[0])
+    assert n <= m
+    u = [0.0] * (n + 1)
+    v = [0.0] * (m + 1)
+    p = [0] * (m + 1)
+    for i in range(1, n + 1):
+        p[0] = i
+        j0 = 0
+        minv = [float("inf")] * (m + 1)
+        used = [False] * (m + 1)
+        way = [0] * (m + 1)
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            delta = float("inf")
+            j1 = 0
+            row = cost[i0 - 1]
+            for j in range(1, m + 1):
+                if used[j]:
+                    continue
+                cur = float(row[j - 1]) - u[i0] - v[j]
+                if cur < minv[j] - 1e-12:
+                    minv[j] = cur
+                    way[j] = j0
+                if minv[j] < delta - 1e-12:
+                    delta = minv[j]
+                    j1 = j
+            for j in range(m + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while True:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+            if j0 == 0:
+                break
+    ans = [-1] * n
+    for j in range(1, m + 1):
+        if p[j] > 0:
+            ans[p[j] - 1] = j - 1
+    return ans
 
 
 def build_geometry(spec):
-    """Static layout + the frozen per-gate-round ion -> site tables.
-
-    Returns a dict consumed by SECTION 3; every entry is plain data or a pure
-    function of the round index t.
-    """
-    l_ring = spec["l"]
-    m_ring = spec["m"]
+    l_ring = int(spec["l"])
+    m_ring = int(spec["m"])
     n_half = l_ring * m_ring
     exps = {"A": [tuple(e) for e in spec["A_exps"]],
             "B": [tuple(e) for e in spec["B_exps"]]}
@@ -128,13 +147,13 @@ def build_geometry(spec):
     qb = spec["qid_bases"]
     DATA0, XANC0, ZANC0 = qb["data"], qb["x_anc"], qb["z_anc"]
     BEAC0, RES0 = qb["beacon"], qb["reservoir"]
-    n_sim = 2 * (2 * n_half)                       # data + ancillas = 140
+    n_sim = 2 * (2 * n_half)
 
-    CB = CELL_BASE
-    PITCH = CELL_PITCH
-    ROWS = max(2 * l_ring + 1, 10)
-    COLS = CELL_PITCH * m_ring + 8
-    assert ROWS <= spec["grid_max_rows"] and COLS <= spec["grid_max_cols"]
+    fam = [t[0] for t in schedule]
+    ex = [exps[t[0]][t[1]] for t in schedule]
+    ez = [exps[t[2]][t[3]] for t in schedule]
+    units_m = _coprime_units(m_ring)
+    units_l = _coprime_units(l_ring)
 
     def pos(i, j):
         return (i % l_ring) * m_ring + (j % m_ring)
@@ -142,54 +161,347 @@ def build_geometry(spec):
     def cell(p):
         return divmod(p, m_ring)
 
-    def anc_row(i):
-        return 2 * (i % l_ring) + 1                # odd rows are optical
+    def required_pairs_raw(t):
+        f = fam[t]
+        xp, zp = [], []
+        for g in range(n_half):
+            i, j = divmod(g, m_ring)
+            if f == "A":
+                xd = DATA0 + pos(i + ex[t][0], j + ex[t][1])
+                zd = DATA0 + n_half + pos(i - ez[t][0], j - ez[t][1])
+            else:
+                xd = DATA0 + n_half + pos(i + ex[t][0], j + ex[t][1])
+                zd = DATA0 + pos(i - ez[t][0], j - ez[t][1])
+            xp.append((xd, XANC0 + g))
+            zp.append((zd, ZANC0 + g))
+        return xp, zp
 
-    def side_col(j, side):
-        base = CB + PITCH * (j % m_ring)
-        return base + (1 if side == "L" else 2)
+    def make_initial():
+        return {
+            "pitch": 4,
+            "base": 4,
+            "row_a": 1,
+            "row_b": 0,
+            "row_perm": list(range(l_ring)),
+            "col_a": 1,
+            "col_b": 0,
+            "shear": 0,
+            "data_flip": 0,
+            "side_mask": sum((1 if fam[t] == "B" else 0) << t
+                             for t in range(n_rounds)),
+        }
 
-    def spare_col(j):
-        return CB + PITCH * (j % m_ring)
+    def canonicalize(p):
+        p = dict(p)
+        p["pitch"] = int(max(4, min(6, p.get("pitch", 4))))
+        max_base = max(1, spec["grid_max_cols"] - p["pitch"] * m_ring - 8)
+        p["base"] = int(max(1, min(max_base, p.get("base", 4))))
+        p["row_a"] = units_l[int(p.get("row_a", 1)) % len(units_l)]
+        p["row_b"] = int(p.get("row_b", 0)) % l_ring
+        if "row_perm" not in p or sorted(p["row_perm"]) != list(range(l_ring)):
+            p["row_perm"] = [((p["row_a"] * i + p["row_b"]) % l_ring)
+                             for i in range(l_ring)]
+        p["col_a"] = units_m[int(p.get("col_a", 1)) % len(units_m)]
+        p["col_b"] = int(p.get("col_b", 0)) % m_ring
+        p["shear"] = int(p.get("shear", 0)) % m_ring
+        p["data_flip"] = int(p.get("data_flip", 0)) & 1
+        p["side_mask"] = int(p.get("side_mask", 0)) & ((1 << n_rounds) - 1)
+        return p
 
-    def right_beacon_col(j):
-        return CB + PITCH * m_ring + (j % m_ring)
+    def mutate(p, rng, temp):
+        q = dict(p)
+        q["row_perm"] = list(p["row_perm"])
+        k = rng.randrange(10)
+        if k == 0:
+            a, b = rng.sample(range(l_ring), 2)
+            q["row_perm"][a], q["row_perm"][b] = q["row_perm"][b], q["row_perm"][a]
+        elif k == 1:
+            cut = rng.randrange(1, l_ring)
+            q["row_perm"] = q["row_perm"][cut:] + q["row_perm"][:cut]
+        elif k == 2:
+            q["row_perm"].reverse()
+        elif k == 3:
+            q["col_a"] = rng.choice(units_m)
+        elif k == 4:
+            q["col_b"] = (q["col_b"] + rng.choice((-2, -1, 1, 2))) % m_ring
+        elif k == 5:
+            q["shear"] = (q["shear"] + rng.choice((-2, -1, 1, 2))) % m_ring
+        elif k == 6:
+            q["side_mask"] ^= (1 << rng.randrange(n_rounds))
+        elif k == 7:
+            a = rng.randrange(n_rounds)
+            b = rng.randrange(a, n_rounds)
+            for t in range(a, b + 1):
+                q["side_mask"] ^= (1 << t)
+        elif k == 8:
+            q["data_flip"] ^= 1
+        else:
+            q["pitch"] = 4 if q["pitch"] != 4 else 5
+            q["base"] = 4
+        return canonicalize(q)
 
-    def other_side(s):
-        return "R" if s == "L" else "L"
+    def build_tables(p):
+        p = canonicalize(p)
+        pitch = p["pitch"]
+        base = p["base"]
+        ROWS = 2 * l_ring + 1
+        COLS = base + pitch * m_ring + 4
+        if ROWS > spec["grid_max_rows"] or COLS > spec["grid_max_cols"]:
+            return None
 
-    # ---- schedule-derived tables (FROZEN: the code's published Table X) ----
-    fam = [t[0] for t in schedule]
-    ex = [exps[t[0]][t[1]] for t in schedule]
-    ez = [exps[t[2]][t[3]] for t in schedule]
+        if p["data_flip"]:
+            side_off = {"L": 2, "R": 0}
+            beacon_off = {"L": 3, "R": 1}
+        else:
+            side_off = {"L": 0, "R": 2}
+            beacon_off = {"L": 1, "R": 3}
 
-    def x_side_at(t):
-        return "R" if fam[t] == "B" else "L"
+        row_band = list(p["row_perm"])
 
-    # ---- static layout ----------------------------------------------------
-    x_side, z_side = x_side_at(0), other_side(x_side_at(0))
-    e0x, e0z = ex[0], ez[0]
-    x_pos = [pos(g // m_ring + e0x[0], g % m_ring + e0x[1])
-             for g in range(n_half)]
-    z_pos = [pos(g // m_ring - e0z[0], g % m_ring - e0z[1])
-             for g in range(n_half)]
+        def band(i):
+            return row_band[i % l_ring]
 
-    posn = {}
-    for p in range(n_half):
-        i, j = cell(p)
-        posn[DATA0 + p] = ("S", 2 * i, side_col(j, "L"))
-        posn[BEAC0 + p] = ("S", 2 * i, spare_col(j))
-        posn[DATA0 + n_half + p] = ("S", 2 * i + 2, side_col(j, "R"))
-        posn[BEAC0 + n_half + p] = ("S", 2 * i + 2, right_beacon_col(j))
-    for g in range(n_half):
-        i, j = cell(x_pos[g])
-        posn[XANC0 + g] = ("S", anc_row(i), side_col(j, x_side))
-        i, j = cell(z_pos[g])
-        posn[ZANC0 + g] = ("S", anc_row(i), side_col(j, z_side))
-    res_cols = list(range(CELL_PITCH * m_ring, CELL_PITCH * m_ring + 4))
-    res_sites = [("S", r, c) for r in range(1, ROWS, 2) for c in res_cols]
-    for i in range(spec["n_reservoir"]):
-        posn[RES0 + i] = res_sites[i]
+        def slot(i, j):
+            return (p["col_a"] * (j % m_ring)
+                    + p["shear"] * (i % l_ring)
+                    + p["col_b"]) % m_ring
+
+        def side_col(i, j, side):
+            return base + pitch * slot(i, j) + side_off[side]
+
+        def beacon_col(i, j, side):
+            return base + pitch * slot(i, j) + beacon_off[side]
+
+        def data_site(dq):
+            idx = dq - DATA0
+            half = 0 if idx < n_half else 1
+            pp = idx if half == 0 else idx - n_half
+            i, j = cell(pp)
+            b = band(i)
+            if half == 0:
+                side = "R" if p["data_flip"] else "L"
+                return ("S", 2 * b, side_col(i, j, side))
+            else:
+                side = "L" if p["data_flip"] else "R"
+                return ("S", 2 * b + 2, side_col(i, j, side))
+
+        def beacon_site(dq):
+            idx = dq - DATA0
+            half = 0 if idx < n_half else 1
+            pp = idx if half == 0 else idx - n_half
+            i, j = cell(pp)
+            b = band(i)
+            if half == 0:
+                side = "R" if p["data_flip"] else "L"
+                return ("S", 2 * b, beacon_col(i, j, side))
+            else:
+                side = "L" if p["data_flip"] else "R"
+                return ("S", 2 * b + 2, beacon_col(i, j, side))
+
+        def anc_pool(side):
+            return [("S", 2 * band(i) + 1, side_col(i, j, side))
+                    for i in range(l_ring) for j in range(m_ring)]
+
+        data_home = {DATA0 + d: data_site(DATA0 + d)
+                     for d in range(2 * n_half)}
+
+        posn0 = {}
+        occ = {}
+        for d in range(2 * n_half):
+            q = DATA0 + d
+            bq = BEAC0 + d
+            posn0[q] = data_home[q]
+            posn0[bq] = beacon_site(q)
+        for q, s in posn0.items():
+            if s in occ:
+                return None
+            occ[s] = q
+
+        anc_tables = []
+        prev_anc = {}
+        prev_data = dict(data_home)
+        total_floor = 0
+        max_gap = 0
+
+        for t in range(n_rounds):
+            xside = "R" if ((p["side_mask"] >> t) & 1) else "L"
+            zside = "L" if xside == "R" else "R"
+            xpairs, zpairs = required_pairs_raw(t)
+            table = {}
+            gap_floor = 0
+            next_data = {}
+
+            for pairs, pool in ((xpairs, anc_pool(xside)),
+                                (zpairs, anc_pool(zside))):
+                rows_cost = []
+                for dq, aq in pairs:
+                    row = []
+                    for s in pool:
+                        jsite = ("J", s[1], s[2])
+                        dd = site_dist(prev_data[dq], jsite, ROWS, COLS)
+                        da = 0 if t == 0 else site_dist(prev_anc[aq], s, ROWS, COLS)
+                        mx = max(dd, da)
+                        row.append(1000 * mx * mx + 13 * mx + 5 * dd + da)
+                    rows_cost.append(row)
+                assign = _hungarian(rows_cost)
+                used = set()
+                for ri, ci in enumerate(assign):
+                    if ci in used or ci < 0:
+                        return None
+                    used.add(ci)
+                    dq, aq = pairs[ri]
+                    s = pool[ci]
+                    jsite = ("J", s[1], s[2])
+                    table[aq] = s
+                    next_data[dq] = jsite
+                    dd = site_dist(prev_data[dq], jsite, ROWS, COLS)
+                    da = 0 if t == 0 else site_dist(prev_anc[aq], s, ROWS, COLS)
+                    gap_floor = max(gap_floor, dd, da)
+
+            if len(table) != 2 * n_half or len(set(table.values())) != 2 * n_half:
+                return None
+            if len(next_data) != 2 * n_half:
+                return None
+
+            anc_tables.append(table)
+            prev_anc = dict(table)
+            prev_data = dict(next_data)
+            total_floor += gap_floor
+            max_gap = max(max_gap, gap_floor)
+
+        wrap_floor = 0
+        for q, s in prev_data.items():
+            wrap_floor = max(wrap_floor, site_dist(s, data_home[q], ROWS, COLS))
+        for aq, s in prev_anc.items():
+            wrap_floor = max(wrap_floor, site_dist(s, anc_tables[0][aq], ROWS, COLS))
+        total_floor += wrap_floor
+        max_gap = max(max_gap, wrap_floor)
+
+        posn = dict(posn0)
+        for g in range(n_half):
+            posn[XANC0 + g] = anc_tables[0][XANC0 + g]
+            posn[ZANC0 + g] = anc_tables[0][ZANC0 + g]
+
+        used = set(posn.values())
+        candidates = []
+        for c in range(COLS - 4, COLS):
+            for r in range(1, ROWS, 2):
+                candidates.append(("S", r, c))
+        for r in range(1, ROWS, 2):
+            for c in range(COLS):
+                candidates.append(("S", r, c))
+        k = 0
+        for rr in range(spec["n_reservoir"]):
+            while k < len(candidates) and candidates[k] in used:
+                k += 1
+            if k >= len(candidates):
+                return None
+            q = RES0 + rr
+            posn[q] = candidates[k]
+            used.add(candidates[k])
+            k += 1
+
+        if len(set(posn.values())) != len(posn):
+            return None
+
+        side_churn = sum(1 for t in range(1, n_rounds)
+                         if ((p["side_mask"] >> t) & 1)
+                         != ((p["side_mask"] >> (t - 1)) & 1))
+        objective = float(total_floor) + 0.10 * max_gap + 0.035 * COLS + 0.20 * side_churn
+        return {"params": p, "rows": ROWS, "cols": COLS, "posn": posn,
+                "anc_tables": anc_tables, "objective": objective,
+                "floor": total_floor, "wrap_floor": wrap_floor}
+
+    rng = random.Random(12345)
+    starts = []
+    base = canonicalize(make_initial())
+    starts.append(base)
+
+    for ra in units_l:
+        for rb in range(l_ring):
+            for ca in units_m:
+                for sh in range(m_ring):
+                    if len(starts) >= 48:
+                        break
+                    p = dict(base)
+                    p["row_perm"] = [((ra * i + rb) % l_ring)
+                                     for i in range(l_ring)]
+                    p["col_a"] = ca
+                    p["shear"] = sh
+                    p["col_b"] = (rb + sh) % m_ring
+                    p["side_mask"] = base["side_mask"]
+                    starts.append(canonicalize(p))
+                if len(starts) >= 48:
+                    break
+            if len(starts) >= 48:
+                break
+        if len(starts) >= 48:
+            break
+
+    for flip in (0, 1):
+        p = dict(base)
+        p["data_flip"] = flip
+        p["row_perm"] = list(reversed(range(l_ring)))
+        p["side_mask"] ^= ((1 << n_rounds) - 1) if flip else 0
+        starts.append(canonicalize(p))
+
+    best = None
+    best_val = float("inf")
+
+    def consider(p):
+        nonlocal best, best_val
+        tab = build_tables(p)
+        if tab is None:
+            return None, float("inf")
+        val = tab["objective"]
+        if val < best_val - 1e-12:
+            best = tab
+            best_val = val
+        return tab, val
+
+    scored = []
+    seen = set()
+    for p in starts:
+        key = (tuple(p["row_perm"]), p["pitch"], p["base"], p["col_a"],
+               p["col_b"], p["shear"], p["data_flip"], p["side_mask"])
+        if key in seen:
+            continue
+        seen.add(key)
+        tab, val = consider(p)
+        if tab is not None:
+            scored.append((val, p))
+    scored.sort(key=lambda x: x[0])
+    if not scored:
+        tab, _ = consider(base)
+        if tab is None:
+            raise RuntimeError("geometry could not build any layout")
+        scored = [(best_val, best["params"])]
+
+    for si, start in enumerate([p for _v, p in scored[:10]]):
+        cur = canonicalize(start)
+        cur_tab, cur_val = consider(cur)
+        if cur_tab is None:
+            continue
+        temp0 = 18.0 + 4.0 * si
+        for it in range(360):
+            frac = it / 359.0
+            temp = temp0 * (1.0 - frac) + 0.25 * frac
+            cand = mutate(cur, rng, temp)
+            cand_tab, cand_val = consider(cand)
+            if cand_tab is None:
+                continue
+            accept = cand_val <= cur_val
+            if not accept:
+                margin = cand_val - cur_val
+                if margin < temp and rng.random() < (1.0 - margin / temp):
+                    accept = True
+            if accept:
+                cur, cur_val = cand, cand_val
+
+    chosen = best
+    rows, cols = chosen["rows"], chosen["cols"]
+    posn = chosen["posn"]
+    anc_tables = chosen["anc_tables"]
 
     layout = {
         "data": [list(posn[DATA0 + i]) for i in range(2 * n_half)],
@@ -199,51 +511,22 @@ def build_geometry(spec):
         "reservoir": [list(posn[RES0 + i]) for i in range(spec["n_reservoir"])],
     }
 
-    # ---- per-gate-round ion -> site tables --------------------------------
     def anc_sites(t):
-        """{ancilla qid: rail section it must occupy for gate round t}."""
-        xs = x_side_at(t)
-        zs = other_side(xs)
-        out = {}
-        for g in range(n_half):
-            i, j = divmod(g, m_ring)
-            i2, j2 = cell(pos(i + ex[t][0], j + ex[t][1]))
-            out[XANC0 + g] = ("S", anc_row(i2), side_col(j2, xs))
-            i2, j2 = cell(pos(i - ez[t][0], j - ez[t][1]))
-            out[ZANC0 + g] = ("S", anc_row(i2), side_col(j2, zs))
-        return out
+        return dict(anc_tables[int(t)])
 
     def required_pairs(t):
-        """[(data qid, ancilla qid)] the evaluator REQUIRES merged at round t."""
-        f = fam[t]
-        pairs = []
-        for g in range(n_half):
-            i, j = divmod(g, m_ring)
-            if f == "A":
-                xd = DATA0 + pos(i + ex[t][0], j + ex[t][1])
-                zd = DATA0 + n_half + pos(i - ez[t][0], j - ez[t][1])
-            else:
-                xd = DATA0 + n_half + pos(i + ex[t][0], j + ex[t][1])
-                zd = DATA0 + pos(i - ez[t][0], j - ez[t][1])
-            pairs.append((xd, XANC0 + g))
-            pairs.append((zd, ZANC0 + g))
-        return pairs
+        xp, zp = required_pairs_raw(int(t))
+        return xp + zp
 
     data_ids = list(range(DATA0, DATA0 + 2 * n_half))
-    anc_ids = ([XANC0 + g for g in range(n_half)]
-               + [ZANC0 + g for g in range(n_half)])
-    return {
-        "rows": ROWS, "cols": COLS,
-        "n_sim": n_sim, "n_rounds": n_rounds,
-        "posn": posn, "layout": layout,
-        "data_ids": data_ids, "anc_ids": anc_ids,
-        "static_ids": list(range(BEAC0, RES0 + spec["n_reservoir"])),
-        # rows that hold data/beacon ions -- the router charges extra to use a
-        # fresh rail section on one of them (see FRESH_DATA_ROW_TOLL)
-        "data_rows": sorted(set(posn[q][1] for q in data_ids)),
-        "anc_sites": anc_sites,
-        "required_pairs": required_pairs,
-    }
+    anc_ids = [XANC0 + g for g in range(n_half)] + [ZANC0 + g for g in range(n_half)]
+
+    return {"rows": rows, "cols": cols, "n_sim": n_sim, "n_rounds": n_rounds,
+            "posn": posn, "layout": layout, "data_ids": data_ids,
+            "anc_ids": anc_ids,
+            "static_ids": list(range(BEAC0, RES0 + spec["n_reservoir"])),
+            "data_rows": sorted(set(posn[q][1] for q in data_ids)),
+            "anc_sites": anc_sites, "required_pairs": required_pairs}
 
 
 # ===========================================================================
@@ -1134,35 +1417,6 @@ def footprint_site_cost(rows, cols, occupied, parked, data_rows):
 
 # ===========================================================================
 # SECTION 3 - ASSEMBLY
-# ---------------------------------------------------------------------------
-# OWNS: the SEC script.  Takes the tables from SECTION 1, drives the router
-# from SECTION 2, and emits the evaluator's phase list:
-#     prep -> [ approach, merge, gate t, split ] x 7 -> measure -> wrap-back
-# The gate rounds, their order and the required merge pairs are FROZEN by the
-# code's published schedule; what this section chooses is HOW each gap between
-# two gate layers is travelled, and how the phases overlap.
-#
-# The one non-obvious trick is the gap>0 "duck out and come back" move: between
-# gate layers the 70 data ions are parked on ancilla-row JUNCTIONS, where they
-# chop every rail the ancillas need.  Each data ion is therefore handed an
-# explicit route home -> idle -> back out, with the idle window sized by a dry
-# run, so its rounds hide INSIDE the ancillas' journey instead of costing a
-# phase of their own.  If that does not come out shorter, the plain two-phase
-# emission is used instead.
-#
-# WHAT A MUTATION COULD TRY HERE:
-#   * overlap MORE: start the next gap's approach before the previous split,
-#     or let ancillas already in place set off early;
-#   * the wrap-back is now DATA-ONLY (5 rounds here): each ancilla species need
-#     only restore its own occupied SET, which this geometry already does, so
-#     the ancillas do not walk home at all.  What is left to try is choosing
-#     the ancilla -> site assignment at the boundary so the NEXT cycle starts
-#     from a cheaper arrangement;
-#   * choose the merge SIDE per pair (data moves to ancilla, or the reverse)
-#     to halve the longest journey in a gap;
-#   * prep/measure in several smaller batches placed where they hide idle time;
-#   * search: try several parkings / tolls per gap and keep the cheapest --
-#     the evaluation budget is minutes and a build takes seconds.
 # ===========================================================================
 
 def build_embedding_and_shuttle(spec):
@@ -1173,31 +1427,284 @@ def build_embedding_and_shuttle(spec):
     n_rounds = geo["n_rounds"]
     anc_ids = geo["anc_ids"]
 
-    # beacons + reservoir never move: hard obstacles for every route
     static = set(posn[q] for q in geo["static_ids"])
-    live = {q: posn[q] for q in range(n_sim)}      # router's view of the world
-    home = dict(live)                              # cyclicity target
-    # data rest sites are SOFT obstacles for the ancilla routes: together with
-    # the beacons they fill the data rows, so honouring them keeps ancilla
-    # routes on the ancilla rails and the vertical ladders.
+    live = {q: posn[q] for q in range(n_sim)}
+    home = dict(live)
     parked = set(posn[q] for q in geo["data_ids"])
-    site_cost = footprint_site_cost(rows, cols, posn.values(), parked,
-                                    geo["data_rows"])
+    site_cost = footprint_site_cost(rows, cols, posn.values(), parked, geo["data_rows"])
+    used_s = set(s for s in posn.values() if s[0] == "S")
+
+    hot_attempts = (
+        {"aside_radius": 2, "swap_radius": 6, "opposed_cost": 1.5,
+         "dense_passes": 5, "age_cap": 12, "age_weight": 0, "stall_weight": 0, "unlock_bias": 0},
+        {"aside_radius": 3, "swap_radius": 6, "opposed_cost": 1.5,
+         "dense_passes": 5, "age_cap": 12, "age_weight": 0, "stall_weight": 0, "unlock_bias": 0},
+        {"aside_radius": 2, "swap_radius": 5, "opposed_cost": 6.0,
+         "dense_passes": 5, "age_cap": 12, "age_weight": 0, "stall_weight": 0, "unlock_bias": 0},
+        {"aside_radius": 3, "swap_radius": 0, "opposed_cost": 6.0,
+         "dense_passes": 5, "age_cap": 12, "age_weight": 0, "stall_weight": 0, "unlock_bias": 0},
+        {"aside_radius": 2, "swap_radius": 6, "opposed_cost": 1.5,
+         "dense_passes": 8, "age_cap": 18, "age_weight": 1, "stall_weight": 3, "unlock_bias": 1},
+        {"aside_radius": 3, "swap_radius": 6, "opposed_cost": 1.5,
+         "dense_passes": 8, "age_cap": 18, "age_weight": 1, "stall_weight": 3, "unlock_bias": 1},
+        {"aside_radius": 2, "swap_radius": 5, "opposed_cost": 4.5,
+         "dense_passes": 8, "age_cap": 20, "age_weight": 2, "stall_weight": 3, "unlock_bias": 1},
+        {"aside_radius": 3, "swap_radius": 0, "opposed_cost": 6.0,
+         "dense_passes": 7, "age_cap": 18, "age_weight": 2, "stall_weight": 2, "unlock_bias": 1},
+    )
+
+    # ---- TRANSPLANT ADAPTER (added by the v3 salvage) -------------------
+    # SECTION 2 has been replaced by the shipped seeds' corrected 8-family
+    # router. Its _Engine takes a SMALLER knob set than the v3 router this
+    # SECTION 3 was written against and has no **kwargs, so the v3-only knobs
+    # (swap_radius, dense_passes, age_cap, age_weight, stall_weight,
+    # unlock_bias) would raise TypeError. Filter each attempt down to the
+    # knobs ROUTER_POLICY actually defines, then de-duplicate what is left so
+    # plan_moves still receives a real portfolio instead of N copies of one
+    # config. Nothing else in SECTION 3 is touched.
+    _KNOBS = set(ROUTER_POLICY) | {"max_rounds"}
+    _seen_cfg, _kept = set(), []
+    for _cfg in hot_attempts:
+        _c = dict((k, v) for k, v in _cfg.items() if k in _KNOBS)
+        _key = tuple(sorted(_c.items()))
+        if _key not in _seen_cfg:
+            _seen_cfg.add(_key)
+            _kept.append(_c)
+    hot_attempts = tuple(_kept)
+    # ---- end adapter ----------------------------------------------------
 
     timeline = [{"t": "prep", "ancillas": list(anc_ids)}]
 
-    def transport(goals, paths=None):
-        rounds = plan_moves(live, goals, static, rows, cols, paths=paths,
-                            site_cost=site_cost)
+    def route_floor(starts, goals, paths=None):
+        f = max([site_dist(s, goals.get(q, s), rows, cols)
+                 for q, s in starts.items()] or [0])
+        if paths:
+            f = max(f, max([sum(1 for x in p if x is not None)
+                            for p in paths.values()] or [0]))
+        return f
+
+    def scaled_cost(scale):
+        if scale == 1.0:
+            return site_cost
+        if scale <= 0.0:
+            return {}
+        return dict((s, w * scale) for s, w in site_cost.items())
+
+    def rail_sites(rounds):
+        out = set()
+        for rnd in rounds:
+            for _q, fr, to in rnd:
+                if fr[0] == "S":
+                    out.add(fr)
+                if to[0] == "S":
+                    out.add(to)
+        return out
+
+    def route_key(rounds):
+        fresh = len(rail_sites(rounds) - used_s)
+        return (len(rounds), fresh, len(rounds) + 0.08 * fresh)
+
+    def note_rounds(rounds):
+        used_s.update(rail_sites(rounds))
+
+    def ends_at(starts, rounds, goals):
+        tmp = apply_rounds(rounds, dict(starts))
+        for q, s in goals.items():
+            if tmp.get(q) != as_site(s):
+                return False
+        return True
+
+    def route_options(starts, goals, paths=None, effort=False, max_rounds=None):
+        floor = route_floor(starts, goals, paths)
+        opts = []
+        seen = set()
+
+        def one(cost_scale, attempts):
+            key = (cost_scale, id(attempts))
+            if key in seen:
+                return
+            seen.add(key)
+            kw = {}
+            if max_rounds is not None:
+                kw["max_rounds"] = max_rounds
+            if opts:
+                lim = max(1, min(len(x) for x in opts) - 1)
+                kw["max_rounds"] = min(kw.get("max_rounds", lim), lim)
+            got = plan_moves(starts, goals, static, rows, cols, paths=paths,
+                             site_cost=scaled_cost(cost_scale), attempts=attempts, **kw)
+            if ends_at(starts, got, goals):
+                opts.append(got)
+
+        for scale in (0.0, 1.0):
+            try:
+                one(scale, None)
+            except RouteError:
+                pass
+
+        slack = (min(len(x) for x in opts) - floor) if opts else 10 ** 9
+        if effort or slack > 6:
+            for scale in (0.0, 0.5, 1.0):
+                try:
+                    one(scale, hot_attempts)
+                except RouteError:
+                    pass
+            if effort:
+                for scale in (0.0, 0.5, 1.0):
+                    try:
+                        one(scale, ROUTER_ATTEMPTS)
+                    except RouteError:
+                        pass
+        return opts
+
+    def commit(rounds):
         emit_moves(timeline, rounds)
         apply_rounds(rounds, live)
+        note_rounds(rounds)
         return len(rounds)
 
+    def squeeze_rounds(starts, goals, incumbent, paths=None, effort=False):
+        if incumbent is None:
+            return None
+        best = incumbent
+        floor = route_floor(starts, goals, paths)
+        if len(best) <= floor:
+            return best
+        attempt_sets = [ROUTER_ATTEMPTS, hot_attempts]
+        if effort:
+            attempt_sets = [hot_attempts, ROUTER_ATTEMPTS]
+        scales = (0.0, 1.0, 0.5) if not effort else (0.0, 0.5, 1.0)
+        steps = (6, 3, 1) if not effort else (10, 6, 3, 1)
+        for step in steps:
+            while True:
+                cap = len(best) - step
+                if cap < floor:
+                    break
+                improved = False
+                for attempts in attempt_sets:
+                    for scale in scales:
+                        try:
+                            got = plan_moves(starts, goals, static, rows, cols,
+                                             paths=paths, site_cost=scaled_cost(scale),
+                                             attempts=attempts, max_rounds=cap)
+                        except RouteError:
+                            continue
+                        if not ends_at(starts, got, goals):
+                            continue
+                        if len(got) < len(best) or (len(got) == len(best) and route_key(got) < route_key(best)):
+                            best = got
+                            improved = True
+                            break
+                    if improved:
+                        break
+                if not improved:
+                    break
+                if len(best) <= floor:
+                    return best
+        return best
+
+    def transport(goals, paths=None, effort=False):
+        opts = route_options(live, goals, paths=paths, effort=effort)
+        if not opts:
+            try:
+                got = plan_moves(live, goals, static, rows, cols,
+                                 paths=paths, site_cost=site_cost,
+                                 attempts=ROUTER_ATTEMPTS)
+            except RouteError as e:
+                raise RouteError("no legal transport strategy for gap") from e
+            got = squeeze_rounds(live, goals, got, paths=paths, effort=effort)
+        else:
+            got = min(opts, key=route_key)
+            got = squeeze_rounds(live, goals, got, paths=paths, effort=effort)
+
+        commit(got)
+
+        # Hard safety crossover: if an aggressive search returned a legal move
+        # stream but did not leave every gate-critical ion exactly on its target,
+        # correct before emitting merge/gate phases.
+        bad = {q: s for q, s in goals.items() if live.get(q) != as_site(s)}
+        if bad:
+            fix = plan_moves(live, bad, static, rows, cols,
+                             site_cost=site_cost, attempts=ROUTER_ATTEMPTS)
+            commit(fix)
+        return len(got)
+
+    round_sites = [geo["anc_sites"](t) for t in range(n_rounds)]
+    round_pairs = [geo["required_pairs"](t) for t in range(n_rounds)]
+
+    def _choose_split_pairs(t, pairs, sites):
+        # Default split used by older plans: return to the host-side junction.
+        default = [[dq, ["J", int(sites[aq][1]), int(sites[aq][2])]]
+                   for dq, aq in pairs]
+
+        # Build "where this data wants to be next" map.
+        ref_goal = {}
+        if t + 1 < n_rounds:
+            for ndq, naq in round_pairs[t + 1]:
+                ns = round_sites[t + 1][naq]
+                ref_goal[ndq] = ("J", int(ns[1]), int(ns[2]))
+        for dq, _aq in pairs:
+            ref_goal.setdefault(dq, home[dq])
+
+        # Candidate split sites: only host-adjacent junctions (always legal).
+        all_cols = []
+        col_idx = {}
+        allowed_by_row = []
+        for dq, aq in pairs:
+            _k, r, c = sites[aq]
+            cand = []
+            if c < cols:
+                cand.append(("J", int(r), int(c)))
+            if c > 0:
+                cand.append(("J", int(r), int(c - 1)))
+            # De-dup while preserving deterministic order.
+            uniq = []
+            seen_local = set()
+            for s in cand:
+                if s not in seen_local:
+                    uniq.append(s)
+                    seen_local.add(s)
+                if s not in col_idx:
+                    col_idx[s] = len(all_cols)
+                    all_cols.append(s)
+            allowed_by_row.append(uniq)
+
+        # If the shared candidate pool is too small, stay with safe default.
+        if len(all_cols) < len(pairs):
+            return default
+
+        BIG = 10 ** 7
+        cost = [[BIG] * len(all_cols) for _ in pairs]
+        for i, (dq, aq) in enumerate(pairs):
+            _k, r, c = sites[aq]
+            canonical = ("J", int(r), int(c))
+            for s in allowed_by_row[i]:
+                j = col_idx[s]
+                d_next = site_dist(s, ref_goal[dq], rows, cols)
+                d_home = site_dist(s, home[dq], rows, cols)
+                stay_bias = 0 if s == canonical else 1
+                # Prioritize next-gap shortening, then cyclic drift to home.
+                cost[i][j] = 100 * d_next + 8 * d_home + stay_bias
+
+        assign = _hungarian(cost)
+        if len(assign) != len(pairs):
+            return default
+        out = []
+        used_targets = set()
+        for i, j in enumerate(assign):
+            if j < 0 or j >= len(all_cols) or cost[i][j] >= BIG:
+                return default
+            s = all_cols[j]
+            if s in used_targets:
+                return default
+            used_targets.add(s)
+            dq, _aq = pairs[i]
+            out.append([dq, [s[0], int(s[1]), int(s[2])]])
+        return out
+
     for t in range(n_rounds):
-        sites = geo["anc_sites"](t)               # where each ancilla must be
-        pairs = geo["required_pairs"](t)          # (data qid, ancilla qid)
-        # the data ion meets its ancilla on the JUNCTION next to the ancilla's
-        # rail section, one edge away, which is what a merge requires
+        sites = round_sites[t]
+        pairs = round_pairs[t]
+
         dgoal = {}
         for dq, aq in pairs:
             _k, r, c = sites[aq]
@@ -1205,74 +1712,128 @@ def build_embedding_and_shuttle(spec):
         assert len(set(sites.values()) | set(dgoal.values())) == n_sim
 
         if t == 0:
-            # the layout already stands the ancillas on their round-0 sites,
-            # so this gap is only the data ions' approach hop
             transport(dgoal)
         else:
+            goals_all = dict(sites)
+            goals_all.update(dgoal)
+            direct_floor = route_floor(live, goals_all)
+            hot_gap = (t in (2, 4, 5)) or direct_floor >= 45
+
+            candidates = []
+            candidates.extend(route_options(live, goals_all, effort=hot_gap))
+
             outp, backp, n_out, n_back = {}, {}, 0, 0
             for dq, gsite in dgoal.items():
                 outp[dq] = shortest_path(live[dq], home[dq], rows, cols, static)
                 backp[dq] = shortest_path(home[dq], gsite, rows, cols, static)
                 n_out = max(n_out, len(outp[dq]))
                 n_back = max(n_back, len(backp[dq]))
+
             park = dict(sites)
-            dry = plan_moves(live, park, static, rows, cols, paths=outp,
-                             site_cost=site_cost)
-            merged = None
-            if len(dry) - n_out - n_back >= 0:
-                # pad each data route with waits so it comes back out exactly
-                # as the ancillas arrive
-                mp = {dq: outp[dq]
-                      + [None] * (len(dry) - len(outp[dq]) - len(backp[dq]))
-                      + backp[dq] for dq in dgoal}
+            dry_opts = route_options(live, park, paths=outp, effort=hot_gap)
+            dry_opts = sorted(dry_opts, key=route_key)[:2]
+
+            for dry in dry_opts:
+                if len(dry) - n_out - n_back >= 0:
+                    mp = {
+                        dq: outp[dq]
+                        + [None] * (len(dry) - len(outp[dq]) - len(backp[dq]))
+                        + backp[dq]
+                        for dq in dgoal
+                    }
+                    candidates.extend(route_options(
+                        live, park, paths=mp, effort=hot_gap,
+                        max_rounds=len(dry) + n_back - 1))
+
                 try:
-                    merged = plan_moves(live, park, static, rows, cols,
-                                        paths=mp, site_cost=site_cost,
-                                        max_rounds=len(dry) + n_back - 1)
+                    after_dry = apply_rounds(dry, dict(live))
+                    back_opts = route_options(after_dry, dgoal, effort=hot_gap)
+                    for back in sorted(back_opts, key=route_key)[:2]:
+                        combo = dry + back
+                        if ends_at(live, combo, goals_all):
+                            candidates.append(combo)
                 except RouteError:
-                    merged = None
-            if merged is not None and len(merged) < len(dry) + n_back:
-                emit_moves(timeline, merged)
-                apply_rounds(merged, live)
-            else:                                  # two-phase fallback
-                emit_moves(timeline, dry)
-                apply_rounds(dry, live)
-                transport(dgoal)
+                    pass
+
+            candidates = [c for c in candidates if ends_at(live, c, goals_all)]
+            if not candidates:
+                base_gap = plan_moves(live, goals_all, static, rows, cols,
+                                      site_cost=site_cost, attempts=ROUTER_ATTEMPTS)
+                best_gap = squeeze_rounds(live, goals_all, base_gap,
+                                          paths=None, effort=hot_gap)
+            else:
+                best_gap = min(candidates, key=route_key)
+                best_gap = squeeze_rounds(live, goals_all, best_gap,
+                                          paths=None, effort=hot_gap)
+
+            commit(best_gap)
+            bad = {q: s for q, s in goals_all.items() if live.get(q) != as_site(s)}
+            if bad:
+                fix = plan_moves(live, bad, static, rows, cols,
+                                 site_cost=site_cost, attempts=ROUTER_ATTEMPTS)
+                commit(fix)
+
+        # Alignment precheck before frozen merge emission.
+        for dq, aq in pairs:
+            if live.get(aq) != as_site(sites[aq]):
+                fix = plan_moves(live, {aq: sites[aq]}, static, rows, cols,
+                                 site_cost=site_cost, attempts=ROUTER_ATTEMPTS)
+                commit(fix)
+            _k, r, c = sites[aq]
+            if live.get(dq) != ("J", r, c):
+                fix = plan_moves(live, {dq: ("J", r, c)}, static, rows, cols,
+                                 site_cost=site_cost, attempts=ROUTER_ATTEMPTS)
+                commit(fix)
+
+        split_pairs = _choose_split_pairs(t, pairs, sites)
 
         timeline.append({"t": "merge", "pairs": [[dq, aq] for dq, aq in pairs]})
         timeline.append({"t": "gate", "round": t})
-        timeline.append({"t": "split",
-                         "pairs": [[dq, ["J", sites[aq][1], sites[aq][2]]]
-                                   for dq, aq in pairs]})
-        # merge + split are a no-op on the router's state: every data ion
-        # leaves the junction it merged from and returns to exactly that one.
+        timeline.append({"t": "split", "pairs": split_pairs})
+
+        # Keep simulator state aligned with emitted split targets so subsequent
+        # inter-gate routing amortizes wrap-back work across the cycle.
+        seen_split = set()
+        for dq, tgt in split_pairs:
+            st = as_site(tgt)
+            if st in seen_split:
+                raise RouteError("duplicate split target in emitted split round")
+            seen_split.add(st)
+            live[dq] = st
+
         if t == n_rounds - 1:
             timeline.append({"t": "measure", "ancillas": list(anc_ids)})
 
-    # ---- cycle boundary -------------------------------------------------
-    # Data (and the static beacons/reservoir) must end on their OWN layout
-    # site. Each ANCILLA SPECIES only has to restore its own occupied SET --
-    # the residual permutation is absorbed by relabelling the ancilla in
-    # software, which is what the paper itself does (Alg. 1 line 2, p.30) and
-    # is invisible to a circuit keyed on the check index. This geometry's last
-    # round already stands each species on its own site set, so only the data
-    # ions walk home; the greedy fallback keeps the builder correct for a
-    # schedule (or another code) whose residual is NOT set-preserving.
-    goals = {q: home[q] for q in geo["data_ids"]}
-    half = len(anc_ids) // 2
-    for species in (anc_ids[:half], anc_ids[half:]):
-        want = sorted(home[q] for q in species)
-        if sorted(live[q] for q in species) == want:
+
+    # ---- cycle boundary (shipped-seed rule, added by the v3 salvage) -----
+    # v3 was evolved when EVERY ion had to end on its exact site, so its
+    # SECTION 3 ended with transport(home) -- a full walk home for all 140
+    # ions. The current evaluator only requires each ancilla SPECIES to
+    # restore its own occupied SET. This is the shipped seeds' block verbatim.
+    _goals = dict((q, home[q]) for q in geo["data_ids"])
+    _half = len(anc_ids) // 2
+    for _species in (anc_ids[:_half], anc_ids[_half:]):
+        _want = sorted(home[q] for q in _species)
+        if sorted(live[q] for q in _species) == _want:
             continue                     # set already restored -- no travel
-        free = list(want)
-        for q in sorted(species,
-                        key=lambda x: (-min(site_dist(live[x], s, rows, cols)
-                                            for s in want), x)):
-            pick = min(free, key=lambda s: (site_dist(live[q], s, rows, cols),
-                                            s))
-            free.remove(pick)
-            goals[q] = pick
-    transport(goals)
+        _free = list(_want)
+        for _q in sorted(_species,
+                         key=lambda x: (-min(site_dist(live[x], s, rows, cols)
+                                             for s in _want), x)):
+            _pick = min(_free, key=lambda s: (site_dist(live[_q], s, rows,
+                                                        cols), s))
+            _free.remove(_pick)
+            _goals[_q] = _pick
+    try:
+        transport(_goals, effort=True)
+    except RouteError:
+        commit(plan_moves(live, _goals, static, rows, cols,
+                          site_cost=site_cost, attempts=ROUTER_ATTEMPTS))
+    _bad = dict((q, s) for q, s in _goals.items() if live.get(q) != as_site(s))
+    if _bad:
+        commit(plan_moves(live, _bad, static, rows, cols,
+                          site_cost=site_cost, attempts=ROUTER_ATTEMPTS))
+    # ---- end cycle boundary ---------------------------------------------
 
     return {
         "grid": {"rows": rows, "cols": cols},

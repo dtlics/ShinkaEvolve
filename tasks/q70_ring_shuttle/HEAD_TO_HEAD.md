@@ -181,8 +181,10 @@ it mentions positions, movement or time.
 Every candidate must satisfy exactly this, so every candidate ends up running a
 byte-identical quantum circuit with the same error-correcting power. **Two plans
 differ only in where the ions live and how they walk** — which is why this is a
-pure hardware-mapping problem, and why fidelity barely moves between plans while
-speed and chip area move a lot.
+pure hardware-mapping problem, and why speed and chip area move much more between
+plans than fidelity does. *Much more*, not *only*: fidelity does move, and by a
+measured 14–16% between our best plan and the paper-equivalent one — see
+"The LER head-to-head" in Part 2.
 
 ### Stage 1 — GEOMETRY: map the rings onto the chip *(SECTION 1 of each seed)*
 
@@ -351,42 +353,260 @@ landing on two different codes is what licenses the rest.
 Normalising **into the paper's own accounting formula** (`rounds/20 + 2 one-qubit
 layers + 8 two-qubit layers + 3 readout`), so only the transport count differs:
 
-| | transport rounds | SEC time (their formula) | exposure → LER | rail sections |
+| | transport rounds | SEC time (their formula) | exposure | rail sections |
 |---|---|---|---|---|
 | **paper Q70** | 424 | 34.20 POC | 536.06 | ~288 |
-| **ours — `initial_folded`** | **300** (−29%) | **28.00 POC** (−18.1%) | 527.38 (−1.62% ⇒ ~8% LER) | 283 (−1.7%) |
-| **ours — `initial_evolved`** | 310 (−27%) | 28.50 POC (−16.7%) | 528.08 (−1.49% ⇒ ~7% LER) | **277** (−3.8%) |
+| **ours — `initial_annealed` (best)** | **244** (−42%) | **25.20 POC** (−26.3%) | **523.46** (−2.35%) | 304 (+5.6%) |
+| ours — `initial_folded` | 300 (−29%) | 28.00 POC (−18.1%) | 527.38 (−1.62%) | **283** (−1.7%) |
+| ours — `initial_evolved` | 310 (−27%) | 28.50 POC (−16.7%) | 528.08 (−1.49%) | **277** (−3.8%) |
 
-*(Both seed rows moved at v6.1, when their routers were taught the chip's real
-step rules — before that they read 375 / 287 and 358 / 301. No layout constant
-changed; the plans simply stopped taking 5 steps where 3 were available.)*
+*(The two routed seeds moved at v6.1, when their routers were taught the chip's
+real step rules — before that they read 375 / 287 and 358 / 301. No layout
+constant changed; the plans simply stopped taking 5 steps where 3 were
+available. `initial_annealed` arrived later, salvaged from run `q70ring_v3`.)*
 
-**Read this as a real speed win, on one axis.** Same chip graph, same
-cycle-boundary convention, same 220 ions, same circuit: 29% fewer transport
-rounds and an ~18% shorter core cycle. Two things keep it honest:
+**Read this as a real speed win.** Same chip graph, same cycle-boundary
+convention, same 220 ions, same circuit: 42% fewer transport rounds and a 26%
+shorter core cycle on the best plan. Two things keep it honest:
 
 - 424 is *their published number for their own hand design*. An idealized
   mechanical reconstruction of that same design on the corrected chip lands near
-  **355** — so "29% fewer" is a comparison against a published figure, not a
+  **355** — so "42% fewer" is a comparison against a published figure, not a
   claim that their strategy could not do better. Against that 355 reconstruction
-  the margin is ~15%;
-- and it is **not** an LER win — see below.
+  the margin is ~31%;
+- the area picture is **split**. The two routed seeds sit under the paper's ~288
+  rail sections (283 and 277); `initial_annealed` sits at 304, i.e. it buys its
+  rounds with ~6% more trap area.
 
-The area caveat this list used to carry is **gone**: both seeds are now under
-the paper's ~288 sections (283 and 277), where before v6.1 the fast one was at
-301. We now beat them on rounds and on area at the same time.
+### The LER head-to-head — measured, not asserted
 
-### Why LER barely moves, and what that means
+> This section used to be headed *"Why LER barely moves"* and concluded that a
+> shuttle plan buys time and area **but not fidelity**. That conclusion was
+> never measured — it was read off the exposure arithmetic with an assumed
+> exponent. It has now been measured, and the qualitative part of it was wrong.
 
-A transport round costs `p/2000` on each qubit; a two-qubit gate layer costs `p`
-on 70 pairs. So the entire plan-dependent share of the error budget is **~6%** of
-the total, and the frozen circuit dominates. Even *free* transport would improve
-LER by only ~25% versus the paper, and our actual 29% round saving buys ~8%.
+**Under one fixed decoder, `initial_annealed` has a 14–16% lower logical error
+rate than the paper-equivalent 424-round plan, at every physical error rate we
+can sample, at 7.6σ to 17σ.** What remains genuinely uncertain is not *whether* there
+is a gap but *how big it stays* at IonQ's p = 1e-4 operating point, where the
+LER is ~1e-10 and direct sampling is impossible.
 
-> **A shuttle plan buys time and chip area, not fidelity.** The honest claim for
-> this task is a faster, slightly smaller logical clock cycle at essentially
-> unchanged fidelity — which still matters, because every logical operation in
-> the architecture is priced in cycles.
+#### The baseline, and why it is a fair one
+
+`evaluate.build_circuit` reads exactly one key of a compiled plan —
+`compiled["segments"]`. Every other `compiled[...]` access in the file is in the
+scoring path. So the stim circuit, hence the DEM, hence the LER, is a function
+of the plan **only** through the ordered run-lengths of transport/merge
+segments, the gate order, and the prep/measure batch sizes. Layout, geometry,
+routing and footprint are invisible to the sampler. Reproducing Table XXVI's
+counts is therefore not an approximation of a fair baseline — for LER purposes
+it *is* the baseline.
+
+The baseline arm is our own 244-round plan padded to **424 transport rounds** with
+legal no-op "out and back" move phases (one ion steps to a free neighbouring
+well and steps back next round, restoring position before any other phase runs).
+`compile_plan` accepts it, it is noiseless-deterministic on both observables,
+and its exposure is **536.06 exactly**. Padding is charged exactly like real
+transport, because the noise model charges `140·p/2000` per round regardless of
+how many ions move.
+
+This is a **noise-profile equivalent, not a reconstruction of IonQ's embedding**.
+Its `zones`, `floor_total` and `combined_score` are meaningless as statements
+about their design; only exposure, transport/merge counts and the resulting LER
+curve carry meaning.
+
+#### How it was measured
+
+All seven arms are decoded from the **same shots**. Because the arms' DEMs have
+identical mechanism supports (31,710 of them) and differ only in per-mechanism
+probabilities, one fault configuration sampled from the reference arm's DEM can
+be reweighted to every other arm, `w(x) = P_arm(x)/P_ref(x)`. The ratio
+`R = LER_arm/LER_ref` is then the sample mean of `w` over failing shots, with a
+standard error set by `sd(w|F)` rather than by `sqrt(2/N)` — about 100× cheaper
+than sampling the arms independently. The DEM sampler was checked against stim's
+own circuit sampler: mean detector rate agrees to 0.04σ, per-detector z-scores
+are N(0,1) over all 700 detectors.
+
+One decoder, **relay-BP** (IBM `RelayDecoderF64`), is used for every arm. That
+is both the protocol the comparison requires — absolute LERs are not comparable
+across decoders, only a ratio under one decoder is — and a practical necessity,
+since relay-BP draws its relay gammas at random and per-arm decoders would make
+the failure indicator differ between arms for reasons unrelated to the plans.
+BP-OSD (`osd_order=0`) was measured here to be 84× weaker (LER/shot 3.52e-1 vs
+4.17e-3 at p = 4e-3) and 23× slower; and the DEM is **not decomposable**, so
+matching decoders (pymatching, beliefmatching) cannot be built at all.
+
+#### What was measured
+
+X observable, 9 SECs, relay-BP. `LER/SEC = 1 − (1 − LER/shot)^(1/9)`.
+
+| p | shots | failures | LER/SEC ours (244) | LER/SEC paper-equiv (424) | ratio paper/ours | ours lower by |
+|---|---|---|---|---|---|---|
+| 3.0e-3 | 45,000 | 19 | 4.69e-5 | 5.60e-5 | 1.1941 ± 0.0254 | 16.3% ± 1.8% (7.6σ) |
+| 3.5e-3 | 94,208 | 91 | 1.074e-4 | 1.273e-4 | 1.1855 ± 0.0132 | 15.6% ± 0.9% (14.1σ) |
+| 4.0e-3 | 36,864 | 128 | 3.864e-4 | 4.553e-4 | 1.1779 ± 0.0108 | 15.1% ± 0.8% (16.5σ) |
+| 4.5e-3 | 14,336 | 142 | 1.105e-3 | 1.287e-3 | 1.1631 ± 0.0104 | 14.0% ± 0.8% (15.7σ) |
+| 5.0e-3 | 6,144 | 169 | 3.094e-3 | 3.625e-3 | 1.1691 ± 0.0101 | 14.5% ± 0.7% (16.7σ) |
+| 5.0e-3 **(Z)** | 6,144 | 131 | 2.392e-3 | 2.777e-3 | 1.1594 ± 0.0123 | 13.8% ± 0.9% (12.9σ) |
+
+Three independent checks on that table:
+
+- **Reproducibility.** p = 4e-3 was measured twice with different seeds and
+  different decoder instances. The absolute LERs differ by 20% (1.3σ); the
+  *ratios* agree to 0.84σ (1.1951 ± 0.0173 vs 1.1779 ± 0.0108). Exactly the
+  behaviour the paired design predicts.
+- **Observable.** The Z observable is a different circuit and gives the same
+  answer (1.1594 ± 0.0123 vs 1.1691 ± 0.0101 for X).
+- **Decoder priors.** The single decoder is built on *our* DEM, which understates
+  the higher-transport arms' noise and so should flatter us. Rebuilding it on the
+  paper arm's DEM moves the ratio from 1.1691 to 1.1640 — a 0.005 shift against
+  a 0.010 statistical error, i.e. below the noise.
+
+#### The response law
+
+Five pure "lever" arms (300 / 424 / 424-with-16-merge/split / 600 / 1000
+transport rounds — the same plan padded by different amounts) span a 13× range
+of exposure change, from +0.75% to +10.1%, and are decoded from the same shots at
+zero extra cost. Within that family, LER is an **exact** power law in noise
+exposure:
+
+| p | η = d ln LER / d ln exposure | χ²/dof over 5 lever arms |
+|---|---|---|
+| 3.0e-3 | 7.43 ± 0.44 | 0.03 |
+| 3.5e-3 | 7.15 ± 0.21 | 0.00 |
+| 4.0e-3 | 6.85 ± 0.17 | 0.06 |
+| 4.5e-3 | 6.31 ± 0.17 | 0.13 |
+| 5.0e-3 | 6.50 ± 0.16 | 0.12 |
+
+χ²/dof ≈ 0.1 across arms spanning +0.75% to +10.1% exposure means the exposure
+scalar predicts LER, within this family, to better than the measurement error.
+That validates the substitution the score relies on: **exposure is not a proxy
+for LER, it is the control variable.** The 14→16 merge/split ambiguity in
+Table XXVI is measurable and negligible: exposure 536.06 vs 536.20 gives ratios
+1.1779 vs 1.1799, a 0.2% difference in LER.
+
+#### The falsifiable prediction, and how it came out
+
+The 300-round lever and the real `initial_folded` plan have **identical exposure
+(527.38)** and identical segment structure, but very different per-gap transport
+distributions (`[4,42,53,32,61,48,55,5]` vs `[4,32,43,42,39,40,47,53]`) and
+completely different layouts (283 vs 304 rail sections). If LER were a function
+of exposure alone they would have to agree.
+
+**They do not.** Combined over five independent points (four p values plus the Z
+observable):
+
+> R(`initial_folded`) − R(300-round lever) = **+0.0153 ± 0.0030 → 5.2σ**
+
+The real plan's LER is **1.5% ± 0.3% higher** than an equal-exposure padded plan.
+Expressed as an effective exposure, `initial_folded` behaves like a
+same-shaped plan carrying 528–529 rather than its nominal 527.38 — a penalty
+worth roughly **10–24 extra transport rounds**. So the middle point *does* land
+where it was predicted to land — between ours and the paper's, in the right order
+and within 1.5% of the right magnitude — but the exposure-**only** model is
+**rejected at 5σ**: where the transport rounds sit in the cycle matters, not just
+how many there are. That 1.5% is the right scale for a plan-shape systematic on
+the headline number, and it is the reason caveat 2 below exists.
+
+#### The claim at the operating point
+
+The measured ratio is exposure^η with an exposure ratio of
+536.06/523.46 = 1.024071, so the extrapolation to p = 1e-4 is *entirely* a choice
+of η; the statistics contribute nothing (they are already at 16σ).
+
+| η | where it comes from | LER reduction |
+|---|---|---|
+| 7.4 → 6.5 | **measured**, p = 3e-3 → 5e-3 | 16.2% → 14.3% |
+| 5.00 | ⌈d_circ/2⌉ — the p→0 value *if* transport faults appear in minimal failing sets in proportion to their share of the exposure | **11.2%** |
+| 4.68 | local exponent of the paper's own published ansatz at p = 1e-4 | 10.5% |
+
+Two things block a real extrapolation, and both are stated rather than papered
+over. First, η is measured to *rise* as p falls (6.50 at 5e-3 → 7.43 at 3e-3),
+while theory says it must converge to a p-independent combinatorial constant as
+p → 0; the two disagree about direction, so the trend cannot be run down to
+1e-4. Second, the ratio η/ν against the LER-vs-p exponent ν — which would have
+been a clean bridge, since ν is known at 1e-4 from the paper's own ansatz — is
+**not constant** (1.02 at p = 3e-3 falling monotonically to 0.62 at 5e-3,
+χ²/dof = 34 against a constant), so that bridge is abandoned too.
+
+> **The defensible statement.** Ours is **14–16% below the paper-equivalent
+> 424-round plan at every p we can measure**, and at the p = 1e-4 operating point
+> the reduction is bracketed at **10.5%–16%**, with **~11%** the value to quote if
+> a single number is needed — because η = 5 is what both the paper's own
+> prefactor and this task's score already assume, and it is the conservative end
+> of what we measured.
+
+The structural reason the effect is bounded is unchanged and still worth
+internalising: a transport round costs `p/2000` on each qubit while a two-qubit
+gate layer costs `p` on 70 pairs, so the whole plan-dependent share of the error
+budget is ~3.5% of exposure and the frozen circuit dominates. Even **free**
+transport would buy only 25% (at η = 5) to 32% (at the measured η) against the
+paper. What changed is the conclusion drawn from that: a bounded effect is not
+the same as no effect, and the 11–15% actually on offer is worth measuring
+rather than dismissing.
+
+#### Fits, and what not to do with them
+
+Fitting the paper's own form `LER/SEC = p^5 exp(αp² + βp + ζ)` to the five
+X-observable points gives, per arm:
+
+| arm | α | β | ζ | χ²/dof | → p = 1e-3 | → p = 1e-4 |
+|---|---|---|---|---|---|---|
+| ours (244) | 8.67e4 | +245 | 17.33 | 2.6/2 | 4.70e-8 | 3.46e-13 |
+| paper-equiv (424) | 9.63e4 | +155 | 17.70 | 2.6/2 | 6.26e-8 | 4.95e-13 |
+| lever 1000 | 1.30e5 | −165 | 18.92 | 1.9/2 | 1.59e-7 | 1.62e-12 |
+| **IonQ published** | **1.07e6** | **−3410** | **23.0** | — | **9.39e-7** | **7.00e-11** |
+
+A pure power law `LER ∝ p^ν` gives ν = 9.01 ± 0.30 with χ²/dof = 5.6/3 — a poor
+fit, so there is real curvature, but the three-parameter form is only barely
+determined by five near-threshold points (the arms with four points fit to an α
+of the *wrong sign*). **These extrapolations are not defensible as absolute
+predictions** and are shown only for completeness: they sit ~200× below IonQ's
+published curve at 1e-4, which is what happens when a near-threshold slope is
+run out 1.5 decades.
+
+In particular, **do not divide the two extrapolated curves**: paper-fit/ours-fit
+at 1e-4 comes out at 1.43, implying η ≈ 15, which is nonsense. The two arms are
+measured on the same shots and their per-shot failure statistics are correlated
+at **0.994** (measured, p = 5e-3); fitting them independently throws that
+correlation away and then amplifies the residue over 1.5 decades. The ratio must
+come from the paired estimator, which is what every number above does.
+
+#### Caveats, in full
+
+1. **Different decoder from the paper.** Theirs is beam search, ours is relay-BP.
+   Absolute LERs are **not** comparable. Our measured curve happens to sit *below*
+   their published one across the whole plotted range (~20× at p = 1e-3, ~200× at
+   p = 1e-4 by our fit) — **this is not a fidelity claim**. It is a different
+   decoder, a different observable normalisation, and an ansatz of theirs whose
+   `exp(αp²)` term with α = 1.07e6 was fitted far below our measurement window
+   and rises very steeply inside it. Only the ratio between our two arms, under
+   one decoder, is interpretable. The published curve is on the figure for
+   context and is labelled as such.
+2. **The baseline is a noise-profile equivalent**, not IonQ's plan. It inherits
+   *our* per-gap shape, and the falsifiability test above shows plan shape is
+   worth ~1.5% in LER — so a ±1.5%-scale systematic sits on the headline number
+   from this alone. It is the largest systematic identified, an order of
+   magnitude above the decoder-prior one.
+3. **η at the operating point is not measured and cannot be**, which is where all
+   the remaining uncertainty lives.
+4. **X-observable only** except at p = 5e-3. "Failure" means any of the 6 X
+   logicals misdecoded over 9 SECs; the paper's normalisation may differ, which
+   is another reason absolutes do not transfer.
+5. **Sampling stopped on an error budget**, which biases a single LER estimate
+   upward by O(1/k) ≈ 1%. It cancels in the paired ratios.
+6. **9 SECs, not a full memory experiment**; the per-SEC conversion assumes the
+   SECs fail independently, which is the paper's convention.
+7. **424 is IonQ's published figure for a hand design**, not a floor for their
+   strategy. Against the ~355-round mechanical reconstruction the exposure gap
+   shrinks to 1.48% and the reduction to ~7% (η = 5) / ~9% (measured η).
+
+*Artifacts: `ler_headtohead.png` (log-log LER/SEC vs p with the fits and IonQ's
+published curve, plus the exposure response law), `h2h_report.txt` (the full
+numeric report), `ler_campaign.py` (runner), `paper_equiv_plan.py` (baseline
+builder), `analyze_h2h.py` (fits/plot), and the `campaign_*.json` checkpoints —
+all in the working scratchpad, outside the repo. ~224,000 shots decoded (each
+scoring all seven arms by reweighting), ~5.5 h wall clock on 24 cores.*
 
 ---
 
@@ -414,15 +634,19 @@ LER by only ~25% versus the paper, and our actual 29% round saving buys ~8%.
    1.7–2.1× floor to 1.27–1.34× (as the floor was then measured): 566 → 421 and
    700 → 446 rounds. That is the whole difference between "34% worse than the
    paper" and "level with it".
-5. **The comparison itself was mis-stated**, four times now, each time in a way
-   that made us look *worse* or the bar look wronger, and each time corrected:
+5. **The comparison itself was mis-stated**, five times now, each time corrected:
    the footprint bar compared vertices against trap sections (a 3.7× error); an
-   LER win was implied where there is a tie; the chip over-charged vertical
-   motion by 67%; and the cycle boundary demanded a walk home the paper's own
-   algorithm does not make. The last two are the 2026-07-29 corrections in
-   Part 2, worth 421 → 358 rounds on the best seed with **no change to any
-   plan's actual movement** — they only stopped charging for things the hardware
-   does not charge for.
+   LER win was first *implied* on no evidence, then *denied* on no evidence; the
+   chip over-charged vertical motion by 67%; and the cycle boundary demanded a
+   walk home the paper's own algorithm does not make. The chip and boundary fixes
+   are the 2026-07-29 corrections in Part 2, worth 421 → 358 rounds on the best
+   seed with **no change to any plan's actual movement** — they only stopped
+   charging for things the hardware does not charge for. The LER question was
+   finally settled by measuring it rather than arguing from the exposure
+   arithmetic: there *is* a win, 14–16% at every p we can sample, ~11% at the
+   operating point under the paper's own exponent. **The lesson is that both the
+   optimistic and the pessimistic version of that claim were asserted, for
+   months, without a single logical error being sampled in anger.**
 6. **The floor is a Stage-1 property and is now clearly the deepest lever.**
    Since l = 7 and m = 5 are coprime, the ring torus is isomorphic to Z₃₅, so
    every realignment collapses to **one** 1-D rotation instead of two per-axis
